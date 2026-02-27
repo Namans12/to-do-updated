@@ -28,6 +28,16 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
     if (hasHighlightedTodo) setExpanded(true);
   }, [hasHighlightedTodo]);
 
+  useEffect(() => {
+    if (!highlightTodoId || !hasHighlightedTodo) return;
+    const timer = setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(`[data-conn-todo-id="${highlightTodoId}"]`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [highlightTodoId, hasHighlightedTodo, expanded]);
+
   const handleToggle = async (todoId: string) => {
     try {
       await todosApi.toggleComplete(todoId);
@@ -194,14 +204,14 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                     <div
                       key={item.id}
                       data-conn-todo-id={item.todo_id}
-                      className={`flex items-stretch ${
-                        highlightTodoId === item.todo_id
-                          ? "rounded-lg bg-indigo-500/10 dark:bg-indigo-500/15"
-                          : ""
-                      }`}
+                      className="flex items-stretch relative"
+                      style={highlightTodoId === item.todo_id ? { scrollMarginTop: 160 } : undefined}
                     >
+                      {highlightTodoId === item.todo_id && (
+                        <div className="absolute -top-1 left-5 right-0 h-full rounded-xl bg-indigo-500/10 dark:bg-indigo-500/15 pointer-events-none" />
+                      )}
                       {/* Node dot + line */}
-                      <div className="flex flex-col items-center mr-3 w-5">
+                      <div className="flex flex-col items-center mr-3 w-5 relative z-10">
                         <button
                           onClick={() => handleToggle(item.todo_id)}
                           className={`w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 z-10 transition-all duration-300 cursor-pointer hover:scale-125 relative ${
@@ -243,7 +253,7 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                       </div>
 
                       {/* Item text */}
-                      <div className="flex-1 pb-2">
+                      <div className="flex-1 pb-2 relative z-10">
                         <div className="flex items-center gap-2">
                           <span
                             className={`text-[13px] transition-all duration-300 ${
