@@ -201,7 +201,7 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
             transition-all duration-300
             ${
               isCompleted
-                ? "bg-indigo-500 border-indigo-500 text-white"
+                ? "bg-emerald-500 border-emerald-500 text-white"
                 : "border-slate-300 dark:border-slate-600 hover:border-indigo-400 dark:hover:border-indigo-500"
             }
             ${isChecking ? "animate-check-bounce" : ""}

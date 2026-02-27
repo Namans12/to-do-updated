@@ -294,6 +294,9 @@ function ConnectionCard({
         <div className="pl-1 pt-2">
           {connection.items.map((item, index) => {
             const isNext = index === nextTaskIndex;
+            const nextItem = connection.items[index + 1];
+            const isDone = item.is_completed === 1;
+            const isNextDone = nextItem?.is_completed === 1;
 
             return (
               <div key={item.id} className="flex items-stretch">
@@ -304,7 +307,7 @@ function ConnectionCard({
                     onClick={() => onToggleTodo(item.todo_id)}
                     className={`w-4 h-4 rounded-full border-2 flex-shrink-0 z-10 transition-all duration-300 cursor-pointer hover:scale-125 relative ${
                       item.is_completed
-                        ? "bg-indigo-500 border-indigo-500 shadow-lg shadow-indigo-500/30"
+                        ? "bg-emerald-500 border-emerald-500 shadow-lg shadow-emerald-500/30"
                         : isNext
                         ? "border-indigo-400 dark:border-indigo-500 bg-indigo-500/20 ring-2 ring-indigo-400/30 animate-pulse-soft"
                         : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
@@ -318,12 +321,23 @@ function ConnectionCard({
                   {index < connection.items.length - 1 && (
                     <div
                       className={`w-0.5 flex-1 min-h-[28px] transition-all duration-500 ${
-                        item.is_completed
-                          ? "bg-indigo-500/40"
-                          : isNext
+                        !isDone && !isNextDone
+                          ? isNext
                           ? "bg-indigo-400/20"
                           : "bg-slate-200 dark:bg-slate-700"
+                          : ""
                       }`}
+                      style={
+                        isDone && isNextDone
+                          ? { backgroundColor: "rgba(16,185,129,0.55)" }
+                          : isDone || isNextDone
+                          ? {
+                              backgroundImage: isDone
+                                ? "linear-gradient(to bottom, rgba(16,185,129,0.7) 0%, rgba(16,185,129,0.7) 35%, rgba(99,102,241,0.45) 65%, rgba(99,102,241,0.45) 100%)"
+                                : "linear-gradient(to bottom, rgba(99,102,241,0.45) 0%, rgba(99,102,241,0.45) 35%, rgba(16,185,129,0.7) 65%, rgba(16,185,129,0.7) 100%)",
+                            }
+                          : undefined
+                      }
                     />
                   )}
                 </div>
