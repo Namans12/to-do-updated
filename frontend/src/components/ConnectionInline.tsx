@@ -1,0 +1,279 @@
+import { useEffect, useState } from "react";
+import { todosApi, connectionsApi } from "../api/client";
+import { useApp } from "../context/AppContext";
+import type { Connection } from "../types";
+import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import toast from "react-hot-toast";
+
+interface ConnectionInlineProps {
+  connection: Connection;
+  highlightTodoId?: string | null;
+}
+
+export default function ConnectionInline({ connection, highlightTodoId = null }: ConnectionInlineProps) {
+  const { refreshTodos, refreshConnections } = useApp();
+  const [expanded, setExpanded] = useState(false);
+  const { progress, is_fully_complete } = connection;
+
+  const nextTaskIndex = connection.items.findIndex(
+    (item) => !item.is_completed
+  );
+  const nextTask = nextTaskIndex >= 0 ? connection.items[nextTaskIndex] : null;
+  const hasHighlightedTodo = !!(
+    highlightTodoId && connection.items.some((item) => item.todo_id === highlightTodoId)
+  );
+
+  useEffect(() => {
+    if (hasHighlightedTodo) setExpanded(true);
+  }, [hasHighlightedTodo]);
+
+  const handleToggle = async (todoId: string) => {
+    try {
+      await todosApi.toggleComplete(todoId);
+      await refreshTodos();
+      await refreshConnections();
+    } catch {
+      toast.error("Failed to update");
+    }
+  };
+
+  const handleDeleteChain = async () => {
+    try {
+      await connectionsApi.delete(connection.id);
+      await refreshConnections();
+      toast.success("Connection deleted");
+    } catch {
+      toast.error("Failed to delete connection");
+    }
+  };
+
+  const handleRemoveItem = async (todoId: string) => {
+    try {
+      await connectionsApi.removeItem(connection.id, todoId);
+      await refreshConnections();
+      toast.success("Removed from connection");
+    } catch {
+      toast.error("Failed to remove item");
+    }
+  };
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, x: -24, transition: { duration: 0.2 } }}
+      transition={{ duration: 0.25 }}
+      className={`glass rounded-xl overflow-hidden border-l-4 group/conn ${
+        is_fully_complete
+          ? "border-l-emerald-500 dark:border-l-emerald-400"
+          : "border-l-indigo-500 dark:border-l-indigo-400"
+      }`}
+    >
+      {/* Header row — shows connection name + next task */}
+      <div className="px-4 py-3">
+        <div className="flex items-center gap-3">
+          {/* Connection icon / checkbox */}
+          <div
+            className={`flex-shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all duration-300 ${
+              is_fully_complete
+                ? "bg-emerald-500 border-emerald-500 text-white"
+                : "border-indigo-400 bg-indigo-500/10"
+            }`}
+          >
+            {is_fully_complete ? (
+              <Check size={12} strokeWidth={3} className="text-white" />
+            ) : (
+              <Share2 size={10} className="text-indigo-500" />
+            )}
+          </div>
+
+          {/* Main content */}
+          <div className="flex-1 min-w-0">
+            {/* Connection name */}
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-xs font-semibold uppercase tracking-wider ${
+                  is_fully_complete
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : "text-indigo-600 dark:text-indigo-400"
+                }`}
+              >
+                {connection.name || "Connection"}
+              </span>
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                {progress.completed}/{progress.total}
+              </span>
+            </div>
+
+            {/* Current / Next task preview */}
+            {!is_fully_complete && nextTask ? (
+              <div className="flex items-center gap-2 mt-0.5">
+                <button
+                  onClick={() => handleToggle(nextTask.todo_id)}
+                  className="flex-shrink-0 w-4 h-4 rounded border-2 border-indigo-400 dark:border-indigo-500 bg-indigo-500/20 ring-2 ring-indigo-400/20 hover:scale-110 transition-transform cursor-pointer"
+                />
+                <span
+                  className={`text-sm font-medium truncate ${
+                    nextTask.high_priority === 1
+                      ? "text-amber-700 dark:text-amber-300"
+                      : "text-slate-900 dark:text-slate-100"
+                  }`}
+                >
+                  {nextTask.title}
+                </span>
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400 flex-shrink-0">
+                  <Zap size={8} />
+                  NEXT
+                </span>
+              </div>
+            ) : (
+              <span className="text-sm line-through text-slate-400 dark:text-slate-500 mt-0.5 block">
+                All steps complete
+              </span>
+            )}
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-0.5 flex-shrink-0">
+            <button
+              onClick={handleDeleteChain}
+              className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors opacity-0 group-hover/conn:opacity-100"
+              title="Delete connection"
+            >
+              <Trash2 size={13} className="text-slate-400 hover:text-red-500" />
+            </button>
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              {expanded ? (
+                <ChevronUp size={14} className="text-slate-400" />
+              ) : (
+                <ChevronDown size={14} className="text-slate-400" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Progress bar mini */}
+        <div className="mt-2 h-1 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+          <motion.div
+            className={`h-full rounded-full ${
+              is_fully_complete
+                ? "bg-gradient-to-r from-emerald-500 to-teal-400"
+                : "bg-gradient-to-r from-indigo-500 to-violet-500"
+            }`}
+            initial={{ width: 0 }}
+            animate={{ width: `${progress.percentage}%` }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
+          />
+        </div>
+      </div>
+
+      {/* Expanded: full node chain */}
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="px-4 pb-3 pt-1 border-t border-slate-100 dark:border-slate-800">
+              <div className="pl-1 pt-2">
+                {connection.items.map((item, index) => {
+                  const isNext = index === nextTaskIndex;
+
+                  return (
+                    <div
+                      key={item.id}
+                      data-conn-todo-id={item.todo_id}
+                      className={`flex items-stretch ${
+                        highlightTodoId === item.todo_id
+                          ? "rounded-lg bg-indigo-500/10 dark:bg-indigo-500/15"
+                          : ""
+                      }`}
+                    >
+                      {/* Node dot + line */}
+                      <div className="flex flex-col items-center mr-3 w-5">
+                        <button
+                          onClick={() => handleToggle(item.todo_id)}
+                          className={`w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 z-10 transition-all duration-300 cursor-pointer hover:scale-125 relative ${
+                            item.is_completed
+                              ? "bg-indigo-500 border-indigo-500 shadow-sm shadow-indigo-500/30"
+                              : isNext
+                              ? "border-indigo-400 dark:border-indigo-500 bg-indigo-500/20 ring-2 ring-indigo-400/20"
+                              : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
+                          }`}
+                        >
+                          {item.is_completed === 1 && (
+                            <Check
+                              size={7}
+                              className="absolute inset-0 m-auto text-white"
+                              strokeWidth={3}
+                            />
+                          )}
+                        </button>
+                        {index < connection.items.length - 1 && (
+                          <div
+                            className={`w-0.5 flex-1 min-h-[20px] transition-all duration-500 ${
+                              item.is_completed
+                                ? "bg-indigo-500/40"
+                                : "bg-slate-200 dark:bg-slate-700"
+                            }`}
+                          />
+                        )}
+                      </div>
+
+                      {/* Item text */}
+                      <div className="flex-1 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-[13px] transition-all duration-300 ${
+                              item.is_completed
+                                ? item.high_priority === 1
+                                  ? "line-through text-amber-500/70 dark:text-amber-300/60"
+                                  : "line-through text-slate-400 dark:text-slate-500"
+                                : isNext
+                                ? item.high_priority === 1
+                                  ? "font-medium text-amber-700 dark:text-amber-300"
+                                  : "font-medium text-slate-900 dark:text-slate-100"
+                                : item.high_priority === 1
+                                ? "text-amber-700 dark:text-amber-300"
+                                : "text-slate-600 dark:text-slate-400"
+                            }`}
+                          >
+                            {item.title}
+                          </span>
+                          {isNext && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400">
+                              <Zap size={8} />
+                              NEXT
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handleRemoveItem(item.todo_id)}
+                            className="ml-auto p-1 rounded hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors opacity-0 group-hover/conn:opacity-100"
+                            title="Remove from connection"
+                          >
+                            <X size={12} className="text-slate-400 hover:text-red-500" />
+                          </button>
+                        </div>
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                          Step {index + 1} of {connection.items.length}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}

@@ -1,0 +1,79 @@
+# ===============================
+# Backend (Python / FastAPI)
+# ===============================
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & type checking
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# ===============================
+# Frontend (Vite)
+# ===============================
+
+# Node modules
+frontend/node_modules/
+node_modules/
+
+# Build output
+frontend/dist/
+dist/
+
+# Vite cache
+frontend/.vite/
+.vite/
+
+# ===============================
+# Environment variables
+# ===============================
+
+.env
+.env.*
+!.env.example
+
+# ===============================
+# OS & Editor
+# ===============================
+
+# Mac
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# ===============================
+# Misc
+# ===============================
+
+# Data folders (if you store runtime data)
+data/
+
+# Temporary files
+*.tmp
+*.swp

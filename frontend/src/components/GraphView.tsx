@@ -1,0 +1,2085 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useApp } from "../context/AppContext";
+import { todosApi, connectionsApi } from "../api/client";
+import type { Todo } from "../types";
+import {
+  GitBranch,
+  FolderOpen,
+  Check,
+  Zap,
+  GripVertical,
+  Eye,
+  EyeOff,
+  Maximize2,
+  Minimize2,
+  Scissors,
+} from "lucide-react";
+import toast from "react-hot-toast";
+
+/* ─── Types ────────────────────────────────────────── */
+
+interface NodePosition {
+  x: number;
+  y: number;
+}
+
+interface DragState {
+  fromTodoId: string;
+  fromPortSide: "left" | "right" | "top" | "bottom";
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+}
+
+type PortSide = "left" | "right" | "top" | "bottom";
+type AdjPair = { a: string; b: string; axis: "x" | "y"; };
+
+/* ─── Constants ────────────────────────────────────── */
+
+const NODE_W = 180;
+const NODE_H = 60;
+const GRID = 20;          // matches background dot grid
+const BASE_CANVAS_W = 2400;   // virtual canvas width
+const BASE_CANVAS_H = 1600;   // virtual canvas height
+const NORMAL_VIEW_EXTRA_W = 360;
+const NORMAL_VIEW_EXTRA_H = 240;
+const SNAP_PX = 12;
+const PORT_SIDES: PortSide[] = ["left", "right", "top", "bottom"];
+const OVERLAP_EPS = 0.1;
+const LEFT_TOP_BOUNDARY = 20;
+const CUT_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f43f5e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cpath d='M20 4 8.12 15.88'/%3E%3Cpath d='M14.47 14.48 20 20'/%3E%3Cpath d='M8.12 8.12 12 12'/%3E%3C/svg%3E\") 6 6, crosshair";
+
+const snapGrid = (v: number, max: number, min = 0) =>
+  Math.round(Math.max(min, Math.min(v, max)) / GRID) * GRID;
+
+const canonicalPairKey = (a: string, b: string) =>
+  a < b ? `${a}|${b}` : `${b}|${a}`;
+
+const oppositeSide = (side: PortSide): PortSide => {
+  switch (side) {
+    case "left":
+      return "right";
+    case "right":
+      return "left";
+    case "top":
+      return "bottom";
+    case "bottom":
+      return "top";
+  }
+};
+
+const getPortAt = (
+  pos: Record<string, NodePosition>,
+  todoId: string,
+  side: PortSide
+): { x: number; y: number } | null => {
+  const p = pos[todoId];
+  if (!p) return null;
+  switch (side) {
+    case "left":
+      return { x: p.x, y: p.y + NODE_H / 2 };
+    case "right":
+      return { x: p.x + NODE_W, y: p.y + NODE_H / 2 };
+    case "top":
+      return { x: p.x + NODE_W / 2, y: p.y };
+    case "bottom":
+      return { x: p.x + NODE_W / 2, y: p.y + NODE_H };
+  }
+};
+
+const getClosestOppositePortsAt = (
+  pos: Record<string, NodePosition>,
+  fromId: string,
+  toId: string,
+  maxDistance = Number.POSITIVE_INFINITY
+) => {
+  let best:
+    | {
+        fromSide: PortSide;
+        toSide: PortSide;
+        from: { x: number; y: number };
+        to: { x: number; y: number };
+        dist: number;
+      }
+    | null = null;
+
+  for (const fromSide of PORT_SIDES) {
+    const fromPort = getPortAt(pos, fromId, fromSide);
+    if (!fromPort) continue;
+    const toSide = oppositeSide(fromSide);
+    const toPort = getPortAt(pos, toId, toSide);
+    if (!toPort) continue;
+    const dist = Math.hypot(toPort.x - fromPort.x, toPort.y - fromPort.y);
+    if (dist > maxDistance) continue;
+    if (!best || dist < best.dist) {
+      best = {
+        fromSide,
+        toSide,
+        from: fromPort,
+        to: toPort,
+        dist,
+      };
+    }
+  }
+
+  return best;
+};
+
+/* ─── Component ────────────────────────────────────── */
+
+export default function GraphView() {
+  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId } =
+    useApp();
+  const [groupId, setGroupId] = useState<string | null>(selectedGroupId);
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [positions, setPositions] = useState<Record<string, NodePosition>>({});
+  const [draggingNode, setDraggingNode] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [connectDrag, setConnectDrag] = useState<DragState | null>(null);
+  const [hoverTarget, setHoverTarget] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showPanel, setShowPanel] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCutMode, setIsCutMode] = useState(false);
+  const [canvasSize, setCanvasSize] = useState({
+    w: BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W,
+    h: BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H,
+  });
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<HTMLDivElement>(null);
+
+  // Keep graph group selection valid as groups are deleted/restored in real time.
+  useEffect(() => {
+    setGroupId((prev) => {
+      if (prev && groups.some((g) => g.id === prev)) return prev;
+      if (selectedGroupId && groups.some((g) => g.id === selectedGroupId)) {
+        return selectedGroupId;
+      }
+      return groups[0]?.id ?? null;
+    });
+  }, [groups, selectedGroupId]);
+
+  // Ensure Graph-aks reflects connection changes when opening this view.
+  useEffect(() => {
+    refreshConnections().catch(() => undefined);
+  }, [refreshConnections]);
+
+  /* ── Load todos ─────────────────────────────────── */
+
+  useEffect(() => {
+    if (!groupId) {
+      setTodos([]);
+      setLoading(false);
+      return;
+    }
+    const load = async () => {
+      setLoading(true);
+      try {
+        const data = await todosApi.list(groupId);
+        setTodos(data.filter((t) => !t.deleted_at));
+      } catch {
+        setTodos([]);
+        toast.error("Failed to load tasks");
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [groupId]);
+
+  /* ── Auto-layout ────────────────────────────────── */
+
+  useEffect(() => {
+    if (todos.length === 0) return;
+    const key = `graph-positions-${groupId}`;
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        const updated = { ...parsed };
+        let dirty = false;
+        todos.forEach((t, i) => {
+          if (!updated[t.id]) {
+            const cols = Math.max(3, Math.ceil(Math.sqrt(todos.length)));
+            updated[t.id] = {
+              x: snapGrid(
+                60 + (i % cols) * (NODE_W + 40),
+                canvasSize.w - NODE_W,
+                LEFT_TOP_BOUNDARY
+              ),
+              y: snapGrid(
+                60 + Math.floor(i / cols) * (NODE_H + 60),
+                canvasSize.h - NODE_H,
+                LEFT_TOP_BOUNDARY
+              ),
+            };
+            dirty = true;
+          } else {
+            const current = updated[t.id] as NodePosition;
+            const clampedX = snapGrid(
+              current.x,
+              canvasSize.w - NODE_W,
+              LEFT_TOP_BOUNDARY
+            );
+            const clampedY = snapGrid(
+              current.y,
+              canvasSize.h - NODE_H,
+              LEFT_TOP_BOUNDARY
+            );
+            if (clampedX !== current.x || clampedY !== current.y) {
+              updated[t.id] = { x: clampedX, y: clampedY };
+              dirty = true;
+            }
+          }
+        });
+        setPositions(updated);
+        if (dirty) localStorage.setItem(key, JSON.stringify(updated));
+        return;
+      } catch {
+        /* fall through */
+      }
+    }
+    const cols = Math.max(3, Math.ceil(Math.sqrt(todos.length)));
+    const fresh: Record<string, NodePosition> = {};
+    todos.forEach((t, i) => {
+      fresh[t.id] = {
+        x: snapGrid(
+          60 + (i % cols) * (NODE_W + 40),
+          canvasSize.w - NODE_W,
+          LEFT_TOP_BOUNDARY
+        ),
+        y: snapGrid(
+          60 + Math.floor(i / cols) * (NODE_H + 60),
+          canvasSize.h - NODE_H,
+          LEFT_TOP_BOUNDARY
+        ),
+      };
+    });
+    setPositions(fresh);
+    localStorage.setItem(key, JSON.stringify(fresh));
+  }, [todos, groupId, canvasSize.w, canvasSize.h]);
+
+  const savePositions = useCallback(
+    (pos: Record<string, NodePosition>) => {
+      if (groupId) localStorage.setItem(`graph-positions-${groupId}`, JSON.stringify(pos));
+    },
+    [groupId]
+  );
+
+  /* ── Group connections ──────────────────────────── */
+
+  const groupConnections = useMemo(() => {
+    const ids = new Set(todos.map((t) => t.id));
+    return connections.filter((c) => c.items.some((i) => ids.has(i.todo_id)));
+  }, [connections, todos]);
+
+  const connectedAdjacents = useMemo(() => {
+    const pairs = new Map<string, AdjPair>();
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const aId = conn.items[i]!.todo_id;
+        const bId = conn.items[i + 1]!.todo_id;
+        const aPos = positions[aId];
+        const bPos = positions[bId];
+        if (!aPos || !bPos) continue;
+
+        const bestTouch = getClosestOppositePortsAt(positions, aId, bId, SNAP_PX);
+
+        if (!bestTouch) continue;
+        const key = canonicalPairKey(aId, bId);
+        if (pairs.has(key)) continue;
+        pairs.set(key, {
+          a: aId < bId ? aId : bId,
+          b: aId < bId ? bId : aId,
+          axis:
+            bestTouch.fromSide === "left" || bestTouch.fromSide === "right"
+              ? "x"
+              : "y",
+        });
+      }
+    }
+
+    return pairs;
+  }, [groupConnections, positions]);
+
+  const fusedGraph = useMemo(() => {
+    const graph = new Map<string, Set<string>>();
+    for (const [, p] of connectedAdjacents.entries()) {
+      if (!graph.has(p.a)) graph.set(p.a, new Set());
+      if (!graph.has(p.b)) graph.set(p.b, new Set());
+      graph.get(p.a)!.add(p.b);
+      graph.get(p.b)!.add(p.a);
+    }
+    return graph;
+  }, [connectedAdjacents]);
+
+  const sharedAdjacentPorts = useMemo(() => {
+    const hidden = new Set<string>();
+    const shared: Array<{ key: string; x: number; y: number }> = [];
+
+    for (const [, pair] of connectedAdjacents.entries()) {
+      const pa = positions[pair.a];
+      const pb = positions[pair.b];
+      if (!pa || !pb) continue;
+
+      let firstId = pair.a;
+      let firstSide: PortSide = "right";
+      let secondId = pair.b;
+      let secondSide: PortSide = "left";
+
+      if (pair.axis === "x") {
+        if (pa.x <= pb.x) {
+          firstId = pair.a;
+          firstSide = "right";
+          secondId = pair.b;
+          secondSide = "left";
+        } else {
+          firstId = pair.b;
+          firstSide = "right";
+          secondId = pair.a;
+          secondSide = "left";
+        }
+      } else {
+        if (pa.y <= pb.y) {
+          firstId = pair.a;
+          firstSide = "bottom";
+          secondId = pair.b;
+          secondSide = "top";
+        } else {
+          firstId = pair.b;
+          firstSide = "bottom";
+          secondId = pair.a;
+          secondSide = "top";
+        }
+      }
+
+      const firstPort = getPortAt(positions, firstId, firstSide);
+      const secondPort = getPortAt(positions, secondId, secondSide);
+      if (!firstPort || !secondPort) continue;
+
+      hidden.add(`${firstId}:${firstSide}`);
+      hidden.add(`${secondId}:${secondSide}`);
+
+      shared.push({
+        key: canonicalPairKey(pair.a, pair.b),
+        x: (firstPort.x + secondPort.x) / 2,
+        y: (firstPort.y + secondPort.y) / 2,
+      });
+    }
+
+    return { hidden, shared };
+  }, [connectedAdjacents, positions]);
+
+  const getFusedComponent = useCallback(
+    (startId: string) => {
+      const seen = new Set<string>();
+      const stack = [startId];
+      while (stack.length) {
+        const id = stack.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const next = fusedGraph.get(id);
+        if (!next) continue;
+        for (const n of next) {
+          if (!seen.has(n)) stack.push(n);
+        }
+      }
+      return [...seen];
+    },
+    [fusedGraph]
+  );
+
+  const nodeRects = useMemo(
+    () =>
+      todos
+        .filter((t) => positions[t.id])
+        .map((t) => {
+          const p = positions[t.id]!;
+          return {
+            id: t.id,
+            left: p.x - 8,
+            top: p.y - 8,
+            right: p.x + NODE_W + 8,
+            bottom: p.y + NODE_H + 8,
+          };
+        }),
+    [todos, positions]
+  );
+
+  const todoIds = useMemo(() => todos.map((t) => t.id), [todos]);
+
+  const overlapArea = (
+    a: NodePosition | undefined,
+    b: NodePosition | undefined
+  ) => {
+    if (!a || !b) return 0;
+    const left = Math.max(a.x, b.x);
+    const right = Math.min(a.x + NODE_W, b.x + NODE_W);
+    const top = Math.max(a.y, b.y);
+    const bottom = Math.min(a.y + NODE_H, b.y + NODE_H);
+    const w = right - left;
+    const h = bottom - top;
+    if (w <= OVERLAP_EPS || h <= OVERLAP_EPS) return 0;
+    return w * h;
+  };
+
+  const movingOverlapArea = useCallback(
+    (pos: Record<string, NodePosition>, movingIds: Set<string>) => {
+      let total = 0;
+      for (const id of movingIds) {
+        const a = pos[id];
+        if (!a) continue;
+        for (const otherId of todoIds) {
+          if (id === otherId || movingIds.has(otherId)) continue;
+          total += overlapArea(a, pos[otherId]);
+        }
+      }
+      return total;
+    },
+    [todoIds]
+  );
+
+  /* ── Port helpers ───────────────────────────────── */
+
+  const getPort = (
+    todoId: string,
+    side: PortSide
+  ): { x: number; y: number } | null => {
+    return getPortAt(positions, todoId, side);
+  };
+
+  const sideNormal = (side: PortSide) => {
+    switch (side) {
+      case "left":
+        return { x: -1, y: 0 };
+      case "right":
+        return { x: 1, y: 0 };
+      case "top":
+        return { x: 0, y: -1 };
+      case "bottom":
+        return { x: 0, y: 1 };
+    }
+  };
+
+  const edgePortMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        from: { x: number; y: number; side: PortSide };
+        to: { x: number; y: number; side: PortSide };
+      }
+    >();
+    const assignedCurves: Array<{
+      fromId: string;
+      toId: string;
+      points: Array<{ x: number; y: number }>;
+    }> = [];
+    const sides: PortSide[] = PORT_SIDES;
+    const usedByNode = new Map<string, Set<PortSide>>();
+    const pointInRect = (
+      x: number,
+      y: number,
+      r: { left: number; top: number; right: number; bottom: number }
+    ) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+
+    const orient = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+      (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+
+    const segmentsIntersect = (
+      ax: number,
+      ay: number,
+      bx: number,
+      by: number,
+      cx: number,
+      cy: number,
+      dx: number,
+      dy: number
+    ) => {
+      const o1 = orient(ax, ay, bx, by, cx, cy);
+      const o2 = orient(ax, ay, bx, by, dx, dy);
+      const o3 = orient(cx, cy, dx, dy, ax, ay);
+      const o4 = orient(cx, cy, dx, dy, bx, by);
+      return o1 * o2 < 0 && o3 * o4 < 0;
+    };
+
+    const sampleCurvePoints = (
+      start: { x: number; y: number },
+      c1: { x: number; y: number },
+      c2: { x: number; y: number },
+      end: { x: number; y: number },
+      steps = 28
+    ) => {
+      const points: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const mt = 1 - t;
+        const x =
+          mt * mt * mt * start.x +
+          3 * mt * mt * t * c1.x +
+          3 * mt * t * t * c2.x +
+          t * t * t * end.x;
+        const y =
+          mt * mt * mt * start.y +
+          3 * mt * mt * t * c1.y +
+          3 * mt * t * t * c2.y +
+          t * t * t * end.y;
+        points.push({ x, y });
+      }
+      return points;
+    };
+
+    const edgeKeys: Array<{ edgeKey: string; fromId: string; toId: string; rankDist: number }> = [];
+
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const fromId = conn.items[i]!.todo_id;
+        const toId = conn.items[i + 1]!.todo_id;
+
+        // rank edges by best possible distance so short links reserve clean ports first
+        let bestDist = Number.MAX_SAFE_INTEGER;
+        for (const fs of sides) {
+          const fp = getPort(fromId, fs);
+          if (!fp) continue;
+          for (const ts of sides) {
+            const tp = getPort(toId, ts);
+            if (!tp) continue;
+            bestDist = Math.min(bestDist, Math.hypot(tp.x - fp.x, tp.y - fp.y));
+          }
+        }
+        edgeKeys.push({
+          edgeKey: `${conn.id}:${fromId}:${toId}`,
+          fromId,
+          toId,
+          rankDist: bestDist,
+        });
+      }
+    }
+
+    edgeKeys.sort((a, b) => a.rankDist - b.rankDist);
+
+    for (const edge of edgeKeys) {
+      const fromUsed = usedByNode.get(edge.fromId) ?? new Set<PortSide>();
+      const toUsed = usedByNode.get(edge.toId) ?? new Set<PortSide>();
+      usedByNode.set(edge.fromId, fromUsed);
+      usedByNode.set(edge.toId, toUsed);
+
+      const candidates: Array<{
+        from: { x: number; y: number; side: PortSide };
+        to: { x: number; y: number; side: PortSide };
+        dist: number;
+        outsidePenalty: number;
+        directionPenalty: number;
+        detourPenalty: number;
+        reusePenalty: number;
+        obstaclePenalty: number;
+        crossingPenalty: number;
+        score: number;
+      }> = [];
+
+      for (const fromSide of sides) {
+        const from = getPort(edge.fromId, fromSide);
+        if (!from) continue;
+        for (const toSide of sides) {
+          const to = getPort(edge.toId, toSide);
+          if (!to) continue;
+
+          const dist = Math.hypot(to.x - from.x, to.y - from.y);
+          const fromCenter = positions[edge.fromId];
+          const toCenter = positions[edge.toId];
+          const cdx = (toCenter?.x ?? 0) - (fromCenter?.x ?? 0);
+          const cdy = (toCenter?.y ?? 0) - (fromCenter?.y ?? 0);
+          const desiredFrom: PortSide =
+            Math.abs(cdx) >= Math.abs(cdy)
+              ? cdx >= 0
+                ? "right"
+                : "left"
+              : cdy >= 0
+              ? "bottom"
+              : "top";
+          const desiredTo = oppositeSide(desiredFrom);
+          const dir = { x: (to.x - from.x) / (dist || 1), y: (to.y - from.y) / (dist || 1) };
+          const fromN = sideNormal(fromSide);
+          const toN = sideNormal(toSide);
+          const fromDot = fromN.x * dir.x + fromN.y * dir.y;
+          const toDot = toN.x * -dir.x + toN.y * -dir.y;
+          const outsidePenalty = (1 - fromDot) + (1 - toDot);
+          const directionPenalty =
+            (fromSide === desiredFrom ? 0 : 1) + (toSide === desiredTo ? 0 : 1);
+          const reusePenalty =
+            (fromUsed.has(fromSide) ? 1 : 0) + (toUsed.has(toSide) ? 1 : 0);
+          const curve = curvePath(
+            { ...from, side: fromSide },
+            { ...to, side: toSide },
+            0
+          );
+          const points = sampleCurvePoints(curve.start, curve.c1, curve.c2, curve.end);
+          let pathLength = 0;
+          for (let i = 0; i < points.length - 1; i++) {
+            const a = points[i]!;
+            const b = points[i + 1]!;
+            pathLength += Math.hypot(b.x - a.x, b.y - a.y);
+          }
+          const detourPenalty = Math.max(0, pathLength - dist);
+
+          const obstaclePenalty = nodeRects.reduce((acc, r) => {
+            if (r.id === edge.fromId || r.id === edge.toId) return acc;
+            for (let i = 1; i < points.length - 1; i++) {
+              if (pointInRect(points[i]!.x, points[i]!.y, r)) return acc + 1;
+            }
+            return acc;
+          }, 0);
+
+          const crossingPenalty = assignedCurves.reduce((acc, s) => {
+            const sharesEndpoint =
+              s.fromId === edge.fromId ||
+              s.fromId === edge.toId ||
+              s.toId === edge.fromId ||
+              s.toId === edge.toId;
+            if (sharesEndpoint) return acc;
+            let hasCross = false;
+            for (let i = 0; i < points.length - 1 && !hasCross; i++) {
+              const a = points[i]!;
+              const b = points[i + 1]!;
+              for (let j = 0; j < s.points.length - 1; j++) {
+                const c = s.points[j]!;
+                const d = s.points[j + 1]!;
+                if (segmentsIntersect(a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y)) {
+                  hasCross = true;
+                  break;
+                }
+              }
+            }
+            return acc + (hasCross ? 1 : 0);
+          }, 0);
+          const score =
+            dist +
+            reusePenalty * 120 +
+            outsidePenalty * 20 +
+            directionPenalty * 90 +
+            detourPenalty * 0.8 +
+            obstaclePenalty * 20000 +
+            crossingPenalty * 5000;
+
+          candidates.push({
+            from: { ...from, side: fromSide },
+            to: { ...to, side: toSide },
+            dist,
+            outsidePenalty,
+            directionPenalty,
+            detourPenalty,
+            reusePenalty,
+            obstaclePenalty,
+            crossingPenalty,
+            score,
+          });
+        }
+      }
+
+      candidates.sort((a, b) => {
+        if (Math.abs(a.score - b.score) > 0.001) return a.score - b.score;
+        if (a.obstaclePenalty !== b.obstaclePenalty)
+          return a.obstaclePenalty - b.obstaclePenalty;
+        if (a.crossingPenalty !== b.crossingPenalty)
+          return a.crossingPenalty - b.crossingPenalty;
+        if (a.reusePenalty !== b.reusePenalty) return a.reusePenalty - b.reusePenalty;
+        if (a.directionPenalty !== b.directionPenalty)
+          return a.directionPenalty - b.directionPenalty;
+        if (Math.abs(a.detourPenalty - b.detourPenalty) > 0.001)
+          return a.detourPenalty - b.detourPenalty;
+        if (Math.abs(a.dist - b.dist) > 0.001) return a.dist - b.dist;
+        return a.outsidePenalty - b.outsidePenalty;
+      });
+
+      // Hard-prioritize node/edge avoidance before direction aesthetics.
+      const minObstaclePenalty = Math.min(
+        ...candidates.map((c) => c.obstaclePenalty)
+      );
+      const obstaclePool = candidates.filter(
+        (c) => c.obstaclePenalty === minObstaclePenalty
+      );
+      const minCrossingPenalty = Math.min(
+        ...obstaclePool.map((c) => c.crossingPenalty)
+      );
+      const crossingPool = obstaclePool.filter(
+        (c) => c.crossingPenalty === minCrossingPenalty
+      );
+
+      // Then prefer direction-consistent ports, then avoid port reuse.
+      const minDirectionPenalty = Math.min(
+        ...crossingPool.map((c) => c.directionPenalty)
+      );
+      const directionPool = crossingPool.filter(
+        (c) => c.directionPenalty <= minDirectionPenalty + 1
+      );
+      const noReuseBoth = directionPool.filter(
+        (c) => !fromUsed.has(c.from.side) && !toUsed.has(c.to.side)
+      );
+      const noReuseFrom = directionPool.filter((c) => !fromUsed.has(c.from.side));
+      const noReuseTo = directionPool.filter((c) => !toUsed.has(c.to.side));
+      const pool =
+        noReuseBoth.length > 0
+          ? noReuseBoth
+          : noReuseFrom.length > 0
+          ? noReuseFrom
+          : noReuseTo.length > 0
+          ? noReuseTo
+          : directionPool;
+
+      const best = pool[0];
+      if (!best) continue;
+      map.set(edge.edgeKey, { from: best.from, to: best.to });
+      fromUsed.add(best.from.side);
+      toUsed.add(best.to.side);
+      const bestCurve = curvePath(best.from, best.to, 0);
+      assignedCurves.push({
+        fromId: edge.fromId,
+        toId: edge.toId,
+        points: sampleCurvePoints(
+          bestCurve.start,
+          bestCurve.c1,
+          bestCurve.c2,
+          bestCurve.end
+        ),
+      });
+    }
+
+    return map;
+  }, [groupConnections, positions, todos]);
+
+  /** Smooth cubic bezier + control points */
+  function curvePath(
+    from: { x: number; y: number; side: PortSide },
+    to: { x: number; y: number; side: PortSide },
+    offset = 0
+  ) {
+    const normal = (side: "left" | "right" | "top" | "bottom") => {
+      switch (side) {
+        case "left":
+          return { x: -1, y: 0 };
+        case "right":
+          return { x: 1, y: 0 };
+        case "top":
+          return { x: 0, y: -1 };
+        case "bottom":
+          return { x: 0, y: 1 };
+      }
+    };
+
+    const n1 = normal(from.side);
+    const n2 = normal(to.side);
+    const pad = 8;
+    const span = Math.hypot(to.x - from.x, to.y - from.y);
+    const cPull = Math.max(16, Math.min(52, span * 0.32));
+
+    const outwardBudget = (
+      point: { x: number; y: number },
+      side: PortSide
+    ) => {
+      if (side === "left") return Math.max(0, point.x - LEFT_TOP_BOUNDARY);
+      if (side === "top") return Math.max(0, point.y - LEFT_TOP_BOUNDARY);
+      return Number.POSITIVE_INFINITY;
+    };
+
+    const fromPad = Math.min(pad, outwardBudget(from, from.side));
+    const toPad = Math.min(pad, outwardBudget(to, to.side));
+
+    const start = { x: from.x + n1.x * fromPad, y: from.y + n1.y * fromPad };
+    const end = { x: to.x + n2.x * toPad, y: to.y + n2.y * toPad };
+
+    const fromPull = Math.min(cPull, outwardBudget(start, from.side));
+    const toPull = Math.min(cPull, outwardBudget(end, to.side));
+    const c1 = { x: start.x + n1.x * fromPull, y: start.y + n1.y * fromPull };
+    const c2 = { x: end.x + n2.x * toPull, y: end.y + n2.y * toPull };
+
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const bowMag = Math.max(4, Math.min(18, Math.hypot(dx, dy) * 0.06));
+    const bowSign = offset === 0 ? 1 : Math.sign(offset);
+    const isHorizontalOpposite =
+      ((from.side === "right" && to.side === "left") ||
+        (from.side === "left" && to.side === "right")) &&
+      Math.abs(dy) < 6;
+    const isVerticalOpposite =
+      ((from.side === "bottom" && to.side === "top") ||
+        (from.side === "top" && to.side === "bottom")) &&
+      Math.abs(dx) < 6;
+    const shouldBeStraight =
+      (isHorizontalOpposite && Math.abs(dy) < 4 && offset === 0) ||
+      (isVerticalOpposite && Math.abs(dx) < 4 && offset === 0);
+
+    if (!shouldBeStraight) {
+      if (isHorizontalOpposite) {
+        c1.y += bowSign * bowMag;
+        c2.y += bowSign * bowMag;
+      } else if (isVerticalOpposite) {
+        c1.x += bowSign * bowMag;
+        c2.x += bowSign * bowMag;
+      }
+    }
+
+    if (offset !== 0) {
+      const vx = end.x - start.x;
+      const vy = end.y - start.y;
+      const vlen = Math.hypot(vx, vy) || 1;
+      const px = -vy / vlen;
+      const py = vx / vlen;
+      const ox = px * offset;
+      const oy = py * offset;
+
+      // Keep endpoints locked to their node ports; only fan out the curve body.
+      c1.x += ox;
+      c1.y += oy;
+      c2.x += ox;
+      c2.y += oy;
+    }
+    c1.x = Math.max(LEFT_TOP_BOUNDARY, c1.x);
+    c1.y = Math.max(LEFT_TOP_BOUNDARY, c1.y);
+    c2.x = Math.max(LEFT_TOP_BOUNDARY, c2.x);
+    c2.y = Math.max(LEFT_TOP_BOUNDARY, c2.y);
+
+    if (shouldBeStraight) {
+      const lc1 = {
+        x: start.x + (end.x - start.x) / 3,
+        y: start.y + (end.y - start.y) / 3,
+      };
+      const lc2 = {
+        x: start.x + ((end.x - start.x) * 2) / 3,
+        y: start.y + ((end.y - start.y) * 2) / 3,
+      };
+      return {
+        d: `M${start.x},${start.y} L${end.x},${end.y}`,
+        start,
+        end,
+        c1: lc1,
+        c2: lc2,
+      };
+    }
+
+    return {
+      d: `M${start.x},${start.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${end.x},${end.y}`,
+      start,
+      end,
+      c1,
+      c2,
+    };
+  }
+
+
+  /* ── Drag: move node ────────────────────────────── */
+
+  const onNodeDown = (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const p = positions[id];
+    if (!p) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
+    const scrollTop = canvasRef.current?.scrollTop ?? 0;
+    setDraggingNode(id);
+    setDragOffset({
+      x: e.clientX - (rect?.left ?? 0) + scrollLeft - p.x,
+      y: e.clientY - (rect?.top ?? 0) + scrollTop - p.y,
+    });
+  };
+
+  /* ── Drag: connect ──────────────────────────────── */
+
+  const onPortDown = (
+    e: React.MouseEvent,
+    todoId: string,
+    side: "left" | "right" | "top" | "bottom"
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setConnectDrag({
+      fromTodoId: todoId,
+      fromPortSide: side,
+      startX: e.clientX,
+      startY: e.clientY,
+      currentX: e.clientX,
+      currentY: e.clientY,
+    });
+  };
+
+  /* ── Global mouse handlers ──────────────────────── */
+
+  const onMouseMove = useCallback(
+    (e: MouseEvent) => {
+    if (draggingNode) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
+      const scrollTop = canvasRef.current?.scrollTop ?? 0;
+      const rawX = e.clientX - (rect?.left ?? 0) + scrollLeft - dragOffset.x;
+      const rawY = e.clientY - (rect?.top ?? 0) + scrollTop - dragOffset.y;
+      const maxX = Math.max(canvasSize.w - NODE_W, rawX + 220);
+      const maxY = Math.max(canvasSize.h - NODE_H, rawY + 220);
+      const fused = getFusedComponent(draggingNode);
+      setPositions((prev) => {
+        const prevPos = prev[draggingNode];
+        if (!prevPos) return prev;
+        const movingIds = new Set(fused);
+        const nextX = snapGrid(rawX, maxX, LEFT_TOP_BOUNDARY);
+        const nextY = snapGrid(rawY, maxY, LEFT_TOP_BOUNDARY);
+        const deltaX = nextX - prevPos.x;
+        const deltaY = nextY - prevPos.y;
+
+        const updated = { ...prev };
+        for (const id of fused) {
+          const p = prev[id];
+          if (!p) continue;
+          updated[id] = {
+            x: snapGrid(p.x + deltaX, canvasSize.w - NODE_W, LEFT_TOP_BOUNDARY),
+            y: snapGrid(p.y + deltaY, canvasSize.h - NODE_H, LEFT_TOP_BOUNDARY),
+          };
+        }
+        const prevOverlap = movingOverlapArea(prev, movingIds);
+        const nextOverlap = movingOverlapArea(updated, movingIds);
+        if (nextOverlap > prevOverlap + 0.1) return prev;
+        return updated;
+      });
+    }
+      if (connectDrag) {
+        setConnectDrag((prev) =>
+          prev ? { ...prev, currentX: e.clientX, currentY: e.clientY } : null
+        );
+        const els = document.elementsFromPoint(e.clientX, e.clientY);
+        const target = els.find((el) => el.getAttribute("data-todo-id"));
+        const tId = target?.getAttribute("data-todo-id") ?? null;
+        setHoverTarget(tId && tId !== connectDrag.fromTodoId ? tId : null);
+      }
+    },
+    [
+      draggingNode,
+      dragOffset,
+      connectDrag,
+      canvasSize.w,
+      canvasSize.h,
+      getFusedComponent,
+      movingOverlapArea,
+    ]
+  );
+
+  const onMouseUp = useCallback(() => {
+    if (draggingNode) {
+      const moved = draggingNode;
+      const fused = getFusedComponent(moved);
+      const fusedSet = new Set(fused);
+
+      let bestTouch:
+        | {
+            fromId: string;
+            toId: string;
+            dx: number;
+            dy: number;
+            dist: number;
+          }
+        | null = null;
+
+      for (const fromId of fused) {
+        for (const todo of todos) {
+          const toId = todo.id;
+          if (fusedSet.has(toId)) continue;
+          const touch = getClosestOppositePortsAt(positions, fromId, toId, SNAP_PX);
+          if (!touch) continue;
+          const dx = touch.to.x - touch.from.x;
+          const dy = touch.to.y - touch.from.y;
+          if (!bestTouch || touch.dist < bestTouch.dist) {
+            bestTouch = { fromId, toId, dx, dy, dist: touch.dist };
+          }
+        }
+      }
+
+      if (bestTouch) {
+        let snapped = false;
+        setPositions((prev) => {
+          const next = { ...prev };
+          const movingIds = new Set(fused);
+          for (const id of fused) {
+            const p = prev[id];
+            if (!p) continue;
+            next[id] = {
+              x: snapGrid(
+                p.x + bestTouch.dx,
+                canvasSize.w - NODE_W,
+                LEFT_TOP_BOUNDARY
+              ),
+              y: snapGrid(
+                p.y + bestTouch.dy,
+                canvasSize.h - NODE_H,
+                LEFT_TOP_BOUNDARY
+              ),
+            };
+          }
+          const prevOverlap = movingOverlapArea(prev, movingIds);
+          const nextOverlap = movingOverlapArea(next, movingIds);
+          if (nextOverlap > prevOverlap + 0.1) {
+            savePositions(prev);
+            return prev;
+          }
+          snapped = true;
+          savePositions(next);
+          return next;
+        });
+        if (snapped) {
+          createConnection(bestTouch.fromId, bestTouch.toId);
+        }
+      } else {
+        savePositions(positions);
+      }
+      setDraggingNode(null);
+    }
+    if (connectDrag) {
+      if (hoverTarget) {
+        createConnection(connectDrag.fromTodoId, hoverTarget);
+      }
+      setConnectDrag(null);
+      setHoverTarget(null);
+    }
+  }, [
+    draggingNode,
+    connectDrag,
+    positions,
+    savePositions,
+    hoverTarget,
+    getFusedComponent,
+    canvasSize.w,
+    canvasSize.h,
+    todos,
+    movingOverlapArea,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [onMouseMove, onMouseUp]);
+
+  useEffect(() => {
+    const syncFullscreen = () => {
+      setIsFullscreen(document.fullscreenElement === graphRef.current);
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    const viewW = canvasRef.current?.clientWidth ?? 0;
+    const viewH = canvasRef.current?.clientHeight ?? 0;
+    const maxX = Math.max(
+      0,
+      ...Object.values(positions).map((p) => p.x + NODE_W + 220)
+    );
+    const maxY = Math.max(
+      0,
+      ...Object.values(positions).map((p) => p.y + NODE_H + 220)
+    );
+
+    const minCanvasW = isFullscreen
+      ? BASE_CANVAS_W
+      : BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W;
+    const minCanvasH = isFullscreen
+      ? BASE_CANVAS_H
+      : BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H;
+
+    const nextW = snapGrid(
+      Math.max(minCanvasW, viewW + 220, maxX),
+      Number.MAX_SAFE_INTEGER
+    );
+    const nextH = snapGrid(
+      Math.max(minCanvasH, viewH + 220, maxY),
+      Number.MAX_SAFE_INTEGER
+    );
+
+    setCanvasSize((prev) =>
+      prev.w !== nextW || prev.h !== nextH ? { w: nextW, h: nextH } : prev
+    );
+  }, [positions, isFullscreen]);
+
+  /* ── Create connection ──────────────────────────── */
+
+  const createConnection = async (fromId: string, toId: string) => {
+    try {
+      const byTodo = (todoId: string) =>
+        groupConnections.filter((c) =>
+          c.items.some((item) => item.todo_id === todoId)
+        );
+
+      const fromConns = byTodo(fromId);
+      const toConns = byTodo(toId);
+      const shared = fromConns.find((fc) => toConns.some((tc) => tc.id === fc.id));
+
+      if (shared) {
+        toast("Already connected in the same chain");
+        return;
+      }
+
+      const fromConn = fromConns[0];
+      const toConn = toConns[0];
+
+      if (fromConn && !toConn) {
+        await connectionsApi.addItem(fromConn.id, toId);
+        await refreshConnections();
+        toast.success("Connected!");
+        return;
+      }
+
+      if (!fromConn && toConn) {
+        await connectionsApi.addItem(toConn.id, fromId);
+        await refreshConnections();
+        toast.success("Connected!");
+        return;
+      }
+
+      if (!fromConn && !toConn) {
+        await connectionsApi.create([fromId, toId]);
+        await refreshConnections();
+        toast.success("Connected!");
+        return;
+      }
+
+      if (fromConn && toConn && fromConn.id !== toConn.id) {
+        await connectionsApi.merge(fromId, toId);
+        await refreshConnections();
+        toast.success("Connections merged");
+        return;
+      }
+
+      toast.error("Failed to connect tasks");
+    } catch (e: unknown) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to create connection"
+      );
+    }
+  };
+
+  const cutEdge = async (connectionId: string, fromId: string, toId: string) => {
+    try {
+      await connectionsApi.cut(connectionId, fromId, toId);
+      await refreshConnections();
+      toast.success("Connection cut");
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed to cut connection");
+    }
+  };
+
+  /* ── Toggle todo ────────────────────────────────── */
+
+  const handleToggle = async (todoId: string) => {
+    try {
+      await todosApi.toggleComplete(todoId);
+      // Refresh local todos
+      if (groupId) {
+        const data = await todosApi.list(groupId);
+        setTodos(data.filter((t) => !t.deleted_at));
+      }
+      await refreshConnections();
+      await refreshTodos();
+    } catch {
+      toast.error("Failed to toggle");
+    }
+  };
+
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await graphRef.current?.requestFullscreen();
+      } else if (document.fullscreenElement === graphRef.current) {
+        await document.exitFullscreen();
+      }
+    } catch {
+      toast.error("Fullscreen not available");
+    }
+  };
+
+  const toggleCutMode = () => {
+    setIsCutMode((prev) => {
+      const next = !prev;
+      if (next) {
+        toast("Cut mode: click an edge to disconnect", { id: "cut-mode" });
+      }
+      return next;
+    });
+  };
+
+  /* ── Derived ────────────────────────────────────── */
+
+  const currentGroup = groups.find((g) => g.id === groupId);
+
+  const { connectionCount, connectionOrder, completionOrder } = useMemo(() => {
+    const counts: Record<string, number> = {};
+    const order: Record<string, number> = {};
+    const orderedTodoIds: string[] = [];
+    const seen = new Set<string>();
+
+    for (const conn of groupConnections) {
+      conn.items.forEach((item) => {
+        counts[item.todo_id] = (counts[item.todo_id] ?? 0) + 1;
+
+        // Global order from "New Connections" sequence (first occurrence wins).
+        if (!seen.has(item.todo_id)) {
+          seen.add(item.todo_id);
+          orderedTodoIds.push(item.todo_id);
+        }
+      });
+    }
+
+    orderedTodoIds.forEach((todoId, index) => {
+      order[todoId] = index + 1;
+    });
+
+    const connectedById = new Map(
+      groupConnections.flatMap((conn) => conn.items.map((item) => [item.todo_id, item] as const))
+    );
+
+    const completionCandidates = orderedTodoIds
+      .map((todoId) => {
+        const item = connectedById.get(todoId);
+        return {
+          todoId,
+          completedAt: item?.completed_at ?? null,
+          baseOrder: order[todoId] ?? Number.MAX_SAFE_INTEGER,
+        };
+      })
+      .filter((entry) => entry.completedAt);
+
+    completionCandidates.sort((a, b) => {
+      const timeDiff = Date.parse(a.completedAt!) - Date.parse(b.completedAt!);
+      if (timeDiff !== 0) return timeDiff;
+      if (a.baseOrder !== b.baseOrder) return a.baseOrder - b.baseOrder;
+      return a.todoId.localeCompare(b.todoId);
+    });
+
+    const completeOrder: Record<string, number> = {};
+    completionCandidates.forEach((entry, index) => {
+      completeOrder[entry.todoId] = index + 1;
+    });
+
+    return { connectionCount: counts, connectionOrder: order, completionOrder: completeOrder };
+  }, [groupConnections]);
+
+  const connectionEdgeOffsets = useMemo(() => {
+    const offsetMap = new Map<string, number>();
+    const totalMap = new Map<string, number>();
+
+    const keyFor = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const a = conn.items[i]!.todo_id;
+        const b = conn.items[i + 1]!.todo_id;
+        const key = keyFor(a, b);
+        totalMap.set(key, (totalMap.get(key) ?? 0) + 1);
+      }
+    }
+
+    const seen = new Map<string, number>();
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const a = conn.items[i]!.todo_id;
+        const b = conn.items[i + 1]!.todo_id;
+        const key = keyFor(a, b);
+        const total = totalMap.get(key) ?? 1;
+        const idx = (seen.get(key) ?? 0);
+        seen.set(key, idx + 1);
+
+        if (total === 1) {
+          offsetMap.set(`${conn.id}:${a}:${b}`, 0);
+        } else {
+          const spacing = 12;
+          const centered = idx - (total - 1) / 2;
+          offsetMap.set(`${conn.id}:${a}:${b}`, centered * spacing);
+        }
+      }
+    }
+
+    return offsetMap;
+  }, [groupConnections]);
+
+  const noOverlapOffsets = useMemo(() => {
+    const buckets = new Map<string, string[]>();
+    const offsets = new Map<string, number>();
+
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const fromId = conn.items[i]!.todo_id;
+        const toId = conn.items[i + 1]!.todo_id;
+        const edgeKey = `${conn.id}:${fromId}:${toId}`;
+        const ports = edgePortMap.get(edgeKey);
+        if (!ports) continue;
+
+        const x1 = ports.from.x;
+        const y1 = ports.from.y;
+        const x2 = ports.to.x;
+        const y2 = ports.to.y;
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const len = Math.hypot(dx, dy) || 1;
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+
+        // Bucket edges by orientation + local band, then fan them apart.
+        const angleBucket = Math.round((Math.atan2(dy, dx) + Math.PI) / (Math.PI / 18)); // ~10deg
+        const perp = (-dy * mx + dx * my) / len;
+        const along = (dx * mx + dy * my) / len;
+        const perpBucket = Math.round(perp / 18);
+        const alongBucket = Math.round(along / 140);
+        const key = `${angleBucket}:${perpBucket}:${alongBucket}`;
+
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key)!.push(edgeKey);
+      }
+    }
+
+    for (const [, keys] of buckets.entries()) {
+      if (keys.length <= 1) continue;
+      keys.sort();
+      const spacing = 10;
+      keys.forEach((k, idx) => {
+        const centered = idx - (keys.length - 1) / 2;
+        offsets.set(k, centered * spacing);
+      });
+    }
+
+    return offsets;
+  }, [groupConnections, edgePortMap]);
+
+  const canvasOffset = () => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
+  };
+
+  /* ── Render ─────────────────────────────────────── */
+
+  return (
+    <div className="animate-fade-in" >
+      {/* Header */}
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
+          <GitBranch size={24} className="text-indigo-500" />
+          GraphPlan
+        </h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+          Drag between ports to connect tasks &middot; Max 2 connections per task
+        </p>
+      </div>
+
+      {/* Group pills */}
+      <div className="flex flex-wrap gap-2 mb-5">
+        {groups.map((g) => (
+          <button
+            key={g.id}
+            onClick={() => setGroupId(g.id)}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
+              groupId === g.id
+                ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 scale-[1.02]"
+                : "glass text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:scale-[1.02]"
+            }`}
+          >
+            <FolderOpen size={14} />
+            {g.name}
+          </button>
+        ))}
+      </div>
+
+      {/* States */}
+      {!groupId ? (
+        <EmptyState
+          icon={<GitBranch size={28} className="text-slate-300 dark:text-slate-600" />}
+          text="Select a group to view its task graph"
+        />
+      ) : loading ? (
+        <div className="flex items-center justify-center h-[50vh]">
+          <div className="animate-pulse-soft text-slate-400">Loading graph...</div>
+        </div>
+      ) : todos.length === 0 ? (
+        <EmptyState
+          icon={<FolderOpen size={28} className="text-slate-300 dark:text-slate-600" />}
+          text={`No tasks in ${currentGroup?.name ?? "this group"}`}
+        />
+      ) : (
+        /* ── Canvas ────────────────────────────────── */
+        <div ref={graphRef} className={`relative ${isFullscreen ? "" : "pb-2"}`}>
+          <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
+            <button
+              onClick={() => setShowPanel((v) => !v)}
+              title={showPanel ? "Hide controls" : "Show controls"}
+              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
+            >
+              {showPanel ? (
+                <EyeOff size={14} className="text-slate-600 dark:text-slate-300" />
+              ) : (
+                <Eye size={14} className="text-slate-600 dark:text-slate-300" />
+              )}
+            </button>
+            <button
+              onClick={toggleCutMode}
+              title={isCutMode ? "Exit cut mode" : "Cut edges"}
+              className={`w-8 h-8 rounded-lg backdrop-blur-sm border flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-150 ${
+                isCutMode
+                  ? "bg-rose-500 text-white border-rose-400"
+                  : "bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800"
+              }`}
+            >
+              <Scissors size={14} className={isCutMode ? "text-white" : "text-slate-600 dark:text-slate-300"} />
+            </button>
+            <button
+              onClick={toggleFullscreen}
+              title={isFullscreen ? "Exit fullscreen" : "Open fullscreen"}
+              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
+            >
+              {isFullscreen ? (
+                <Minimize2 size={14} className="text-slate-600 dark:text-slate-300" />
+              ) : (
+                <Maximize2 size={14} className="text-slate-600 dark:text-slate-300" />
+              )}
+            </button>
+          </div>
+
+          {/* Scrollable canvas */}
+          <div
+            ref={canvasRef}
+            className="relative rounded-2xl overflow-auto no-scrollbar border border-slate-200 dark:border-slate-800"
+            style={{
+              width: "100%",
+              minHeight: isFullscreen ? 0 : 600,
+              height: isFullscreen ? "calc(100vh - 40px)" : "calc(100vh - 250px)",
+              background:
+                "radial-gradient(circle at 1px 1px, rgba(148,163,184,0.12) 1px, transparent 0)",
+              backgroundSize: `${GRID}px ${GRID}px`,
+            }}
+          >
+          {/* Inner virtual canvas — keeps nodes from escaping */}
+          <div style={{ width: canvasSize.w, height: canvasSize.h, position: "relative" }}>
+          {/* ── SVG layer ──────────────────────────── */}
+          <svg
+            className="absolute inset-0"
+            width={canvasSize.w}
+            height={canvasSize.h}
+            style={{
+              zIndex: 5,
+              pointerEvents: isCutMode ? "auto" : "none",
+              cursor: isCutMode ? CUT_CURSOR : "default",
+            }}
+          >
+            <defs>
+              <linearGradient id="line-grad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="rgb(99,102,241)" stopOpacity="1" />
+                <stop offset="100%" stopColor="rgb(139,92,246)" stopOpacity="1" />
+              </linearGradient>
+              <linearGradient id="line-done" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                <stop offset="100%" stopColor="rgb(20,184,166)" stopOpacity="1" />
+              </linearGradient>
+              <filter id="glow">
+                <feGaussianBlur stdDeviation="3" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              <marker id="arr" markerWidth="6" markerHeight="4.5" refX="6" refY="2.25" orient="auto">
+                <polygon points="0 0, 6 2.25, 0 4.5" fill="rgb(99,102,241)" fillOpacity="1" />
+              </marker>
+              <marker id="arr-done" markerWidth="6" markerHeight="4.5" refX="6" refY="2.25" orient="auto">
+                <polygon points="0 0, 6 2.25, 0 4.5" fill="rgb(16,185,129)" fillOpacity="1" />
+              </marker>
+            </defs>
+
+            {/* Connection paths */}
+            {groupConnections.map((conn) =>
+              conn.items.map((item, idx) => {
+                if (idx >= conn.items.length - 1) return null;
+                const next = conn.items[idx + 1]!;
+                const edgeKey = `${conn.id}:${item.todo_id}:${next.todo_id}`;
+                const adjKey = canonicalPairKey(item.todo_id, next.todo_id);
+                if (connectedAdjacents.has(adjKey)) {
+                  if (!isCutMode) return null;
+                  const touch = getClosestOppositePortsAt(
+                    positions,
+                    item.todo_id,
+                    next.todo_id
+                  );
+                  if (!touch) return null;
+                  const cx = (touch.from.x + touch.to.x) / 2;
+                  const cy = (touch.from.y + touch.to.y) / 2;
+                  return (
+                    <g key={`${conn.id}-${item.id}-adj-cut`}>
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={15}
+                        fill="transparent"
+                        style={{ pointerEvents: "all", cursor: CUT_CURSOR }}
+                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                      />
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={8}
+                        fill="rgba(244,63,94,0.95)"
+                        stroke="rgba(255,255,255,0.85)"
+                        strokeWidth={1.5}
+                        style={{ pointerEvents: "none" }}
+                      />
+                      <path
+                        d={`M${cx - 2.5},${cy - 2.8} L${cx + 3.2},${cy + 2.6} M${cx - 2.5},${cy + 2.8} L${cx + 3.2},${cy - 2.6}`}
+                        stroke="white"
+                        strokeWidth={1.3}
+                        strokeLinecap="round"
+                        style={{ pointerEvents: "none" }}
+                      />
+                      <circle cx={cx - 3.6} cy={cy - 2.8} r={1.1} fill="none" stroke="white" strokeWidth={1} />
+                      <circle cx={cx - 3.6} cy={cy + 2.8} r={1.1} fill="none" stroke="white" strokeWidth={1} />
+                    </g>
+                  );
+                }
+                const ports = edgePortMap.get(edgeKey);
+                if (!ports) return null;
+
+                const itemDone = item.is_completed === 1;
+                const nextDone = next.is_completed === 1;
+                const bothDone = itemDone && nextDone;
+                const oneDone = itemDone !== nextDone;
+                const offset =
+                  (connectionEdgeOffsets.get(edgeKey) ?? 0) +
+                  (noOverlapOffsets.get(edgeKey) ?? 0);
+                const fromP = ports.from;
+                const toP = ports.to;
+                const pathData = curvePath(fromP, toP, offset);
+                const path = pathData.d;
+                const partialGradId = `edge-partial-${conn.id}-${item.todo_id}-${next.todo_id}`;
+
+                // Arrow at true midpoint
+                const t = 0.5;
+                const mt = 1 - t;
+                const p0 = pathData.start;
+                const p1 = pathData.c1;
+                const p2 = pathData.c2;
+                const p3 = pathData.end;
+
+                const mid = {
+                  x:
+                    mt * mt * mt * p0.x +
+                    3 * mt * mt * t * p1!.x +
+                    3 * mt * t * t * p2!.x +
+                    t * t * t * p3.x,
+                  y:
+                    mt * mt * mt * p0.y +
+                    3 * mt * mt * t * p1!.y +
+                    3 * mt * t * t * p2!.y +
+                    t * t * t * p3.y,
+                };
+
+                // Adaptive arrow direction: follow local edge tangent, but keep chain order.
+                const forward = { x: p3.x - p0.x, y: p3.y - p0.y };
+                const tangent = {
+                  x:
+                    3 * mt * mt * (p1!.x - p0.x) +
+                    6 * mt * t * (p2!.x - p1!.x) +
+                    3 * t * t * (p3.x - p2!.x),
+                  y:
+                    3 * mt * mt * (p1!.y - p0.y) +
+                    6 * mt * t * (p2!.y - p1!.y) +
+                    3 * t * t * (p3.y - p2!.y),
+                };
+                const tangentLen = Math.hypot(tangent.x, tangent.y) || 1;
+                let dir = { x: tangent.x / tangentLen, y: tangent.y / tangentLen };
+                const dot = dir.x * forward.x + dir.y * forward.y;
+                if (dot < 0) dir = { x: -dir.x, y: -dir.y };
+                const arrowLen = 12;
+                const arrowW = 8;
+                const tip = {
+                  x: mid.x + dir.x * (arrowLen / 2),
+                  y: mid.y + dir.y * (arrowLen / 2),
+                };
+                const base = {
+                  x: mid.x - dir.x * (arrowLen / 2),
+                  y: mid.y - dir.y * (arrowLen / 2),
+                };
+                const perp = { x: -dir.y, y: dir.x };
+                const left = {
+                  x: base.x + perp.x * (arrowW / 2),
+                  y: base.y + perp.y * (arrowW / 2),
+                };
+                const right = {
+                  x: base.x - perp.x * (arrowW / 2),
+                  y: base.y - perp.y * (arrowW / 2),
+                };
+
+                return (
+                  <g key={`${conn.id}-${item.id}`}>
+                    {oneDone && (
+                      <defs>
+                        <linearGradient
+                          id={partialGradId}
+                          x1={fromP.x}
+                          y1={fromP.y}
+                          x2={toP.x}
+                          y2={toP.y}
+                          gradientUnits="userSpaceOnUse"
+                        >
+                          {itemDone ? (
+                            <>
+                              <stop offset="0%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="35%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="65%" stopColor="rgb(99,102,241)" stopOpacity="1" />
+                              <stop offset="100%" stopColor="rgb(139,92,246)" stopOpacity="1" />
+                            </>
+                          ) : (
+                            <>
+                              <stop offset="0%" stopColor="rgb(99,102,241)" stopOpacity="1" />
+                              <stop offset="35%" stopColor="rgb(139,92,246)" stopOpacity="1" />
+                              <stop offset="65%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="100%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                            </>
+                          )}
+                        </linearGradient>
+                      </defs>
+                    )}
+                    {/* Shadow */}
+                    <path
+                      d={path}
+                      fill="none"
+                      strokeWidth={5}
+                      strokeOpacity={0.14}
+                      strokeLinecap="round"
+                      className={bothDone ? "stroke-emerald-500" : "stroke-indigo-500"}
+                    />
+                    {/* Main line */}
+                    <path
+                      d={path}
+                      fill="none"
+                      stroke={
+                        bothDone
+                          ? "url(#line-done)"
+                          : oneDone
+                          ? `url(#${partialGradId})`
+                          : "url(#line-grad)"
+                      }
+                      strokeWidth={3}
+                      strokeLinecap="round"
+                    />
+                    {/* Cut hit area */}
+                    {isCutMode && (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={18}
+                        strokeLinecap="round"
+                        style={{ pointerEvents: "stroke", cursor: CUT_CURSOR }}
+                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                      />
+                    )}
+                    {/* Midpoint arrow */}
+                    <polygon
+                      points={`${tip.x},${tip.y} ${left.x},${left.y} ${right.x},${right.y}`}
+                      fill={bothDone ? "rgb(16,185,129)" : "rgb(99,102,241)"}
+                      fillOpacity={0.7}
+                    />
+                    {/* Animated particle */}
+                    {!conn.is_fully_complete && (
+                      <circle r="3.5" fill="rgb(99,102,241)" filter="url(#glow)">
+                        <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
+                        <animateMotion dur="2.5s" repeatCount="indefinite" path={path} />
+                        <animate attributeName="r" values="3;4.5;3" dur="2.5s" repeatCount="indefinite" />
+                      </circle>
+                    )}
+                  </g>
+                );
+              })
+            )}
+
+            {/* Active drag line */}
+            {connectDrag &&
+              (() => {
+                const off = canvasOffset();
+                const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
+                const scrollTop = canvasRef.current?.scrollTop ?? 0;
+                const fromPort = getPort(
+                  connectDrag.fromTodoId,
+                  connectDrag.fromPortSide
+                );
+                if (!fromPort) return null;
+                const toX = connectDrag.currentX - off.left + scrollLeft;
+                const toY = connectDrag.currentY - off.top + scrollTop;
+                const dx = toX - fromPort.x;
+                const dy = toY - fromPort.y;
+                const toSide =
+                  Math.abs(dx) > Math.abs(dy)
+                    ? dx > 0
+                      ? "left"
+                      : "right"
+                    : dy > 0
+                    ? "top"
+                    : "bottom";
+                const path = curvePath(
+                  { ...fromPort, side: connectDrag.fromPortSide },
+                  { x: toX, y: toY, side: toSide }
+                ).d;
+                return (
+                  <g>
+                    <path
+                      d={path}
+                      fill="none"
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      strokeDasharray="8 5"
+                      className="stroke-indigo-400"
+                    >
+                      <animate
+                        attributeName="stroke-dashoffset"
+                        from="0"
+                        to="-26"
+                        dur="0.8s"
+                        repeatCount="indefinite"
+                      />
+                    </path>
+                    {/* Endpoint pulse */}
+                    <circle cx={toX} cy={toY} r="6" className="fill-indigo-400/40">
+                      <animate attributeName="r" values="4;8;4" dur="1s" repeatCount="indefinite" />
+                      <animate attributeName="opacity" values="0.6;0.2;0.6" dur="1s" repeatCount="indefinite" />
+                    </circle>
+                    <circle cx={toX} cy={toY} r="3" className="fill-indigo-500" />
+                  </g>
+                );
+              })()}
+          </svg>
+
+          {/* ── Node layer ─────────────────────────── */}
+          <div className="absolute inset-0" style={{ zIndex: 2 }}>
+            <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 60 }}>
+              {sharedAdjacentPorts.shared.map((p) => (
+                <div
+                  key={`shared-port-${p.key}`}
+                  className="absolute"
+                  style={{
+                    left: p.x - 8,
+                    top: p.y - 8,
+                    width: 16,
+                    height: 16,
+                  }}
+                >
+                  <div className="w-full h-full rounded-full border-2 border-slate-300 dark:border-slate-600 bg-white/90 dark:bg-slate-800/90 shadow-sm" />
+                  <div className="absolute left-1/2 top-1/2 w-2 h-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-400 dark:bg-slate-500" />
+                </div>
+              ))}
+            </div>
+            {todos.map((todo) => {
+              const pos = positions[todo.id];
+              if (!pos) return null;
+              const isCompleted = todo.is_completed === 1;
+              const isDragging = draggingNode === todo.id;
+              const isTarget = hoverTarget === todo.id;
+              const conns = connectionCount[todo.id] ?? 0;
+              const canConnect = conns < 2;
+              const hidePort = (side: PortSide) =>
+                sharedAdjacentPorts.hidden.has(`${todo.id}:${side}`);
+
+              const isNext = groupConnections.some((c) => {
+                const ni = c.items.findIndex((i) => !i.is_completed);
+                return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+              });
+
+              const isConnected = conns > 0;
+              const badgeNumber = isCompleted
+                ? completionOrder[todo.id] ?? connectionOrder[todo.id] ?? 1
+                : connectionOrder[todo.id] ?? 1;
+              const nodeLayer = isDragging
+                ? 80
+                : hidePort("right") || hidePort("bottom")
+                ? 40
+                : hidePort("left") || hidePort("top")
+                ? 20
+                : 10;
+
+              return (
+                <div
+                  key={todo.id}
+                  data-todo-id={todo.id}
+                  className="absolute select-none"
+                  style={{
+                    left: pos.x,
+                    top: pos.y,
+                    width: NODE_W,
+                    height: NODE_H,
+                    zIndex: nodeLayer,
+                    transition: isDragging ? "none" : "box-shadow 0.2s, transform 0.15s",
+                  }}
+                >
+                  {/* Glow ring when targeted */}
+                  {isTarget && (
+                    <div
+                      className="absolute -inset-3 rounded-2xl pointer-events-none"
+                      style={{
+                        background: "radial-gradient(ellipse, rgba(99,102,241,0.15) 0%, transparent 70%)",
+                        border: "2px solid rgba(99,102,241,0.4)",
+                        borderRadius: "16px",
+                        animation: "pulse 1.5s ease-in-out infinite",
+                        zIndex: -1,
+                      }}
+                    />
+                  )}
+
+                  {/* Card */}
+                  <div
+                    className={`relative h-full rounded-xl border-2 transition-all duration-200 ${
+                      todo.high_priority === 1 ? "priority-warning" : ""
+                    } ${
+                      isDragging
+                        ? "shadow-2xl shadow-indigo-500/20 scale-[1.04]"
+                        : isTarget
+                        ? "shadow-xl shadow-indigo-400/30 scale-[1.02]"
+                        : "shadow-md hover:shadow-lg"
+                    } ${
+                      isCompleted
+                        ? isConnected
+                          ? "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-500/70"
+                          : "bg-slate-50 dark:bg-slate-900/80 border-emerald-400/50 opacity-70"
+                        : isNext
+                        ? "bg-gradient-to-br from-indigo-50 to-white dark:from-indigo-950/50 dark:to-slate-800 border-indigo-500 ring-2 ring-indigo-400/20"
+                        : isConnected
+                        ? "bg-white dark:bg-slate-800 border-indigo-400/50"
+                        : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700"
+                    }`}
+                  >
+                    {/* Drag handle + toggle */}
+                    <div
+                      onMouseDown={(e) => onNodeDown(e, todo.id)}
+                      className="flex items-center gap-2 px-3 py-2.5 cursor-grab active:cursor-grabbing rounded-t-[10px] transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40"
+                    >
+                      <button
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggle(todo.id);
+                        }}
+                        className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-all duration-300 ${
+                          isCompleted
+                            ? "bg-emerald-500 border-emerald-500 text-white"
+                            : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
+                        }`}
+                        title="Toggle completion"
+                      >
+                        {isCompleted && <Check size={9} strokeWidth={3} />}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <p
+                          className={`text-[13px] font-medium truncate leading-tight ${
+                            isCompleted
+                              ? "line-through text-slate-400 dark:text-slate-500"
+                              : "text-slate-800 dark:text-slate-100"
+                          }`}
+                        >
+                          {todo.title}
+                        </p>
+                        {todo.description && (
+                          <p className="text-[10px] text-slate-400 dark:text-slate-500 truncate mt-0.5 leading-tight">
+                            {todo.description}
+                          </p>
+                        )}
+                      </div>
+                      {isCompleted && (
+                        <div className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center flex-shrink-0 shadow-sm shadow-emerald-500/30">
+                          <Check size={9} strokeWidth={3} className="text-white" />
+                        </div>
+                      )}
+                      {isNext && !isCompleted && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400 flex-shrink-0 animate-pulse">
+                          <Zap size={8} /> NEXT
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Completed badge above own node boundary */}
+                    {conns > 0 && isCompleted && (
+                      <div
+                        className="absolute w-5 h-5 rounded-full text-white text-[9px] font-bold flex items-center justify-center shadow-sm pointer-events-none bg-emerald-500 shadow-emerald-500/30"
+                        style={{
+                          top: -10,
+                          right: hidePort("right") ? -3 : -10,
+                          zIndex: 60,
+                        }}
+                      >
+                        {badgeNumber}
+                      </div>
+                    )}
+
+                    {/* ── Ports ─────────────────────── */}
+                    {!hidePort("top") && (
+                      <Port
+                        side="top"
+                        canConnect={canConnect}
+                        isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "top"}
+                        onMouseDown={(e) => onPortDown(e, todo.id, "top")}
+                      />
+                    )}
+                    {!hidePort("left") && (
+                      <Port
+                        side="left"
+                        canConnect={canConnect}
+                        isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "left"}
+                        onMouseDown={(e) => onPortDown(e, todo.id, "left")}
+                      />
+                    )}
+                    {!hidePort("right") && (
+                      <Port
+                        side="right"
+                        canConnect={canConnect}
+                        isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "right"}
+                        onMouseDown={(e) => onPortDown(e, todo.id, "right")}
+                      />
+                    )}
+                    {!hidePort("bottom") && (
+                      <Port
+                        side="bottom"
+                        canConnect={canConnect}
+                        isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "bottom"}
+                        onMouseDown={(e) => onPortDown(e, todo.id, "bottom")}
+                      />
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 95 }}>
+              {todos.map((todo) => {
+                const pos = positions[todo.id];
+                if (!pos) return null;
+                const conns = connectionCount[todo.id] ?? 0;
+                if (conns <= 0) return null;
+
+                const isCompleted = todo.is_completed === 1;
+                const isNext = groupConnections.some((c) => {
+                  const ni = c.items.findIndex((i) => !i.is_completed);
+                  return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+                });
+                if (isCompleted) return null;
+                const badgeNumber = isCompleted
+                  ? completionOrder[todo.id] ?? connectionOrder[todo.id] ?? 1
+                  : connectionOrder[todo.id] ?? 1;
+
+                const hideRight = sharedAdjacentPorts.hidden.has(`${todo.id}:right`);
+                const badgeRight = hideRight ? -3 : -10;
+                const left = pos.x + NODE_W - 20 - badgeRight;
+                const top = pos.y - 10;
+
+                return (
+                  <div
+                    key={`badge-front-${todo.id}`}
+                    className={`absolute w-5 h-5 rounded-full text-white text-[9px] font-bold flex items-center justify-center shadow-sm ${
+                      isCompleted
+                        ? "bg-emerald-500 shadow-emerald-500/30"
+                        : "bg-indigo-500 shadow-indigo-500/30"
+                    }`}
+                    style={{ left, top, zIndex: isNext ? 95 : 85 }}
+                  >
+                    {badgeNumber}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          </div>{/* end inner virtual canvas */}
+          </div>{/* end scrollable canvas */}
+
+          {/* ── Legend panel (overlay, doesn't scroll) ── */}
+          {showPanel && (
+            <div className="absolute bottom-6 right-4 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 px-4 py-3 text-[10px] space-y-1.5 z-30 shadow-lg">
+              <div className="font-semibold text-[11px] text-slate-600 dark:text-slate-300 mb-1.5">
+                Controls
+              </div>
+              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
+                <GripVertical size={10} /> Drag card to reposition
+              </div>
+              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
+                <div className="w-3 h-3 rounded-full border-2 border-indigo-400 bg-indigo-400/20" />
+                Drag port to connect (max 2)
+              </div>
+              <div className="flex items-center gap-2 text-indigo-500">
+                <svg width="20" height="8">
+                  <path d="M0 4 Q5 0 10 4 T20 4" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+                Connection path
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Port sub-component ───────────────────────────── */
+
+function Port({
+  side,
+  canConnect,
+  isActive,
+  onMouseDown,
+}: {
+  side: "left" | "right" | "top" | "bottom";
+  canConnect: boolean;
+  isActive: boolean;
+  onMouseDown: (e: React.MouseEvent) => void;
+}) {
+  const posClass =
+    side === "left"
+      ? "left-0 top-1/2 -translate-x-1/2 -translate-y-1/2"
+      : side === "right"
+      ? "right-0 top-1/2 translate-x-1/2 -translate-y-1/2"
+      : side === "top"
+      ? "top-0 left-1/2 -translate-x-1/2 -translate-y-1/2"
+      : "bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2";
+
+  if (!canConnect && !isActive) {
+    return (
+      <div
+        className={`absolute ${posClass} w-2.5 h-2.5 rounded-full bg-slate-200 dark:bg-slate-700 opacity-40 pointer-events-none`}
+      />
+    );
+  }
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className={`absolute ${posClass} group/port cursor-crosshair`}
+      style={{ zIndex: 30 }}
+    >
+      <div
+        className={`rounded-full flex items-center justify-center transition-all duration-200 ${
+          isActive
+            ? "w-5 h-5 bg-indigo-500/30 ring-2 ring-indigo-400/60 scale-125"
+            : "w-3.5 h-3.5 bg-white dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 group-hover/port:border-indigo-400 group-hover/port:bg-indigo-500/10 group-hover/port:scale-125"
+        }`}
+      >
+        <div
+          className={`rounded-full transition-all duration-200 ${
+            isActive
+              ? "w-2.5 h-2.5 bg-indigo-500"
+              : "w-1.5 h-1.5 bg-slate-300 dark:bg-slate-600 group-hover/port:bg-indigo-500"
+          }`}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ─── Empty state helper ───────────────────────────── */
+
+function EmptyState({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center">
+      <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
+        {icon}
+      </div>
+      <p className="text-sm text-slate-400 dark:text-slate-500">{text}</p>
+    </div>
+  );
+}
