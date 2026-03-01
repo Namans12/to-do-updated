@@ -18,6 +18,7 @@ interface AppState {
   connections: Connection[];
   highlightTodoId: string | null;
   currentView: View;
+  reorderMode: boolean;
   loading: boolean;
   sidebarOpen: boolean;
   activeReminderAlarm: {
@@ -32,6 +33,8 @@ interface AppState {
 interface AppContextType extends AppState {
   setCurrentView: (view: View) => void;
   selectGroup: (id: string | null) => void;
+  startReorder: (groupId: string) => void;
+  setReorderMode: (value: boolean) => void;
   jumpToTodo: (groupId: string, todoId: string) => void;
   clearHighlightedTodo: () => void;
   refreshGroups: () => Promise<void>;
@@ -66,6 +69,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     connections: [],
     highlightTodoId: null,
     currentView: "todos",
+    reorderMode: false,
     loading: true,
     sidebarOpen: true,
     activeReminderAlarm: null,
@@ -134,8 +138,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
       todos: cached ?? [],
       currentView: "todos",
       highlightTodoId: null,
+      reorderMode: false,
     }));
   }, [refreshTodos]);
+
+  const startReorder = useCallback((groupId: string) => {
+    const cached = todosCacheRef.current[groupId] ?? [];
+    setState((s) => ({
+      ...s,
+      selectedGroupId: groupId,
+      todos: cached,
+      currentView: "todos",
+      highlightTodoId: null,
+      reorderMode: true,
+    }));
+  }, []);
+
+  const setReorderMode = useCallback((value: boolean) => {
+    setState((s) => ({ ...s, reorderMode: value }));
+  }, []);
 
   const jumpToTodo = useCallback((groupId: string, todoId: string) => {
     setState((s) => ({
@@ -143,6 +164,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selectedGroupId: groupId,
       currentView: "todos",
       highlightTodoId: todoId,
+      reorderMode: false,
     }));
   }, []);
 
@@ -151,7 +173,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setCurrentView = useCallback((view: View) => {
-    setState((s) => ({ ...s, currentView: view }));
+    setState((s) => ({ ...s, currentView: view, reorderMode: view === "todos" ? s.reorderMode : false }));
   }, []);
 
   const setSidebarOpen = useCallback((open: boolean) => {
@@ -330,6 +352,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ...state,
         setCurrentView,
         selectGroup,
+        startReorder,
+        setReorderMode,
         jumpToTodo,
         clearHighlightedTodo,
         refreshGroups,

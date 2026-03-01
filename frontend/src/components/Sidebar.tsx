@@ -15,6 +15,7 @@ import {
   X,
   Check,
   GitBranch,
+  GripVertical,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
@@ -24,6 +25,7 @@ export default function Sidebar() {
     groups,
     selectedGroupId,
     selectGroup,
+    startReorder,
     setCurrentView,
     currentView,
     refreshGroups,
@@ -290,6 +292,15 @@ export default function Sidebar() {
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                       >
                         <Pencil size={14} /> Rename
+                      </button>
+                      <button
+                        onClick={() => {
+                          startReorder(group.id);
+                          setMenuOpenId(null);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                      >
+                        <GripVertical size={14} /> Reorder
                       </button>
                       <button
                         onClick={() => handleDeleteGroup(group.id)}

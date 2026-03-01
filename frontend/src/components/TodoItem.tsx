@@ -18,6 +18,7 @@ interface TodoItemProps {
   todo: Todo;
   isHighlighted?: boolean;
   nextTodoId?: string | null;
+  layoutId?: string;
 }
 
 function toLocalDateTimeParts(iso: string | null): { date: string; time: string } {
@@ -44,6 +45,7 @@ export default function TodoItem({
   todo,
   isHighlighted = false,
   nextTodoId = null,
+  layoutId,
 }: TodoItemProps) {
   const { refreshTodos, refreshConnections } = useApp();
   const [isEditing, setIsEditing] = useState(false);
@@ -210,6 +212,7 @@ export default function TodoItem({
     <motion.div
       ref={cardRef}
       layout
+      layoutId={layoutId}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, x: -24, transition: { duration: 0.2 } }}
