@@ -17,6 +17,7 @@ import toast from "react-hot-toast";
 interface TodoItemProps {
   todo: Todo;
   isHighlighted?: boolean;
+  nextTodoId?: string | null;
 }
 
 function toLocalDateTimeParts(iso: string | null): { date: string; time: string } {
@@ -39,7 +40,11 @@ function buildReminderAt(date: string, time: string): string | null {
   return dt.toISOString();
 }
 
-export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps) {
+export default function TodoItem({
+  todo,
+  isHighlighted = false,
+  nextTodoId = null,
+}: TodoItemProps) {
   const { refreshTodos, refreshConnections } = useApp();
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(todo.title);
@@ -52,6 +57,7 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
   const [descriptionMode, setDescriptionMode] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const descRef = useRef<HTMLTextAreaElement>(null);
+  const editDescRef = useRef<HTMLTextAreaElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const todayDate = new Date().toISOString().slice(0, 10);
 
@@ -96,7 +102,7 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
     }
   };
 
-  const handleSaveEdit = async () => {
+  const handleSaveEdit = async (opts?: { focusNext?: boolean }) => {
     const title = editTitle.trim();
     if (!title) return;
     const cleanedDesc = editDesc.trim();
@@ -127,6 +133,18 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
       });
       await refreshTodos();
       setIsEditing(false);
+      if (opts?.focusNext) {
+        if (nextTodoId) {
+          const nextEditButton = document.querySelector<HTMLButtonElement>(
+            `[data-edit-btn="true"][data-todo-id="${nextTodoId}"]`
+          );
+          if (nextEditButton) {
+            nextEditButton.click();
+            return;
+          }
+        }
+        focusNewTodoInput();
+      }
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed to update");
     }
@@ -148,9 +166,19 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
 
   const focusNewTodoInput = () => {
     const input = document.querySelector<HTMLInputElement>("[data-new-todo-input=\"true\"]");
-    if (!input) return;
-    input.focus();
-    input.select();
+    if (input) {
+      input.focus();
+      input.select();
+      return;
+    }
+    const addButton = document.querySelector<HTMLButtonElement>("[data-add-todo-btn=\"true\"]");
+    if (!addButton) return;
+    addButton.click();
+    requestAnimationFrame(() => {
+      const nextInput = document.querySelector<HTMLInputElement>("[data-new-todo-input=\"true\"]");
+      nextInput?.focus();
+      nextInput?.select();
+    });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -158,10 +186,10 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
       if (e.shiftKey) {
         // Shift+Enter → add/edit description
         e.preventDefault();
-        handleSaveEdit();
-        setDescriptionMode(true);
+        editDescRef.current?.focus();
       } else {
-        handleSaveEdit();
+        e.preventDefault();
+        handleSaveEdit({ focusNext: !nextTodoId });
       }
     }
     if (e.key === "Escape") {
@@ -230,6 +258,7 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
                 onKeyDown={handleKeyDown}
               />
               <textarea
+                ref={editDescRef}
                 className="input-base !py-2 text-sm resize-none"
                 placeholder="Add a description (optional)..."
                 rows={2}
@@ -402,6 +431,8 @@ export default function TodoItem({ todo, isHighlighted = false }: TodoItemProps)
                 setEditDesc(todo.description ?? "");
                 setIsEditing(true);
               }}
+              data-edit-btn="true"
+              data-todo-id={todo.id}
               className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
               title="Edit"
             >

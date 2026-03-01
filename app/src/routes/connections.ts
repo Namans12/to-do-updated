@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { eq, and, asc, sql, isNull, inArray } from "drizzle-orm";
+import { eq, and, asc, sql, isNull, inArray, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
 import { connections, connectionItems, todos } from "../db/schema.js";
@@ -182,6 +182,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           ? name.trim() || null
           : null;
 
+      if (trimmedName) {
+        const normalizedName = trimmedName.toLowerCase();
+        const duplicate = drizzleDb
+          .select()
+          .from(connections)
+          .where(sql`LOWER(${connections.name}) = ${normalizedName}`)
+          .get();
+        if (duplicate) {
+          return c.json({ error: "A connection with this name already exists" }, 400);
+        }
+      }
+
       // Create connection and items in a transaction
       const transaction = sqlite.transaction(() => {
         drizzleDb
@@ -221,6 +233,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
     } catch (error: any) {
       if (error instanceof SyntaxError) {
         return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      if (
+        typeof error?.message === "string" &&
+        /unique|constraint/i.test(error.message)
+      ) {
+        return c.json({ error: "A connection with this name already exists" }, 400);
       }
       return c.json({ error: "Internal server error" }, 500);
     }
@@ -307,6 +325,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Name must be a string or null" }, 400);
       }
 
+      if (updatedName) {
+        const normalizedName = updatedName.toLowerCase();
+        const duplicate = drizzleDb
+          .select()
+          .from(connections)
+          .where(and(sql`LOWER(${connections.name}) = ${normalizedName}`, ne(connections.id, id)))
+          .get();
+        if (duplicate) {
+          return c.json({ error: "A connection with this name already exists" }, 400);
+        }
+      }
+
       drizzleDb
         .update(connections)
         .set({ name: updatedName })
@@ -327,6 +357,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
     } catch (error: any) {
       if (error instanceof SyntaxError) {
         return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      if (
+        typeof error?.message === "string" &&
+        /unique|constraint/i.test(error.message)
+      ) {
+        return c.json({ error: "A connection with this name already exists" }, 400);
       }
       return c.json({ error: "Internal server error" }, 500);
     }
@@ -810,8 +846,8 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         .get();
       const currentCount = countResult?.count ?? 0;
 
-      if (currentCount <= 1) {
-        // Removing the last item: auto-delete the connection
+      if (currentCount <= 2) {
+        // If this removal would leave <=1 item, remove all and delete connection
         const transaction = sqlite.transaction(() => {
           drizzleDb
             .delete(connectionItems)
@@ -826,7 +862,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         transaction();
 
         return c.json({
-          data: { message: "Connection deleted (last item removed)" },
+          data: { message: "Connection deleted (minimum size not met)" },
         });
       }
 

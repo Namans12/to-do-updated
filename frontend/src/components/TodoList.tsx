@@ -64,6 +64,11 @@ export default function TodoList() {
   });
   const highPrioritySoloTodos = sortedSoloTodos.filter((t) => t.high_priority === 1);
   const regularSoloTodos = sortedSoloTodos.filter((t) => t.high_priority !== 1);
+  const orderedSoloTodos = [...highPrioritySoloTodos, ...regularSoloTodos];
+  const nextSoloTodoIdById = new Map<string, string | null>();
+  orderedSoloTodos.forEach((todo, idx) => {
+    nextSoloTodoIdById.set(todo.id, orderedSoloTodos[idx + 1]?.id ?? null);
+  });
 
   useEffect(() => {
     if (isAdding && inputRef.current) {
@@ -226,6 +231,7 @@ export default function TodoList() {
                 key={todo.id}
                 todo={todo}
                 isHighlighted={highlightTodoId === todo.id}
+                nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
               />
             ))}
           </AnimatePresence>
@@ -256,6 +262,7 @@ export default function TodoList() {
                 key={todo.id}
                 todo={todo}
                 isHighlighted={highlightTodoId === todo.id}
+                nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
               />
             ))}
         </AnimatePresence>
@@ -380,6 +387,7 @@ export default function TodoList() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsAdding(true)}
+              data-add-todo-btn="true"
               className="w-full flex items-center gap-3 px-4 py-3 rounded-xl
                 border-2 border-dashed border-slate-200 dark:border-slate-800
                 text-slate-400 dark:text-slate-500
