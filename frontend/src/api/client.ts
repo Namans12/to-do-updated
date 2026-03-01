@@ -147,6 +147,11 @@ export const connectionsApi = {
         body: JSON.stringify({ fromTodoId, toTodoId }),
       }
     ),
+  reorderItems: (connectionId: string, todoIds: string[]) =>
+    request<Connection>(`/connections/${connectionId}/reorder`, {
+      method: "PATCH",
+      body: JSON.stringify({ todoIds }),
+    }),
   removeItem: (connectionId: string, todoId: string) =>
     request<void>(`/connections/${connectionId}/items/${todoId}`, {
       method: "DELETE",

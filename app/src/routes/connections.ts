@@ -57,6 +57,7 @@ function buildConnectionResponse(
  *   POST   /api/connections/merge                — Merge two connections by linking endpoints
  *   POST   /api/connections/:id/cut              — Cut a connection between adjacent items
  *   POST   /api/connections/:id/items            — Add a todo to a connection
+ *   PATCH  /api/connections/:id/reorder          — Reorder connection items
  *   DELETE /api/connections/:id/items/:todoId    — Remove a todo from a connection
  *   DELETE /api/connections/:id                  — Delete a connection (not the todos)
  */
@@ -788,6 +789,101 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         .run();
 
       // Return the updated connection
+      const items = getConnectionItems(drizzleDb, connectionId);
+      const response = buildConnectionResponse(connection, items);
+
+      return c.json({ data: response });
+    } catch (error: any) {
+      if (error instanceof SyntaxError) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      return c.json({ error: "Internal server error" }, 500);
+    }
+  });
+
+  // PATCH /api/connections/:id/reorder — Reorder connection items
+  router.patch("/:id/reorder", async (c) => {
+    try {
+      const connectionId = c.req.param("id");
+      const body = await c.req.json();
+      const { todoIds } = body ?? {};
+
+      if (!Array.isArray(todoIds) || todoIds.length < 2) {
+        return c.json(
+          { error: "todoIds must be an array with at least 2 items" },
+          400
+        );
+      }
+      if (todoIds.length > 7) {
+        return c.json(
+          { error: "Connections can have at most 7 items" },
+          400
+        );
+      }
+      for (const id of todoIds) {
+        if (typeof id !== "string" || id.trim().length === 0) {
+          return c.json(
+            { error: "Each todoId must be a non-empty string" },
+            400
+          );
+        }
+      }
+      const unique = new Set(todoIds);
+      if (unique.size !== todoIds.length) {
+        return c.json({ error: "Duplicate todoIds are not allowed" }, 400);
+      }
+
+      const { db: drizzleDb, sqlite } = db();
+
+      const connection = drizzleDb
+        .select()
+        .from(connections)
+        .where(eq(connections.id, connectionId))
+        .get();
+      if (!connection) {
+        return c.json({ error: "Connection not found" }, 404);
+      }
+
+      const existingItems = drizzleDb
+        .select({ todo_id: connectionItems.todo_id })
+        .from(connectionItems)
+        .where(eq(connectionItems.connection_id, connectionId))
+        .all()
+        .map((r) => r.todo_id);
+
+      if (existingItems.length !== todoIds.length) {
+        return c.json(
+          { error: "todoIds must match all items in this connection" },
+          400
+        );
+      }
+
+      const existingSet = new Set(existingItems);
+      for (const id of todoIds) {
+        if (!existingSet.has(id)) {
+          return c.json(
+            { error: "todoIds must match all items in this connection" },
+            400
+          );
+        }
+      }
+
+      const transaction = sqlite.transaction(() => {
+        for (let i = 0; i < todoIds.length; i++) {
+          drizzleDb
+            .update(connectionItems)
+            .set({ position: i })
+            .where(
+              and(
+                eq(connectionItems.connection_id, connectionId),
+                eq(connectionItems.todo_id, todoIds[i]!)
+              )
+            )
+            .run();
+        }
+      });
+      transaction();
+
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
 
