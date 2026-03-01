@@ -6,6 +6,7 @@ import ConnectionInline from "./ConnectionInline";
 import { Plus, ListChecks, CalendarDays, Clock3 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import type { Todo } from "../types";
 
 export default function TodoList() {
   const {
@@ -25,6 +26,8 @@ export default function TodoList() {
   const [newReminderTime, setNewReminderTime] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [showDescField, setShowDescField] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
+  const prevCompletedCountRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const descRef = useRef<HTMLTextAreaElement>(null);
   const todayDate = new Date().toISOString().slice(0, 10);
@@ -62,13 +65,80 @@ export default function TodoList() {
     }
     return a.position - b.position;
   });
-  const highPrioritySoloTodos = sortedSoloTodos.filter((t) => t.high_priority === 1);
-  const regularSoloTodos = sortedSoloTodos.filter((t) => t.high_priority !== 1);
+  const orderedAllTodos = useMemo(() => {
+    return [...activeTodos].sort((a, b) => {
+      if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
+      if (a.high_priority === 1 && b.high_priority === 1) {
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      }
+      return a.position - b.position;
+    });
+  }, [activeTodos]);
+  const orderIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    orderedAllTodos.forEach((todo, idx) => map.set(todo.id, idx));
+    return map;
+  }, [orderedAllTodos]);
+  const activeSoloTodos = sortedSoloTodos.filter((t) => t.is_completed !== 1);
+  const completedSoloTodos = sortedSoloTodos
+    .filter((t) => t.is_completed === 1)
+    .sort((a, b) => {
+      const aTime = a.completed_at ? Date.parse(a.completed_at) : Number.MAX_SAFE_INTEGER;
+      const bTime = b.completed_at ? Date.parse(b.completed_at) : Number.MAX_SAFE_INTEGER;
+      if (aTime !== bTime) return aTime - bTime;
+      return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+    });
+  const highPrioritySoloTodos = activeSoloTodos.filter((t) => t.high_priority === 1);
+  const regularSoloTodos = activeSoloTodos.filter((t) => t.high_priority !== 1);
   const orderedSoloTodos = [...highPrioritySoloTodos, ...regularSoloTodos];
   const nextSoloTodoIdById = new Map<string, string | null>();
   orderedSoloTodos.forEach((todo, idx) => {
     nextSoloTodoIdById.set(todo.id, orderedSoloTodos[idx + 1]?.id ?? null);
   });
+  const activeConnections = useMemo(
+    () => groupConnections.filter((c) => !c.is_fully_complete),
+    [groupConnections]
+  );
+  const completedConnections = useMemo(
+    () => groupConnections.filter((c) => c.is_fully_complete),
+    [groupConnections]
+  );
+  useEffect(() => {
+    const prev = prevCompletedCountRef.current;
+    const next = completedSoloTodos.length + completedConnections.length;
+    if (prev === 0 && next > 0) {
+      setShowCompleted(false);
+    }
+    prevCompletedCountRef.current = next;
+  }, [completedSoloTodos.length, completedConnections.length]);
+  const sortedActiveConnections = useMemo(() => {
+    const rankFor = (conn: (typeof groupConnections)[number]) => {
+      const firstId = conn.items[0]?.todo_id;
+      if (!firstId) return Number.MAX_SAFE_INTEGER;
+      return orderIndexById.get(firstId) ?? Number.MAX_SAFE_INTEGER;
+    };
+    return [...activeConnections].sort((a, b) => rankFor(a) - rankFor(b));
+  }, [activeConnections, orderIndexById]);
+  const orderedActiveItems = useMemo(() => {
+    const items: Array<
+      | { type: "conn"; id: string; order: number; conn: (typeof groupConnections)[number] }
+      | { type: "todo"; id: string; order: number; todo: Todo }
+    > = [];
+
+    for (const conn of sortedActiveConnections) {
+      const firstId = conn.items[0]?.todo_id;
+      const order = firstId ? orderIndexById.get(firstId) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+      items.push({ type: "conn", id: conn.id, order, conn });
+    }
+
+    for (const todo of activeSoloTodos) {
+      const order = orderIndexById.get(todo.id) ?? Number.MAX_SAFE_INTEGER;
+      items.push({ type: "todo", id: todo.id, order, todo });
+    }
+
+    items.sort((a, b) => a.order - b.order);
+    return items;
+  }, [sortedActiveConnections, activeSoloTodos, orderIndexById]);
 
   useEffect(() => {
     if (isAdding && inputRef.current) {
@@ -238,35 +308,104 @@ export default function TodoList() {
         </div>
       )}
 
-      {/* Connections in this group */}
-      {groupConnections.length > 0 && (
-        <div className="space-y-2 mb-4">
-          <AnimatePresence mode="popLayout">
-            {groupConnections.map((conn) => (
+      {/* Connections + solo todos in placement order */}
+      <div className="space-y-2 mb-4">
+        <AnimatePresence mode="popLayout">
+          {orderedActiveItems.map((item) =>
+            item.type === "conn" ? (
               <ConnectionInline
-                key={conn.id}
-                connection={conn}
+                key={`conn-${item.id}`}
+                connection={item.conn}
                 highlightTodoId={highlightTodoId}
               />
-            ))}
-          </AnimatePresence>
-        </div>
-      )}
-
-      {/* Solo todos (not part of any connection) */}
-      <div className="space-y-2">
-          <AnimatePresence mode="popLayout">
-          {regularSoloTodos
-            .map((todo) => (
+            ) : (
               <TodoItem
-                key={todo.id}
-                todo={todo}
-                isHighlighted={highlightTodoId === todo.id}
-                nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
+                key={`todo-${item.id}`}
+                todo={item.todo}
+                isHighlighted={highlightTodoId === item.todo.id}
+                nextTodoId={nextSoloTodoIdById.get(item.todo.id) ?? null}
               />
-            ))}
+            )
+          )}
         </AnimatePresence>
       </div>
+
+      {/* Completed divider */}
+      <AnimatePresence mode="popLayout">
+      {(completedSoloTodos.length > 0 || completedConnections.length > 0) && (
+        <motion.div
+          key="completed-section"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="mt-5"
+          >
+            <button
+              onClick={() => setShowCompleted((v) => !v)}
+              className="w-full flex items-center justify-between px-2 py-2 text-sm font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400"
+            >
+              <span>Completed</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="text-sm text-emerald-600 dark:text-emerald-400">
+                  {completedSoloTodos.length + completedConnections.length}
+                </span>
+                <svg
+                  viewBox="0 0 24 24"
+                  className={`w-4 h-4 transition-transform ${showCompleted ? "rotate-180" : ""}`}
+                  fill="none"
+                >
+                  <path
+                    d="M6 9l6 6 6-6"
+                    stroke="currentColor"
+                    strokeWidth="2.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+            </button>
+            <motion.div
+              initial={{ scaleX: 0 }}
+              animate={{ scaleX: 1 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="h-px bg-slate-200 dark:bg-slate-800 origin-left"
+            />
+            <AnimatePresence mode="popLayout">
+              {showCompleted && (
+                <motion.div
+                  key="completed-list"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.25, ease: "easeOut" }}
+                  className="mt-3 space-y-2 overflow-hidden"
+                >
+                  {completedSoloTodos.map((todo) => (
+                    <TodoItem
+                      key={`completed-todo-${todo.id}`}
+                      todo={todo}
+                      isHighlighted={highlightTodoId === todo.id}
+                      nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
+                    />
+                  ))}
+                  {completedConnections.length > 0 && (
+                    <div className="pt-1 space-y-2">
+                      {completedConnections.map((conn) => (
+                        <ConnectionInline
+                          key={`completed-conn-${conn.id}`}
+                          connection={conn}
+                          highlightTodoId={highlightTodoId}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Add todo */}
       <div className="mt-4">
