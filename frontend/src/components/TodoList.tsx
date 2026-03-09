@@ -114,32 +114,51 @@ export default function TodoList() {
   }, [completedSoloTodos.length, completedConnections.length]);
   const sortedActiveConnections = useMemo(() => {
     const rankFor = (conn: (typeof groupConnections)[number]) => {
-      const firstId = conn.items[0]?.todo_id;
-      if (!firstId) return Number.MAX_SAFE_INTEGER;
-      return orderIndexById.get(firstId) ?? Number.MAX_SAFE_INTEGER;
+      // Use the first item that belongs to this group — conn.items[0] may be from another group
+      for (const item of conn.items) {
+        const rank = orderIndexById.get(item.todo_id);
+        if (rank !== undefined) return rank;
+      }
+      return Number.MAX_SAFE_INTEGER;
     };
     return [...activeConnections].sort((a, b) => rankFor(a) - rankFor(b));
   }, [activeConnections, orderIndexById]);
+  const activeTodoHighPriorityIds = useMemo(() => {
+    const s = new Set<string>();
+    activeTodos.forEach((t) => { if (t.high_priority === 1) s.add(t.id); });
+    return s;
+  }, [activeTodos]);
+
   const orderedActiveItems = useMemo(() => {
     const items: Array<
-      | { type: "conn"; id: string; order: number; conn: (typeof groupConnections)[number] }
-      | { type: "todo"; id: string; order: number; todo: Todo }
+      | { type: "conn"; id: string; order: number; highPriority: boolean; conn: (typeof groupConnections)[number] }
+      | { type: "todo"; id: string; order: number; highPriority: boolean; todo: Todo }
     > = [];
 
     for (const conn of sortedActiveConnections) {
-      const firstId = conn.items[0]?.todo_id;
-      const order = firstId ? orderIndexById.get(firstId) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
-      items.push({ type: "conn", id: conn.id, order, conn });
+      // Rank by first current-group item so cross-group connections sort correctly
+      let order = Number.MAX_SAFE_INTEGER;
+      for (const item of conn.items) {
+        const rank = orderIndexById.get(item.todo_id);
+        if (rank !== undefined) { order = rank; break; }
+      }
+      // Connection is high priority if any of its items is a high priority todo
+      const highPriority = conn.items.some((item) => activeTodoHighPriorityIds.has(item.todo_id));
+      items.push({ type: "conn", id: conn.id, order, highPriority, conn });
     }
 
     for (const todo of activeSoloTodos) {
       const order = orderIndexById.get(todo.id) ?? Number.MAX_SAFE_INTEGER;
-      items.push({ type: "todo", id: todo.id, order, todo });
+      items.push({ type: "todo", id: todo.id, order, highPriority: todo.high_priority === 1, todo });
     }
 
-    items.sort((a, b) => a.order - b.order);
+    // High priority items always float to the top, then sort by position
+    items.sort((a, b) => {
+      if (a.highPriority !== b.highPriority) return a.highPriority ? -1 : 1;
+      return a.order - b.order;
+    });
     return items;
-  }, [sortedActiveConnections, activeSoloTodos, orderIndexById]);
+  }, [sortedActiveConnections, activeSoloTodos, orderIndexById, activeTodoHighPriorityIds]);
 
   const orderedActiveIds = useMemo(
     () => orderedActiveItems.map((item) => ({
@@ -225,11 +244,13 @@ export default function TodoList() {
 
   const persistReorder = async (items: Array<{ type: "conn" | "todo"; id: string }>) => {
     if (!selectedGroupId) return;
+    // Build the current-group todo ID set for filtering
+    const groupTodoIds = new Set(activeTodos.map((t) => t.id));
     const orderedTodoIds: string[] = [];
     const seen = new Set<string>();
     for (const item of items) {
       if (item.type === "todo") {
-        if (!seen.has(item.id)) {
+        if (!seen.has(item.id) && groupTodoIds.has(item.id)) {
           orderedTodoIds.push(item.id);
           seen.add(item.id);
         }
@@ -238,7 +259,8 @@ export default function TodoList() {
       const conn = activeConnById.get(item.id);
       if (!conn) continue;
       for (const connItem of conn.items) {
-        if (seen.has(connItem.todo_id)) continue;
+        // Only include todos that belong to the current group
+        if (seen.has(connItem.todo_id) || !groupTodoIds.has(connItem.todo_id)) continue;
         orderedTodoIds.push(connItem.todo_id);
         seen.add(connItem.todo_id);
       }
@@ -255,7 +277,8 @@ export default function TodoList() {
   const handleDragEnd = async () => {
     if (!reorderMode) return;
     if (dragId) {
-      await persistReorder(reorderItems);
+      // Use the ref — reorderItems state is stale inside the pointerup closure
+      await persistReorder(reorderItemsRef.current);
     }
     setDragId(null);
   };
