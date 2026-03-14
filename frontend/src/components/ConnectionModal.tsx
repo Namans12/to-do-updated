@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { useApp } from "../context/AppContext";
-import { connectionsApi, todosApi } from "../api/client";
-import type { Todo } from "../types";
+import { connectionsApi } from "../api/client";
+import type { Todo, ConnectionKind } from "../types";
 import { X, Plus, Share2, FolderOpen } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import { getActionErrorMessage } from "../utils/errors";
+import { compareByCreatedAtOldestFirst } from "../utils/todoOrdering";
 
 interface ConnectionModalProps {
   isOpen: boolean;
@@ -19,10 +21,17 @@ export default function ConnectionModal({
   onCreated,
   preselectedTodo,
 }: ConnectionModalProps) {
-  const { groups, connections, refreshConnections } = useApp();
+  const connectionKinds: Array<{ value: ConnectionKind; label: string; hint: string }> = [
+    { value: "sequence", label: "Sequence", hint: "A step-by-step chain." },
+    { value: "dependency", label: "Dependency", hint: "One step unlocks another." },
+    { value: "branch", label: "Branch", hint: "A split or fork in work." },
+    { value: "related", label: "Related", hint: "Connected, but not strictly ordered." },
+  ];
+  const { groups, connections, allTodos: cachedTodos, ensureAllTodosLoaded, refreshConnections } = useApp();
   const [selectedTodos, setSelectedTodos] = useState<Todo[]>([]);
   const [allTodos, setAllTodos] = useState<Todo[]>([]);
   const [connectionName, setConnectionName] = useState("");
+  const [connectionKind, setConnectionKind] = useState<ConnectionKind>("sequence");
   const [loading, setLoading] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
 
@@ -32,7 +41,7 @@ export default function ConnectionModal({
 
   useEffect(() => {
     if (isOpen) {
-      loadAllTodos();
+      void loadAllTodos();
       if (preselectedTodo) {
         setSelectedTodos([preselectedTodo]);
         setSelectedGroupId(preselectedTodo.group_id);
@@ -40,18 +49,17 @@ export default function ConnectionModal({
     } else {
       setSelectedTodos([]);
       setConnectionName("");
+      setConnectionKind("sequence");
       setSelectedGroupId(null);
     }
   }, [isOpen, preselectedTodo]);
 
   const loadAllTodos = async () => {
     try {
-      const promises = groups.map((g) => todosApi.list(g.id));
-      const results = await Promise.all(promises);
-      const todos = results.flat().filter((t) => !t.deleted_at);
-      setAllTodos(todos);
-    } catch {
-      toast.error("Failed to load todos");
+      const loaded = cachedTodos.length > 0 ? cachedTodos : await ensureAllTodosLoaded();
+      setAllTodos(loaded.filter((t) => !t.deleted_at));
+    } catch (error) {
+      toast.error(getActionErrorMessage("load tasks", error));
     }
   };
 
@@ -80,7 +88,7 @@ export default function ConnectionModal({
     .sort((a, b) => {
       if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
       if (a.high_priority === 1 && b.high_priority === 1) {
-        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        return compareByCreatedAtOldestFirst(a, b);
       }
       return a.position - b.position;
     });
@@ -93,13 +101,13 @@ export default function ConnectionModal({
     setLoading(true);
     try {
       const todoIds = selectedTodos.map((t) => t.id);
-      await connectionsApi.create(todoIds, connectionName.trim() || undefined);
+      await connectionsApi.create(todoIds, connectionName.trim() || undefined, connectionKind);
       await refreshConnections();
       toast.success("Connection created!");
       onCreated?.();
       onClose();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed to create connection");
+      toast.error(getActionErrorMessage("create the connection", e));
     } finally {
       setLoading(false);
     }
@@ -184,6 +192,29 @@ export default function ConnectionModal({
                 value={connectionName}
                 onChange={(e) => setConnectionName(e.target.value)}
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">
+                Connection Meaning
+              </label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {connectionKinds.map((kind) => (
+                  <button
+                    key={kind.value}
+                    type="button"
+                    onClick={() => setConnectionKind(kind.value)}
+                    className={`rounded-xl border px-3 py-3 text-left transition-all ${
+                      connectionKind === kind.value
+                        ? "border-indigo-400 bg-indigo-500/10 shadow-sm"
+                        : "border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600"
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{kind.label}</div>
+                    <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{kind.hint}</div>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Selected tasks (ordered) */}

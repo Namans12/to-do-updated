@@ -5,8 +5,10 @@ import TrashView from "./components/TrashView";
 import ConnectionView from "./components/ConnectionView";
 import SearchView from "./components/SearchView";
 import GraphView from "./components/GraphView";
+import ReminderView from "./components/ReminderView";
 import ReminderAlarmModal from "./components/ReminderAlarmModal";
-import { Menu } from "lucide-react";
+import { Keyboard, Menu } from "lucide-react";
+import { useEffect, useState } from "react";
 
 export default function App() {
   const {
@@ -16,7 +18,103 @@ export default function App() {
     setSidebarOpen,
     activeReminderAlarm,
     stopReminderAlarm,
+    setCurrentView,
+    selectedGroupId,
   } = useApp();
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  useEffect(() => {
+    const isTypingTarget = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      if (!element) return false;
+      const tag = element.tagName;
+      return (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        element.isContentEditable ||
+        element.closest("[data-ignore-shortcuts='true']") !== null
+      );
+    };
+
+    const triggerNewTodo = () => {
+      const button = document.querySelector<HTMLButtonElement>("[data-add-todo-btn='true']");
+      button?.click();
+    };
+
+    const focusSearch = () => {
+      setCurrentView("search");
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>("[data-search-input='true']");
+        input?.focus();
+        input?.select();
+      });
+    };
+
+    const toggleGraphFullscreen = () => {
+      window.dispatchEvent(new CustomEvent("nodes:graph:toggle-fullscreen"));
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey || event.altKey) && event.key !== "?") return;
+
+      if (event.key === "Escape" && showShortcuts) {
+        setShowShortcuts(false);
+        return;
+      }
+
+      if (isTypingTarget(event.target) && event.key !== "Escape") return;
+
+      switch (event.key) {
+        case "/":
+          event.preventDefault();
+          focusSearch();
+          return;
+        case "n":
+        case "N":
+          if (currentView === "todos" && selectedGroupId) {
+            event.preventDefault();
+            triggerNewTodo();
+          }
+          return;
+        case "g":
+        case "G":
+          event.preventDefault();
+          setCurrentView("graph");
+          return;
+        case "t":
+        case "T":
+          event.preventDefault();
+          setCurrentView("todos");
+          return;
+        case "c":
+        case "C":
+          event.preventDefault();
+          setCurrentView("connections");
+          return;
+        case "r":
+        case "R":
+          event.preventDefault();
+          setCurrentView("planner");
+          return;
+        case "f":
+        case "F":
+          if (currentView === "graph") {
+            event.preventDefault();
+            toggleGraphFullscreen();
+          }
+          return;
+        case "?":
+          event.preventDefault();
+          setShowShortcuts((value) => !value);
+          return;
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentView, selectedGroupId, setCurrentView, showShortcuts]);
 
   if (loading) {
     return (
@@ -83,6 +181,13 @@ export default function App() {
           >
             <Menu size={20} />
           </button>
+          <button
+            onClick={() => setShowShortcuts(true)}
+            className="ml-auto p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            title="Keyboard shortcuts"
+          >
+            <Keyboard size={18} />
+          </button>
         </div>
 
         <div
@@ -102,6 +207,7 @@ export default function App() {
             {currentView === "connections" && <ConnectionView />}
             {currentView === "search" && <SearchView />}
             {currentView === "graph" && <GraphView />}
+            {currentView === "planner" && <ReminderView />}
           </div>
         </div>
       </main>
@@ -114,6 +220,52 @@ export default function App() {
         highPriority={activeReminderAlarm?.highPriority ?? false}
         onStop={stopReminderAlarm}
       />
+
+      {showShortcuts && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          onClick={() => setShowShortcuts(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="rounded-2xl bg-indigo-500/10 p-3">
+                <Keyboard size={20} className="text-indigo-500" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold">Keyboard Shortcuts</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Fast actions for everyday navigation.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 space-y-2">
+              {[
+                ["/", "Open Search"],
+                ["N", "Create a new task in the current group"],
+                ["T", "Open group tasks"],
+                ["C", "Open Connections"],
+                ["G", "Open GraphPlan"],
+                ["R", "Open Agenda"],
+                ["F", "Toggle GraphPlan fullscreen"],
+                ["?", "Open or close this shortcut list"],
+              ].map(([key, description]) => (
+                <div
+                  key={key}
+                  className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/70 px-4 py-3"
+                >
+                  <span className="text-sm text-slate-600 dark:text-slate-300">{description}</span>
+                  <kbd className="rounded-lg bg-white dark:bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-500 dark:text-slate-300 shadow-sm">
+                    {key}
+                  </kbd>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

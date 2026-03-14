@@ -112,6 +112,9 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
               >
                 {connection.name || "Connection"}
               </span>
+              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                {kindLabel[connection.kind]}
+              </span>
               <span className="text-[10px] text-slate-400 dark:text-slate-500">
                 {progress.completed}/{progress.total}
               </span>
@@ -301,3 +304,9 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
     </motion.div>
   );
 }
+  const kindLabel = {
+    sequence: "Sequence",
+    dependency: "Dependency",
+    branch: "Branch",
+    related: "Related",
+  } as const;

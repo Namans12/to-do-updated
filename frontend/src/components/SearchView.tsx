@@ -4,6 +4,7 @@ import type { SearchResult } from "../api/client";
 import { useApp } from "../context/AppContext";
 import { Search, X, FolderOpen, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import EmptyState from "./EmptyState";
 
 export default function SearchView() {
   const { jumpToTodo } = useApp();
@@ -69,6 +70,7 @@ export default function SearchView() {
           />
           <input
             ref={inputRef}
+            data-search-input="true"
             className="input-base !pl-11 !pr-10"
             placeholder="Search to-dos..."
             value={query}
@@ -105,12 +107,19 @@ export default function SearchView() {
       )}
 
       {!loading && !errorMessage && searched && results.length === 0 && (
-        <div className="flex flex-col items-center py-16 text-center">
-          <Search size={32} className="text-slate-300 dark:text-slate-600 mb-3" />
-          <p className="text-sm text-slate-400 dark:text-slate-500">
-            No results for "{query}"
-          </p>
-        </div>
+        <EmptyState
+          icon={<Search size={28} className="text-slate-300 dark:text-slate-600" />}
+          title={`No results for "${query}"`}
+          description="Try a shorter phrase, a different keyword, or search in the task notes too."
+        />
+      )}
+
+      {!loading && !errorMessage && !searched && !query.trim() && (
+        <EmptyState
+          icon={<Search size={28} className="text-slate-300 dark:text-slate-600" />}
+          title="Search across all tasks"
+          description="Find tasks by title, notes, group, and status. Press / anywhere to jump here instantly."
+        />
       )}
 
       {!loading && !errorMessage && results.length > 0 && (
@@ -175,7 +184,7 @@ export default function SearchView() {
                     </p>
                     {item.description && (
                       <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 line-clamp-1">
-                        {item.description}
+                        Note: {item.description}
                       </p>
                     )}
                   </div>

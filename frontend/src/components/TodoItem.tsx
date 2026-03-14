@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import toast from "react-hot-toast";
+import { getActionErrorMessage } from "../utils/errors";
 
 interface TodoItemProps {
   todo: Todo;
@@ -88,7 +89,7 @@ export default function TodoItem({
         setIsChecking(false);
       }, 400);
     } catch {
-      toast.error("Failed to update");
+      toast.error(getActionErrorMessage("update the task", new Error("Update failed")));
       setIsChecking(false);
     }
   };
@@ -100,7 +101,7 @@ export default function TodoItem({
       await refreshConnections();
       toast.success("Moved to trash");
     } catch {
-      toast.error("Failed to delete");
+      toast.error(getActionErrorMessage("move the task to trash", new Error("Delete failed")));
     }
   };
 
@@ -148,7 +149,7 @@ export default function TodoItem({
         focusNewTodoInput();
       }
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed to update");
+      toast.error(getActionErrorMessage("save the task", e));
     }
   };
 
@@ -162,7 +163,7 @@ export default function TodoItem({
       await refreshTodos();
       setDescriptionMode(false);
     } catch {
-      toast.error("Failed to save description");
+      toast.error(getActionErrorMessage("save the notes", new Error("Save failed")));
     }
   };
 
@@ -263,7 +264,7 @@ export default function TodoItem({
               <textarea
                 ref={editDescRef}
                 className="input-base !py-2 text-sm resize-none"
-                placeholder="Add a description (optional)..."
+                placeholder="Add notes (optional)..."
                 rows={2}
                 value={editDesc}
                 onChange={(e) => setEditDesc(e.target.value)}
@@ -350,7 +351,7 @@ export default function TodoItem({
                   Cancel
                 </button>
                 <span className="text-[10px] text-slate-400 dark:text-slate-500 ml-auto">
-                  Shift+Enter for description
+                  Shift+Enter for notes
                 </span>
               </div>
             </div>
@@ -362,7 +363,7 @@ export default function TodoItem({
               <textarea
                 ref={descRef}
                 className="input-base !py-2 text-sm resize-none !ring-emerald-500/50 !border-emerald-500 focus:!ring-emerald-500/50 focus:!border-emerald-500"
-                placeholder="Add a description..."
+                placeholder="Add notes..."
                 rows={2}
                 value={editDesc}
                 onChange={(e) => setEditDesc(e.target.value)}
@@ -409,7 +410,7 @@ export default function TodoItem({
                 )}
               </div>
 
-              {/* Description subtext */}
+              {/* Notes preview */}
               {todo.description && (
                 <p
                   className={`mt-0.5 text-xs leading-relaxed pl-0.5 whitespace-pre-wrap ${
@@ -447,7 +448,7 @@ export default function TodoItem({
                 setDescriptionMode(true);
               }}
               className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-              title="Add description (Shift+Enter)"
+              title="Edit notes (Shift+Enter)"
             >
               <ChevronDown size={14} className="text-slate-400" />
             </button>

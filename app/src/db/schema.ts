@@ -29,6 +29,7 @@ export const todos = sqliteTable("todos", {
 export const connections = sqliteTable("connections", {
   id: text("id").primaryKey(),
   name: text("name"),
+  kind: text("kind").notNull().default("sequence"),
   created_at: text("created_at").notNull(),
 });
 

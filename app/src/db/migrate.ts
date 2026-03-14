@@ -36,6 +36,7 @@ export function runMigrations(dbPath?: string): void {
     CREATE TABLE IF NOT EXISTS connections (
       id TEXT PRIMARY KEY,
       name TEXT,
+      kind TEXT NOT NULL DEFAULT 'sequence',
       created_at TEXT NOT NULL
     );
 
@@ -62,6 +63,10 @@ export function runMigrations(dbPath?: string): void {
   }
   if (!todoColumns.some((col) => col.name === "completed_at")) {
     sqlite.exec("ALTER TABLE todos ADD COLUMN completed_at TEXT");
+  }
+  const connectionColumns = sqlite.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
+  if (!connectionColumns.some((col) => col.name === "kind")) {
+    sqlite.exec("ALTER TABLE connections ADD COLUMN kind TEXT NOT NULL DEFAULT 'sequence'");
   }
 
   // Normalize legacy connection memberships so one todo can belong to only one connection.

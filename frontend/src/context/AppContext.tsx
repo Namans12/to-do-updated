@@ -15,6 +15,7 @@ interface AppState {
   groups: Group[];
   selectedGroupId: string | null;
   todos: Todo[];
+  allTodos: Todo[];
   connections: Connection[];
   highlightTodoId: string | null;
   currentView: View;
@@ -40,6 +41,7 @@ interface AppContextType extends AppState {
   refreshGroups: () => Promise<void>;
   refreshTodos: () => Promise<void>;
   refreshConnections: () => Promise<void>;
+  ensureAllTodosLoaded: () => Promise<Todo[]>;
   setSidebarOpen: (open: boolean) => void;
   stopReminderAlarm: () => Promise<void>;
 }
@@ -61,11 +63,33 @@ function writeReminderAcks(value: Record<string, string>) {
   localStorage.setItem(REMINDER_ACK_KEY, JSON.stringify(value));
 }
 
+function buildAllTodosSnapshot(
+  groups: Group[],
+  selectedGroupId: string | null,
+  visibleTodos: Todo[],
+  cache: Record<string, Todo[]>
+) {
+  const seen = new Set<string>();
+  const merged: Todo[] = [];
+
+  for (const group of groups) {
+    const source = group.id === selectedGroupId ? visibleTodos : cache[group.id] ?? [];
+    for (const todo of source) {
+      if (seen.has(todo.id)) continue;
+      seen.add(todo.id);
+      merged.push(todo);
+    }
+  }
+
+  return merged;
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>({
     groups: [],
     selectedGroupId: null,
     todos: [],
+    allTodos: [],
     connections: [],
     highlightTodoId: null,
     currentView: "todos",
@@ -76,6 +100,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   });
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const refreshGroups = useCallback(async () => {
     try {
@@ -88,12 +117,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
             delete todosCacheRef.current[cachedGroupId];
           }
         }
-        return {
+        const nextState = {
           ...s,
           groups,
           selectedGroupId: groupStillExists ? s.selectedGroupId : groups[0]?.id ?? null,
           // Clear stale todos immediately when the active group was deleted
           todos: groupStillExists ? s.todos : [],
+        };
+        return {
+          ...nextState,
+          allTodos: buildAllTodosSnapshot(
+            nextState.groups,
+            nextState.selectedGroupId,
+            nextState.todos,
+            todosCacheRef.current
+          ),
         };
       });
     } catch (e) {
@@ -111,9 +149,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const todos = await todosApi.list(currentGroupId);
       todosCacheRef.current[currentGroupId] = todos;
-      setState((s) =>
-        s.selectedGroupId === currentGroupId ? { ...s, todos } : s
-      );
+      setState((s) => {
+        const nextState =
+          s.selectedGroupId === currentGroupId ? { ...s, todos } : s;
+        return {
+          ...nextState,
+          allTodos: buildAllTodosSnapshot(
+            nextState.groups,
+            nextState.selectedGroupId,
+            nextState.todos,
+            todosCacheRef.current
+          ),
+        };
+      });
     } catch (e) {
       toast.error("Failed to load todos");
       console.error(e);
@@ -132,14 +180,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
-    setState((s) => ({
-      ...s,
-      selectedGroupId: id,
-      todos: cached ?? [],
-      currentView: "todos",
-      highlightTodoId: null,
-      reorderMode: false,
-    }));
+    setState((s) => {
+      const nextState = {
+        ...s,
+        selectedGroupId: id,
+        todos: cached ?? [],
+        currentView: "todos" as const,
+        highlightTodoId: null,
+        reorderMode: false,
+      };
+      return {
+        ...nextState,
+        allTodos: buildAllTodosSnapshot(
+          nextState.groups,
+          nextState.selectedGroupId,
+          nextState.todos,
+          todosCacheRef.current
+        ),
+      };
+    });
   }, []);
 
   const startReorder = useCallback((groupId: string) => {
@@ -178,6 +237,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setSidebarOpen = useCallback((open: boolean) => {
     setState((s) => ({ ...s, sidebarOpen: open }));
+  }, []);
+
+  const ensureAllTodosLoaded = useCallback(async () => {
+    const groups = stateRef.current.groups;
+    if (groups.length === 0) return [];
+
+    await Promise.all(
+      groups.map(async (group) => {
+        if (todosCacheRef.current[group.id]) return;
+        try {
+          todosCacheRef.current[group.id] = await todosApi.list(group.id);
+        } catch {
+          // Keep best-effort behavior; visible group fetches still use refreshTodos.
+        }
+      })
+    );
+
+    const currentState = stateRef.current;
+    const merged = buildAllTodosSnapshot(
+      currentState.groups,
+      currentState.selectedGroupId,
+      currentState.todos,
+      todosCacheRef.current
+    );
+    setState((s) => ({ ...s, allTodos: merged }));
+    return merged;
   }, []);
 
   const stopReminderAlarm = useCallback(async () => {
@@ -320,6 +405,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!state.selectedGroupId) return;
     todosCacheRef.current[state.selectedGroupId] = state.todos;
+    setState((s) => ({
+      ...s,
+      allTodos: buildAllTodosSnapshot(
+        s.groups,
+        s.selectedGroupId,
+        s.todos,
+        todosCacheRef.current
+      ),
+    }));
   }, [state.selectedGroupId, state.todos]);
 
   // Warm cache so switching groups feels instant after initial load.
@@ -334,6 +428,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
             const todos = await todosApi.list(group.id);
             if (!cancelled) {
               todosCacheRef.current[group.id] = todos;
+              setState((s) => ({
+                ...s,
+                allTodos: buildAllTodosSnapshot(
+                  s.groups,
+                  s.selectedGroupId,
+                  s.todos,
+                  todosCacheRef.current
+                ),
+              }));
             }
           } catch {
             // Ignore cache warm failures; regular refresh handles visible state.
@@ -367,6 +470,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         refreshGroups,
         refreshTodos,
         refreshConnections,
+        ensureAllTodosLoaded,
         setSidebarOpen,
         stopReminderAlarm,
       }}

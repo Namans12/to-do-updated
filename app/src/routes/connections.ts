@@ -6,12 +6,23 @@ import { connections, connectionItems, todos } from "../db/schema.js";
 
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
+const CONNECTION_KINDS = ["sequence", "dependency", "branch", "related"] as const;
+type ConnectionKind = (typeof CONNECTION_KINDS)[number];
+
+function normalizeConnectionKind(value: unknown): ConnectionKind | null {
+  if (value === undefined || value === null || value === "") return "sequence";
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return CONNECTION_KINDS.includes(normalized as ConnectionKind)
+    ? (normalized as ConnectionKind)
+    : null;
+}
 
 /**
  * Helper: build the response shape for a connection with its items and progress.
  */
 function buildConnectionResponse(
-  connection: { id: string; name: string | null; created_at: string },
+  connection: { id: string; name: string | null; kind: string; created_at: string },
   items: Array<{
     id: string;
     todo_id: string;
@@ -30,6 +41,7 @@ function buildConnectionResponse(
   return {
     id: connection.id,
     name: connection.name,
+    kind: connection.kind,
     items: items.map((i) => ({
       id: i.id,
       todo_id: i.todo_id,
@@ -105,7 +117,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
   router.post("/", async (c) => {
     try {
       const body = await c.req.json();
-      const { name, todoIds } = body;
+      const { name, todoIds, kind } = body;
 
       // Validate todoIds
       if (!Array.isArray(todoIds) || todoIds.length < 2) {
@@ -179,6 +191,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           return c.json({ error: "Name must be a string" }, 400);
         }
       }
+      const normalizedKind = normalizeConnectionKind(kind);
+      if (!normalizedKind) {
+        return c.json(
+          { error: `kind must be one of: ${CONNECTION_KINDS.join(", ")}` },
+          400
+        );
+      }
 
       const now = new Date().toISOString();
       const connectionId = uuidv4();
@@ -206,6 +225,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           .values({
             id: connectionId,
             name: trimmedName,
+            kind: normalizedKind,
             created_at: now,
           })
           .run();
@@ -301,7 +321,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
     try {
       const id = c.req.param("id");
       const body = await c.req.json();
-      const { name } = body;
+      const { name, kind } = body;
 
       const { db: drizzleDb } = db();
 
@@ -318,11 +338,15 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       // Validate name
       if (name === undefined) {
-        return c.json({ error: "Name field is required" }, 400);
+        if (kind === undefined) {
+          return c.json({ error: "At least one of name or kind must be provided" }, 400);
+        }
       }
 
-      let updatedName: string | null;
-      if (name === null) {
+      let updatedName = connection.name;
+      if (name === undefined) {
+        updatedName = connection.name;
+      } else if (name === null) {
         updatedName = null;
       } else if (typeof name === "string") {
         updatedName = name.trim() || null;
@@ -341,10 +365,17 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           return c.json({ error: "A connection with this name already exists" }, 400);
         }
       }
+      const normalizedKind = kind === undefined ? connection.kind : normalizeConnectionKind(kind);
+      if (!normalizedKind) {
+        return c.json(
+          { error: `kind must be one of: ${CONNECTION_KINDS.join(", ")}` },
+          400
+        );
+      }
 
       drizzleDb
         .update(connections)
-        .set({ name: updatedName })
+        .set({ name: updatedName, kind: normalizedKind })
         .where(eq(connections.id, id))
         .run();
 
@@ -632,6 +663,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
             .values({
               id: newConnectionId,
               name: null,
+              kind: connection.kind,
               created_at: now,
             })
             .run();

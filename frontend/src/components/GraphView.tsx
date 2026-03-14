@@ -8,15 +8,10 @@ import {
   Check,
   Zap,
   GripVertical,
-  Eye,
-  EyeOff,
-  Maximize2,
-  Minimize2,
-  Scissors,
-  Plus,
-  Minus,
 } from "lucide-react";
 import toast from "react-hot-toast";
+import GraphToolbar from "./graph/GraphToolbar";
+import GraphBoundaryOverlay from "./graph/GraphBoundaryOverlay";
 
 /* ─── Types ────────────────────────────────────────── */
 
@@ -1323,6 +1318,16 @@ export default function GraphView() {
     });
   };
 
+  useEffect(() => {
+    const handler = () => {
+      void toggleFullscreen();
+    };
+    window.addEventListener("nodes:graph:toggle-fullscreen", handler as EventListener);
+    return () => {
+      window.removeEventListener("nodes:graph:toggle-fullscreen", handler as EventListener);
+    };
+  }, [toggleFullscreen]);
+
   /* ── Derived ────────────────────────────────────── */
 
   const currentGroup = groups.find((g) => g.id === groupId);
@@ -1506,63 +1511,20 @@ export default function GraphView() {
       ) : (
         /* ── Canvas ────────────────────────────────── */
         <div ref={graphRef} className={`relative ${isFullscreen ? "" : "pb-2"}`}>
-          <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
-            <button
-              onClick={() => setShowPanel((v) => !v)}
-              title={showPanel ? "Hide controls" : "Show controls"}
-              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-            >
-              {showPanel ? (
-                <EyeOff size={14} className="text-slate-600 dark:text-slate-300" />
-              ) : (
-                <Eye size={14} className="text-slate-600 dark:text-slate-300" />
-              )}
-            </button>
-            <button
-              onClick={toggleCutMode}
-              title={isCutMode ? "Exit cut mode" : "Cut edges"}
-              className={`w-8 h-8 rounded-lg backdrop-blur-sm border flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-150 ${
-                isCutMode
-                  ? "bg-rose-500 text-white border-rose-400"
-                  : "bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800"
-              }`}
-            >
-              <Scissors size={14} className={isCutMode ? "text-white" : "text-slate-600 dark:text-slate-300"} />
-            </button>
-            <button
-              onClick={toggleFullscreen}
-              title={isFullscreen ? "Exit fullscreen" : "Open fullscreen"}
-              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-            >
-              {isFullscreen ? (
-                <Minimize2 size={14} className="text-slate-600 dark:text-slate-300" />
-              ) : (
-                <Maximize2 size={14} className="text-slate-600 dark:text-slate-300" />
-              )}
-            </button>
-            {isFullscreen && (
-              <>
-                <button
-                  onClick={() =>
-                    setZoomScale((z) => Math.max(MIN_ZOOM, Number((z - ZOOM_STEP).toFixed(2))))
-                  }
-                  title="Zoom out"
-                  className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-                >
-                  <Minus size={14} className="text-slate-600 dark:text-slate-300" />
-                </button>
-                <button
-                  onClick={() =>
-                    setZoomScale((z) => Math.min(MAX_ZOOM, Number((z + ZOOM_STEP).toFixed(2))))
-                  }
-                  title="Zoom in"
-                  className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-                >
-                  <Plus size={14} className="text-slate-600 dark:text-slate-300" />
-                </button>
-              </>
-            )}
-          </div>
+          <GraphToolbar
+            showPanel={showPanel}
+            isCutMode={isCutMode}
+            isFullscreen={isFullscreen}
+            onTogglePanel={() => setShowPanel((value) => !value)}
+            onToggleCutMode={toggleCutMode}
+            onToggleFullscreen={() => void toggleFullscreen()}
+            onZoomOut={() =>
+              setZoomScale((z) => Math.max(MIN_ZOOM, Number((z - ZOOM_STEP).toFixed(2))))
+            }
+            onZoomIn={() =>
+              setZoomScale((z) => Math.min(MAX_ZOOM, Number((z + ZOOM_STEP).toFixed(2))))
+            }
+          />
 
           {/* Scrollable canvas */}
           <div
@@ -1586,97 +1548,12 @@ export default function GraphView() {
               position: "relative",
             }}
           >
-          {(nearBoundary.right || nearBoundary.bottom) && draggingNode && (
-            <div
-              className="absolute left-0 top-0 pointer-events-none"
-              style={{
-                width: canvasSize.w * zoomScale,
-                height: canvasSize.h * zoomScale,
-                zIndex: 250,
-              }}
-            >
-              <div
-                className="absolute inset-0"
-                style={{
-                  borderTopRightRadius: 18,
-                  borderBottomRightRadius: 18,
-                  borderBottomLeftRadius: 18,
-                  boxShadow:
-                    "inset -10px 0 18px -16px rgba(253,224,71,0.9), inset 0 -10px 18px -16px rgba(253,224,71,0.9)",
-                }}
-              >
-                {nearBoundary.right && (
-                  <>
-                    <div
-                      className="absolute"
-                      style={{
-                        top: 18,
-                        right: 0,
-                        bottom: 18,
-                        borderRight: "2px dotted rgba(253,224,71,0.95)",
-                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.95))",
-                      }}
-                    />
-                    <div
-                      className="absolute"
-                      style={{
-                        top: 0,
-                        right: 0,
-                        width: 18,
-                        height: 18,
-                        borderTop: "2px dotted rgba(253,224,71,0.9)",
-                        borderRight: "2px dotted rgba(253,224,71,0.95)",
-                        borderTopRightRadius: 18,
-                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.9))",
-                      }}
-                    />
-                  </>
-                )}
-                {nearBoundary.bottom && (
-                  <>
-                    <div
-                      className="absolute"
-                      style={{
-                        left: 18,
-                        right: 18,
-                        bottom: 0,
-                        borderBottom: "2px dotted rgba(253,224,71,0.95)",
-                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.95))",
-                      }}
-                    />
-                    <div
-                      className="absolute"
-                      style={{
-                        left: 0,
-                        bottom: 0,
-                        width: 18,
-                        height: 18,
-                        borderLeft: "2px dotted rgba(253,224,71,0.9)",
-                        borderBottom: "2px dotted rgba(253,224,71,0.95)",
-                        borderBottomLeftRadius: 18,
-                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.9))",
-                      }}
-                    />
-                  </>
-                )}
-                {(nearBoundary.right || nearBoundary.bottom) && (
-                  <div
-                    className="absolute"
-                    style={{
-                      right: 0,
-                      bottom: 0,
-                      width: 18,
-                      height: 18,
-                      borderRight: "2px dotted rgba(253,224,71,0.95)",
-                      borderBottom: "2px dotted rgba(253,224,71,0.95)",
-                      borderBottomRightRadius: 18,
-                      filter: "drop-shadow(0 0 7px rgba(253,224,71,0.95))",
-                    }}
-                  />
-                )}
-              </div>
-            </div>
-          )}
+          <GraphBoundaryOverlay
+            canvasWidth={canvasSize.w * zoomScale}
+            canvasHeight={canvasSize.h * zoomScale}
+            draggingNode={draggingNode}
+            nearBoundary={nearBoundary}
+          />
           <div
             style={{
               width: canvasSize.w,

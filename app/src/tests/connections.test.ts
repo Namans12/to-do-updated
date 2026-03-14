@@ -57,10 +57,12 @@ describe("Node Connections API", () => {
   // Helper: create a connection via API
   async function createConnection(
     todoIds: string[],
-    name?: string
+    name?: string,
+    kind?: "sequence" | "dependency" | "branch" | "related"
   ) {
     const body: any = { todoIds };
     if (name !== undefined) body.name = name;
+    if (kind !== undefined) body.kind = kind;
     const res = await ctx.app.request("/api/connections", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -84,6 +86,7 @@ describe("Node Connections API", () => {
       expect(res.status).toBe(201);
       expect(body.data.id).toBeTruthy();
       expect(body.data.name).toBe("Grocery Run");
+      expect(body.data.kind).toBe("sequence");
       expect(body.data.items).toHaveLength(2);
       expect(body.data.items[0].todo_id).toBe(todo1.id);
       expect(body.data.items[0].title).toBe("Buy groceries");
@@ -110,7 +113,18 @@ describe("Node Connections API", () => {
 
       expect(res.status).toBe(201);
       expect(body.data.name).toBeNull();
+      expect(body.data.kind).toBe("sequence");
       expect(body.data.items).toHaveLength(2);
+    });
+
+    it("should create a connection with an explicit kind", async () => {
+      const todo1 = await createTodo(testGroupId, "task a");
+      const todo2 = await createTodo(testGroupId, "task b");
+
+      const { res, body } = await createConnection([todo1.id, todo2.id], "Blocked", "dependency");
+
+      expect(res.status).toBe(201);
+      expect(body.data.kind).toBe("dependency");
     });
 
     it("should create a connection with more than 2 todos", async () => {
@@ -227,6 +241,21 @@ describe("Node Connections API", () => {
 
       expect(res.status).toBe(400);
       expect(body.error).toContain("Invalid JSON");
+    });
+
+    it("should return 400 for invalid kind", async () => {
+      const todo1 = await createTodo(testGroupId, "task a");
+      const todo2 = await createTodo(testGroupId, "task b");
+
+      const res = await ctx.app.request("/api/connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ todoIds: [todo1.id, todo2.id], kind: "invalid" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("kind must be one of");
     });
   });
 
@@ -380,7 +409,31 @@ describe("Node Connections API", () => {
 
       expect(res.status).toBe(200);
       expect(body.data.name).toBe("Updated Name");
+      expect(body.data.kind).toBe("sequence");
       expect(body.data.items).toHaveLength(2);
+    });
+
+    it("should update connection kind", async () => {
+      const todo1 = await createTodo(testGroupId, "t1");
+      const todo2 = await createTodo(testGroupId, "t2");
+
+      const { body: createBody } = await createConnection(
+        [todo1.id, todo2.id],
+        "Original",
+        "sequence"
+      );
+      const connectionId = createBody.data.id;
+
+      const res = await ctx.app.request(`/api/connections/${connectionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "branch" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.data.kind).toBe("branch");
+      expect(body.data.name).toBe("Original");
     });
 
     it("should allow setting name to null", async () => {
@@ -442,7 +495,25 @@ describe("Node Connections API", () => {
       const body = await res.json();
 
       expect(res.status).toBe(400);
-      expect(body.error).toContain("Name field is required");
+      expect(body.error).toContain("At least one of name or kind");
+    });
+
+    it("should reject invalid kind updates", async () => {
+      const todo1 = await createTodo(testGroupId, "t1");
+      const todo2 = await createTodo(testGroupId, "t2");
+
+      const { body: createBody } = await createConnection([todo1.id, todo2.id]);
+      const connectionId = createBody.data.id;
+
+      const res = await ctx.app.request(`/api/connections/${connectionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "unknown" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("kind must be one of");
     });
   });
 

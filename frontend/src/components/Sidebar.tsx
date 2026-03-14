@@ -7,6 +7,7 @@ import {
   Trash2,
   Share2,
   Search,
+  AlarmClock,
   Sun,
   Moon,
   FolderOpen,
@@ -82,6 +83,7 @@ export default function Sidebar() {
     { id: "trash" as const, icon: Trash2, label: "Trash" },
     { id: "connections" as const, icon: Share2, label: "Connections" },
     { id: "graph" as const, icon: GitBranch, label: "GraphPlan" },
+    { id: "planner" as const, icon: AlarmClock, label: "Agenda" },
     { id: "search" as const, icon: Search, label: "Search" },
   ];
 
@@ -147,6 +149,7 @@ export default function Sidebar() {
           </span>
           <button
             onClick={() => setShowNewGroup(true)}
+            aria-label="Create group"
             className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           >
             <Plus size={16} className="text-slate-400" />

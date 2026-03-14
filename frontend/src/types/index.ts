@@ -1,3 +1,5 @@
+export type ConnectionKind = "sequence" | "dependency" | "branch" | "related";
+
 export interface Group {
   id: string;
   name: string;
@@ -59,10 +61,11 @@ export interface ConnectionProgress {
 export interface Connection {
   id: string;
   name: string | null;
+  kind: ConnectionKind;
   items: ConnectionItem[];
   progress: ConnectionProgress;
   is_fully_complete: boolean;
   created_at: string;
 }
 
-export type View = "todos" | "trash" | "connections" | "search" | "graph";
+export type View = "todos" | "trash" | "connections" | "search" | "graph" | "planner";

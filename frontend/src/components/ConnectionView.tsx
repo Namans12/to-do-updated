@@ -18,22 +18,26 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import EmptyState from "./EmptyState";
+import { getActionErrorMessage } from "../utils/errors";
+import type { ConnectionKind } from "../types";
 
 export default function ConnectionView() {
   const { refreshTodos, refreshConnections, connections, groups, loading: appLoading } = useApp();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [editKind, setEditKind] = useState<ConnectionKind>("sequence");
   const [modalOpen, setModalOpen] = useState(false);
   const loading = appLoading;
 
   const handleRename = async (id: string) => {
     try {
-      await connectionsApi.update(id, editName.trim() || null);
+      await connectionsApi.update(id, { name: editName.trim() || null, kind: editKind });
       await refreshConnections();
       setEditingId(null);
       toast.success("Updated");
     } catch {
-      toast.error("Failed to update");
+      toast.error(getActionErrorMessage("update the connection", new Error("Update failed")));
     }
   };
 
@@ -42,8 +46,8 @@ export default function ConnectionView() {
       await connectionsApi.delete(id);
       await refreshConnections();
       toast.success("Connection removed");
-    } catch {
-      toast.error("Failed to delete");
+    } catch (error) {
+      toast.error(getActionErrorMessage("delete the connection", error));
     }
   };
 
@@ -52,8 +56,8 @@ export default function ConnectionView() {
       await todosApi.toggleComplete(todoId);
       await refreshConnections();
       await refreshTodos();
-    } catch {
-      toast.error("Failed to toggle");
+    } catch (error) {
+      toast.error(getActionErrorMessage("update the task", error));
     }
   };
 
@@ -62,8 +66,8 @@ export default function ConnectionView() {
       await connectionsApi.removeItem(connectionId, todoId);
       await refreshConnections();
       toast.success("Removed from connection");
-    } catch {
-      toast.error("Failed to remove item");
+    } catch (error) {
+      toast.error(getActionErrorMessage("remove the task from the connection", error));
     }
   };
 
@@ -105,17 +109,13 @@ export default function ConnectionView() {
       </div>
 
       {connections.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
-            <Link2 size={28} className="text-slate-300 dark:text-slate-600" />
-          </div>
-          <p className="text-sm text-slate-400 dark:text-slate-500 mb-1">
-            No connections yet
-          </p>
-          <p className="text-xs text-slate-400 dark:text-slate-600">
-            Click "New Connection" to link related to-dos together.
-          </p>
-        </div>
+        <EmptyState
+          icon={<Link2 size={28} className="text-slate-300 dark:text-slate-600" />}
+          title="No connections yet"
+          description="Link related tasks into a sequence, branch, dependency, or related cluster."
+          actionLabel="Create Connection"
+          onAction={() => setModalOpen(true)}
+        />
       ) : (
         <div className="space-y-6">
           <AnimatePresence>
@@ -128,11 +128,14 @@ export default function ConnectionView() {
                 editName={editName}
                 onStartEdit={() => {
                   setEditName(conn.name ?? "");
+                  setEditKind(conn.kind);
                   setEditingId(conn.id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
                 onSaveEdit={() => handleRename(conn.id)}
                 onEditNameChange={setEditName}
+                editKind={editKind}
+                onEditKindChange={setEditKind}
                 onDelete={() => handleDelete(conn.id)}
                 onToggleTodo={handleToggleTodo}
                 onRemoveItem={(todoId) => handleRemoveItem(conn.id, todoId)}
@@ -159,10 +162,12 @@ interface ConnectionCardProps {
   groups: Group[];
   isEditing: boolean;
   editName: string;
+  editKind: ConnectionKind;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSaveEdit: () => void;
   onEditNameChange: (name: string) => void;
+  onEditKindChange: (kind: ConnectionKind) => void;
   onDelete: () => void;
   onToggleTodo: (todoId: string) => void;
   onRemoveItem: (todoId: string) => void;
@@ -172,10 +177,12 @@ function ConnectionCard({
   connection,
   isEditing,
   editName,
+  editKind,
   onStartEdit,
   onCancelEdit,
   onSaveEdit,
   onEditNameChange,
+  onEditKindChange,
   onDelete,
   onToggleTodo,
   onRemoveItem,
@@ -333,6 +340,17 @@ function ConnectionCard({
                 }}
                 placeholder="Connection name..."
               />
+              <select
+                value={editKind}
+                onChange={(e) => onEditKindChange(e.target.value as ConnectionKind)}
+                className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs"
+              >
+                {Object.entries(kindLabel).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
               <button onClick={onSaveEdit} className="p-1.5 rounded-lg bg-indigo-600 text-white">
                 <Check size={12} />
               </button>
@@ -351,6 +369,11 @@ function ConnectionCard({
             >
               {connection.name || "Untitled Connection"}
             </h3>
+          )}
+          {!isEditing && (
+            <span className="mt-1 inline-flex rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+              {kindLabel[connection.kind]}
+            </span>
           )}
         </div>
 
@@ -548,3 +571,9 @@ function ConnectionCard({
     </motion.div>
   );
 }
+  const kindLabel: Record<ConnectionKind, string> = {
+    sequence: "Sequence",
+    dependency: "Dependency",
+    branch: "Branch",
+    related: "Related",
+  };

@@ -7,10 +7,12 @@ import { Plus, ListChecks, CalendarDays, Clock3, GripVertical } from "lucide-rea
 import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
 import toast from "react-hot-toast";
 import type { Todo } from "../types";
-
-function compareByCreatedAtOldestFirst(a: { created_at: string }, b: { created_at: string }) {
-  return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-}
+import EmptyState from "./EmptyState";
+import { getActionErrorMessage } from "../utils/errors";
+import {
+  compareTodosForGroupOrder,
+  isHighPriorityConnection,
+} from "../utils/todoOrdering";
 
 export default function TodoList() {
   const {
@@ -33,6 +35,7 @@ export default function TodoList() {
   const [isAdding, setIsAdding] = useState(false);
   const [showDescField, setShowDescField] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
+  const [visibleActiveCount, setVisibleActiveCount] = useState(60);
   const prevCompletedCountRef = useRef(0);
   const [reorderItems, setReorderItems] = useState<Array<{ type: "conn" | "todo"; id: string }>>([]);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -71,17 +74,9 @@ export default function TodoList() {
 
   // Solo todos = not part of any connection
   const soloTodos = activeTodos.filter((t) => !connectedTodoIds.has(t.id));
-  const sortedSoloTodos = [...soloTodos].sort((a, b) => {
-    if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
-    if (a.position !== b.position) return a.position - b.position;
-    return compareByCreatedAtOldestFirst(a, b);
-  });
+  const sortedSoloTodos = [...soloTodos].sort(compareTodosForGroupOrder);
   const orderedAllTodos = useMemo(() => {
-    return [...activeTodos].sort((a, b) => {
-      if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
-      if (a.position !== b.position) return a.position - b.position;
-      return compareByCreatedAtOldestFirst(a, b);
-    });
+    return [...activeTodos].sort(compareTodosForGroupOrder);
   }, [activeTodos]);
   const orderIndexById = useMemo(() => {
     const map = new Map<string, number>();
@@ -119,9 +114,6 @@ export default function TodoList() {
     prevCompletedCountRef.current = next;
   }, [completedSoloTodos.length, completedConnections.length]);
   const sortedActiveConnections = useMemo(() => {
-    const isHighPriorityConnection = (conn: (typeof groupConnections)[number]) =>
-      conn.items.some((item) => item.high_priority === 1);
-
     const rankFor = (conn: (typeof groupConnections)[number]) => {
       // Use the first item that belongs to this group — conn.items[0] may be from another group
       for (const item of conn.items) {
@@ -252,6 +244,11 @@ export default function TodoList() {
 
   const reorderList =
     reorderMode && reorderItems.length > 0 ? reorderItems : orderedActiveIds;
+  const visibleReorderList = reorderMode ? reorderList : reorderList.slice(0, visibleActiveCount);
+
+  useEffect(() => {
+    setVisibleActiveCount(60);
+  }, [selectedGroupId, reorderMode, orderedActiveIdsKey]);
 
   const handleDragStart = (id: string) => {
     if (!reorderMode) return;
@@ -313,7 +310,7 @@ export default function TodoList() {
       await todosApi.reorder(updates);
       await refreshTodos();
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed to reorder");
+      toast.error(getActionErrorMessage("reorder tasks", e));
     }
   };
 
@@ -439,7 +436,7 @@ export default function TodoList() {
         inputRef.current?.select();
       });
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed to create todo");
+      toast.error(getActionErrorMessage("create the task", e));
     }
   };
 
@@ -476,17 +473,11 @@ export default function TodoList() {
 
   if (!selectedGroupId || !selectedGroup) {
     return (
-      <div className="flex flex-col items-center justify-center h-[60vh] text-center">
-        <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 flex items-center justify-center mb-4">
-          <ListChecks size={32} className="text-indigo-500/50" />
-        </div>
-        <h2 className="text-lg font-semibold text-slate-400 dark:text-slate-500 mb-2">
-          No group selected
-        </h2>
-        <p className="text-sm text-slate-400 dark:text-slate-600">
-          Select a group from the sidebar or create a new one.
-        </p>
-      </div>
+      <EmptyState
+        icon={<ListChecks size={32} className="text-indigo-500/50" />}
+        title="No group selected"
+        description="Choose a group from the sidebar to see its tasks, reminders, and connections."
+      />
     );
   }
 
@@ -547,13 +538,22 @@ export default function TodoList() {
       </div>
 
       <LayoutGroup>
+        {activeTodos.length === 0 && !isAdding && (
+          <EmptyState
+            icon={<ListChecks size={28} className="text-slate-300 dark:text-slate-600" />}
+            title={`Nothing in ${selectedGroup.name} yet`}
+            description="Start with one task, or use Shift+Enter while adding to capture a note right away."
+            actionLabel="Add First Task"
+            onAction={() => setIsAdding(true)}
+          />
+        )}
         {/* Connections + solo todos in placement order */}
         <div
           ref={containerRef}
           className={`relative space-y-2 mb-4 ${reorderMode ? "cursor-grab select-none touch-none" : ""}`}
         >
           <AnimatePresence mode="popLayout">
-            {reorderList.map((item) => {
+            {visibleReorderList.map((item) => {
             if (item.type === "conn") {
               const conn = activeConnById.get(item.id);
               if (!conn) return null;
@@ -632,6 +632,17 @@ export default function TodoList() {
         </AnimatePresence>
       </div>
 
+      {!reorderMode && visibleActiveCount < reorderList.length && (
+        <div className="mb-6 flex justify-center">
+          <button
+            onClick={() => setVisibleActiveCount((count) => count + 60)}
+            className="btn-ghost !py-2 !px-4 text-sm"
+          >
+            Show More Tasks
+          </button>
+        </div>
+      )}
+
       {/* Add todo */}
       <div className="mt-4">
         <AnimatePresence mode="wait">
@@ -670,7 +681,7 @@ export default function TodoList() {
                   <textarea
                     ref={descRef}
                     className="w-full px-4 py-2 bg-transparent rounded-b-xl border-t border-dotted border-slate-300 dark:border-slate-600 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none resize-none"
-                    placeholder="Add a description..."
+                    placeholder="Add notes..."
                     rows={2}
                     value={newDescription}
                     onChange={(e) => setNewDescription(e.target.value)}
@@ -743,7 +754,7 @@ export default function TodoList() {
               </div>
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-2 ml-1">
                 <kbd className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-xs font-mono">Enter</kbd> to add
-                · <kbd className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-xs font-mono">Shift+Enter</kbd> for description
+                · <kbd className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-xs font-mono">Shift+Enter</kbd> for notes
                 · <kbd className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-xs font-mono">Esc</kbd> to cancel
               </p>
             </motion.div>

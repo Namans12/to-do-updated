@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import EmptyState from "./EmptyState";
+import { getActionErrorMessage } from "../utils/errors";
 
 export default function TrashView() {
   const { groups, refreshGroups, refreshTodos, refreshConnections } = useApp();
@@ -62,8 +64,8 @@ export default function TrashView() {
       const data = await trashApi.list();
       setItems(data.todos);
       setTrashedGroups(data.groups);
-    } catch {
-      toast.error("Failed to load trash");
+    } catch (error) {
+      toast.error(getActionErrorMessage("load trash", error));
     } finally {
       setLoading(false);
     }
@@ -79,8 +81,8 @@ export default function TrashView() {
       await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
       await load();
       toast.success("Restored");
-    } catch {
-      toast.error("Failed to restore");
+    } catch (error) {
+      toast.error(getActionErrorMessage("restore the task", error));
     }
   };
 
@@ -90,8 +92,8 @@ export default function TrashView() {
       await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
       await load();
       toast.success("Permanently deleted");
-    } catch {
-      toast.error("Failed to delete");
+    } catch (error) {
+      toast.error(getActionErrorMessage("delete the task permanently", error));
     }
   };
 
@@ -101,8 +103,8 @@ export default function TrashView() {
       await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
       await load();
       toast.success("Group restored");
-    } catch {
-      toast.error("Failed to restore group");
+    } catch (error) {
+      toast.error(getActionErrorMessage("restore the group", error));
     }
   };
 
@@ -113,8 +115,8 @@ export default function TrashView() {
       await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
       await load();
       toast.success("Group permanently deleted");
-    } catch {
-      toast.error("Failed to delete group");
+    } catch (error) {
+      toast.error(getActionErrorMessage("delete the group permanently", error));
     }
   };
 
@@ -125,8 +127,8 @@ export default function TrashView() {
       await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
       await load();
       toast.success("Trash emptied");
-    } catch {
-      toast.error("Failed to empty trash");
+    } catch (error) {
+      toast.error(getActionErrorMessage("empty the trash", error));
     }
   };
 
@@ -163,14 +165,11 @@ export default function TrashView() {
       </div>
 
       {items.length === 0 && trashedGroups.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
-            <Trash2 size={28} className="text-slate-300 dark:text-slate-600" />
-          </div>
-          <p className="text-sm text-slate-400 dark:text-slate-500">
-            Trash is empty
-          </p>
-        </div>
+        <EmptyState
+          icon={<Trash2 size={28} className="text-slate-300 dark:text-slate-600" />}
+          title="Trash is empty"
+          description="Deleted groups and tasks land here first, so you always have a chance to restore them."
+        />
       ) : (
         <div className="space-y-5">
           <AnimatePresence mode="popLayout">

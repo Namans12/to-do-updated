@@ -1,4 +1,4 @@
-import type { Group, Todo, TrashPayload, Connection } from "../types";
+import type { Group, Todo, TrashPayload, Connection, ConnectionKind } from "../types";
 
 const BASE = "/api";
 
@@ -139,15 +139,15 @@ export const trashApi = {
 export const connectionsApi = {
   list: () => request<Connection[]>("/connections"),
   get: (id: string) => request<Connection>(`/connections/${id}`),
-  create: (todoIds: string[], name?: string) =>
+  create: (todoIds: string[], name?: string, kind?: ConnectionKind) =>
     request<Connection>("/connections", {
       method: "POST",
-      body: JSON.stringify({ todoIds, name }),
+      body: JSON.stringify({ todoIds, name, kind }),
     }),
-  update: (id: string, name: string | null) =>
+  update: (id: string, data: { name?: string | null; kind?: ConnectionKind }) =>
     request<Connection>(`/connections/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(data),
     }),
   addItem: (connectionId: string, todoId: string) =>
     request<void>(`/connections/${connectionId}/items`, {
