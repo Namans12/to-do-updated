@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { searchApi } from "../api/client";
 import type { SearchResult } from "../api/client";
 import { useApp } from "../context/AppContext";
-import { Search, X, FolderOpen } from "lucide-react";
+import { Search, X, FolderOpen, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 export default function SearchView() {
@@ -11,6 +11,7 @@ export default function SearchView() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -24,6 +25,7 @@ export default function SearchView() {
     if (!query.trim()) {
       setResults([]);
       setSearched(false);
+      setErrorMessage(null);
       return;
     }
 
@@ -33,8 +35,13 @@ export default function SearchView() {
         const data = await searchApi.search(query.trim());
         setResults(data);
         setSearched(true);
-      } catch {
-        // ignore
+        setErrorMessage(null);
+      } catch (error) {
+        setResults([]);
+        setSearched(false);
+        setErrorMessage(
+          error instanceof Error ? error.message : "Search failed. Please try again."
+        );
       } finally {
         setLoading(false);
       }
@@ -85,7 +92,19 @@ export default function SearchView() {
         </div>
       )}
 
-      {!loading && searched && results.length === 0 && (
+      {!loading && errorMessage && (
+        <div className="flex flex-col items-center py-16 text-center">
+          <AlertCircle size={32} className="text-red-400 mb-3" />
+          <p className="text-sm text-red-500 dark:text-red-400">
+            {errorMessage}
+          </p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">
+            Try again in a moment or adjust the search text.
+          </p>
+        </div>
+      )}
+
+      {!loading && !errorMessage && searched && results.length === 0 && (
         <div className="flex flex-col items-center py-16 text-center">
           <Search size={32} className="text-slate-300 dark:text-slate-600 mb-3" />
           <p className="text-sm text-slate-400 dark:text-slate-500">
@@ -94,7 +113,7 @@ export default function SearchView() {
         </div>
       )}
 
-      {!loading && results.length > 0 && (
+      {!loading && !errorMessage && results.length > 0 && (
         <div className="space-y-2">
           <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">
             {results.length} result{results.length !== 1 ? "s" : ""}

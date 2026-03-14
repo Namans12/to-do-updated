@@ -39,6 +39,7 @@ export const connectionItems = sqliteTable("connection_items", {
     .references(() => connections.id),
   todo_id: text("todo_id")
     .notNull()
-    .references(() => todos.id),
+    .references(() => todos.id)
+    .unique(),
   position: integer("position").notNull().default(0),
 });

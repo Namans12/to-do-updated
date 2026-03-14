@@ -64,6 +64,68 @@ export function runMigrations(dbPath?: string): void {
     sqlite.exec("ALTER TABLE todos ADD COLUMN completed_at TEXT");
   }
 
+  // Normalize legacy connection memberships so one todo can belong to only one connection.
+  const duplicateTodoIds = sqlite
+    .prepare(
+      `
+        SELECT todo_id
+        FROM connection_items
+        GROUP BY todo_id
+        HAVING COUNT(*) > 1
+      `
+    )
+    .all() as { todo_id: string }[];
+
+  for (const { todo_id } of duplicateTodoIds) {
+    const memberships = sqlite
+      .prepare(
+        `
+          SELECT ci.id
+          FROM connection_items ci
+          INNER JOIN connections c ON c.id = ci.connection_id
+          WHERE ci.todo_id = ?
+          ORDER BY c.created_at ASC, ci.position ASC, ci.id ASC
+        `
+      )
+      .all(todo_id) as { id: string }[];
+
+    const idsToDelete = memberships.slice(1).map((row) => row.id);
+    for (const id of idsToDelete) {
+      sqlite.prepare("DELETE FROM connection_items WHERE id = ?").run(id);
+    }
+  }
+
+  const connectionRows = sqlite.prepare("SELECT id FROM connections").all() as { id: string }[];
+  for (const { id } of connectionRows) {
+    const items = sqlite
+      .prepare(
+        `
+          SELECT id
+          FROM connection_items
+          WHERE connection_id = ?
+          ORDER BY position ASC, id ASC
+        `
+      )
+      .all(id) as { id: string }[];
+
+    if (items.length < 2) {
+      sqlite.prepare("DELETE FROM connection_items WHERE connection_id = ?").run(id);
+      sqlite.prepare("DELETE FROM connections WHERE id = ?").run(id);
+      continue;
+    }
+
+    for (let position = 0; position < items.length; position += 1) {
+      sqlite
+        .prepare("UPDATE connection_items SET position = ? WHERE id = ?")
+        .run(position, items[position]!.id);
+    }
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_items_todo_id_unique
+    ON connection_items(todo_id)
+  `);
+
   sqlite.close();
 }
 

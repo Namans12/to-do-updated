@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { eq, and, asc, sql, isNull, isNotNull, ne } from "drizzle-orm";
+import { eq, and, asc, sql, isNull, ne, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
 import { groups, todos } from "../db/schema.js";
@@ -220,12 +220,107 @@ export function createTodosRouter(dbOverride?: DbOverride) {
 
       // Validate each item has id and position
       for (const item of items) {
-        if (!item.id || typeof item.position !== "number") {
+        if (
+          !item.id ||
+          typeof item.position !== "number" ||
+          !Number.isInteger(item.position) ||
+          item.position < 0
+        ) {
           return c.json({ error: "Each item must have an id (string) and position (number)" }, 400);
         }
       }
 
       const { db: drizzleDb, sqlite } = db();
+      const ids = items.map((item) => item.id);
+      const positions = items.map((item) => item.position);
+
+      if (new Set(ids).size !== ids.length) {
+        return c.json({ error: "Duplicate todo ids are not allowed" }, 400);
+      }
+
+      if (new Set(positions).size !== positions.length) {
+        return c.json({ error: "Duplicate positions are not allowed" }, 400);
+      }
+
+      const expectedPositions = [...positions].sort((a, b) => a - b);
+      for (let i = 0; i < expectedPositions.length; i += 1) {
+        if (expectedPositions[i] !== i) {
+          return c.json(
+            { error: "Positions must form a contiguous range starting at 0" },
+            400
+          );
+        }
+      }
+
+      const selectedTodos = drizzleDb
+        .select({
+          id: todos.id,
+          group_id: todos.group_id,
+          high_priority: todos.high_priority,
+        })
+        .from(todos)
+        .where(and(isNull(todos.deleted_at), eq(todos.is_completed, 0), inArray(todos.id, ids)))
+        .all();
+
+      if (selectedTodos.length !== ids.length) {
+        return c.json(
+          { error: "Reorder payload must include only incomplete active todos from one group" },
+          400
+        );
+      }
+
+      const groupIds = new Set(selectedTodos.map((todo) => todo.group_id));
+      if (groupIds.size !== 1) {
+        return c.json(
+          { error: "Todos can only be reordered within a single group" },
+          400
+        );
+      }
+
+      const groupId = selectedTodos[0]!.group_id;
+      const activeGroupTodos = drizzleDb
+        .select({
+          id: todos.id,
+          high_priority: todos.high_priority,
+        })
+        .from(todos)
+        .where(and(eq(todos.group_id, groupId), isNull(todos.deleted_at), eq(todos.is_completed, 0)))
+        .all();
+
+      if (activeGroupTodos.length !== ids.length) {
+        return c.json(
+          { error: "Reorder payload must include every incomplete active todo in the group exactly once" },
+          400
+        );
+      }
+
+      const activeIds = new Set(activeGroupTodos.map((todo) => todo.id));
+      for (const id of ids) {
+        if (!activeIds.has(id)) {
+          return c.json(
+            { error: "Reorder payload must include every incomplete active todo in the group exactly once" },
+            400
+          );
+        }
+      }
+
+      const selectedById = new Map(selectedTodos.map((todo) => [todo.id, todo]));
+      const reordered = [...items]
+        .sort((a, b) => a.position - b.position)
+        .map((item) => selectedById.get(item.id)!);
+      let seenNormal = false;
+      for (const todo of reordered) {
+        if (todo.high_priority === 1) {
+          if (seenNormal) {
+            return c.json(
+              { error: "High priority todos must stay above normal todos when reordering" },
+              400
+            );
+          }
+        } else {
+          seenNormal = true;
+        }
+      }
 
       // Run in a transaction
       const transaction = sqlite.transaction(() => {

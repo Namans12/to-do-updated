@@ -709,6 +709,96 @@ describe("Todos CRUD API", () => {
 
       expect(res.status).toBe(400);
     });
+
+    it("should return 400 for duplicate todo ids", async () => {
+      const { body: b1 } = await createTodo(testGroupId, "First");
+      const { body: b2 } = await createTodo(testGroupId, "Second");
+
+      const res = await ctx.app.request("/api/todos/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [
+            { id: b1.data.id, position: 0 },
+            { id: b1.data.id, position: 1 },
+            { id: b2.data.id, position: 2 },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should return 400 when todos span multiple groups", async () => {
+      const groupRes = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Other Group" }),
+      });
+      const otherGroup = await groupRes.json();
+      const { body: b1 } = await createTodo(testGroupId, "First");
+      const { body: b2 } = await createTodo(otherGroup.data.id, "Second");
+
+      const res = await ctx.app.request("/api/todos/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [
+            { id: b1.data.id, position: 0 },
+            { id: b2.data.id, position: 1 },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should return 400 when high priority todos are moved below normal todos", async () => {
+      const { body: high } = await createTodo(testGroupId, "Urgent", undefined, {
+        high_priority: true,
+      });
+      const { body: normal } = await createTodo(testGroupId, "Normal");
+
+      const res = await ctx.app.request("/api/todos/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [
+            { id: normal.data.id, position: 0 },
+            { id: high.data.id, position: 1 },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should allow reordering only the incomplete todos while completed todos stay separate", async () => {
+      const { body: first } = await createTodo(testGroupId, "First");
+      const { body: second } = await createTodo(testGroupId, "Second");
+      const { body: done } = await createTodo(testGroupId, "Done");
+
+      await ctx.app.request(`/api/todos/${done.data.id}/complete`, {
+        method: "PATCH",
+      });
+
+      const res = await ctx.app.request("/api/todos/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [
+            { id: second.data.id, position: 0 },
+            { id: first.data.id, position: 1 },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+
+      const listRes = await ctx.app.request(`/api/groups/${testGroupId}/todos`);
+      const listBody = await listRes.json();
+      expect(listBody.data.map((todo: any) => todo.title)).toEqual(["Second", "First", "Done"]);
+    });
   });
 
   // ─── Response shape tests ────────────────────────────────────

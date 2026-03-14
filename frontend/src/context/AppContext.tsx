@@ -140,7 +140,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       highlightTodoId: null,
       reorderMode: false,
     }));
-  }, [refreshTodos]);
+  }, []);
 
   const startReorder = useCallback((groupId: string) => {
     const cached = todosCacheRef.current[groupId] ?? [];
@@ -198,15 +198,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const checkDueReminders = useCallback(async () => {
     try {
-      const allGroups = await groupsApi.list();
-      if (allGroups.length === 0) return;
+      if (state.groups.length === 0) return;
 
-      const lists = await Promise.all(allGroups.map((g) => todosApi.list(g.id)));
-      const allTodos = lists.flat();
+      const allTodos = state.groups.flatMap((group) => {
+        if (group.id === state.selectedGroupId) {
+          return state.todos;
+        }
+        return todosCacheRef.current[group.id] ?? [];
+      });
       const now = Date.now();
       const acks = readReminderAcks();
       let updated = false;
-      const groupNameById = new Map(allGroups.map((g) => [g.id, g.name] as const));
+      const groupNameById = new Map(state.groups.map((g) => [g.id, g.name] as const));
 
       const activeReminderIds = new Set<string>();
       const dueAlarms: Array<{
@@ -295,7 +298,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore reminder polling errors to avoid noisy UX
     }
-  }, []);
+  }, [state.groups, state.selectedGroupId, state.todos]);
 
   // Initial load
   useEffect(() => {
@@ -313,6 +316,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshTodos();
     }
   }, [state.selectedGroupId, refreshTodos]);
+
+  useEffect(() => {
+    if (!state.selectedGroupId) return;
+    todosCacheRef.current[state.selectedGroupId] = state.todos;
+  }, [state.selectedGroupId, state.todos]);
 
   // Warm cache so switching groups feels instant after initial load.
   useEffect(() => {
@@ -342,7 +350,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (state.loading) return;
     checkDueReminders();
-    const interval = setInterval(checkDueReminders, 5_000);
+    const interval = setInterval(checkDueReminders, 15_000);
     return () => clearInterval(interval);
   }, [state.loading, checkDueReminders]);
 

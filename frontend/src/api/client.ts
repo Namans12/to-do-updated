@@ -10,9 +10,29 @@ async function request<T>(
     headers: { "Content-Type": "application/json", ...options?.headers },
     ...options,
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || `Request failed: ${res.status}`);
-  return json.data ?? json;
+  const text = await res.text();
+  let json: any = null;
+
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      if (!res.ok) {
+        throw new Error(`Request failed: ${res.status}`);
+      }
+      return text as T;
+    }
+  }
+
+  if (!res.ok) {
+    throw new Error(json?.error || `Request failed: ${res.status}`);
+  }
+
+  if (!text) {
+    return undefined as T;
+  }
+
+  return (json?.data ?? json) as T;
 }
 
 // ── Groups ──────────────────────────────────────────────

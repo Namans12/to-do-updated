@@ -285,8 +285,10 @@ export default function TodoList() {
 
   const persistReorder = async (items: Array<{ type: "conn" | "todo"; id: string }>) => {
     if (!selectedGroupId) return;
-    // Build the current-group todo ID set for filtering
-    const groupTodoIds = new Set(activeTodos.map((t) => t.id));
+    // Reordering only applies to the visible incomplete section.
+    const groupTodoIds = new Set(
+      activeTodos.filter((todo) => todo.is_completed !== 1).map((todo) => todo.id)
+    );
     const orderedTodoIds: string[] = [];
     const seen = new Set<string>();
     for (const item of items) {
