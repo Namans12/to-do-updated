@@ -1578,30 +1578,6 @@ export default function GraphView() {
               backgroundSize: `${GRID}px ${GRID}px`,
             }}
           >
-          {/* Right boundary wall - viewport overlay (non-scaled) */}
-          {nearBoundary.right && draggingNode && (
-            <div
-              className="absolute inset-y-0 right-0 pointer-events-none"
-              style={{
-                width: GRID,
-                background: "linear-gradient(to right, transparent, rgba(234,179,8,0.30))",
-                boxShadow: "inset -4px 0 20px rgba(234,179,8,0.70)",
-                zIndex: 250,
-              }}
-            />
-          )}
-          {/* Bottom boundary wall - viewport overlay (non-scaled) */}
-          {nearBoundary.bottom && draggingNode && (
-            <div
-              className="absolute inset-x-0 bottom-0 pointer-events-none"
-              style={{
-                height: GRID,
-                background: "linear-gradient(to bottom, transparent, rgba(234,179,8,0.30))",
-                boxShadow: "inset 0 -4px 20px rgba(234,179,8,0.70)",
-                zIndex: 250,
-              }}
-            />
-          )}
           {/* Inner virtual canvas - keeps nodes from escaping */}
           <div
             style={{
@@ -1610,6 +1586,97 @@ export default function GraphView() {
               position: "relative",
             }}
           >
+          {(nearBoundary.right || nearBoundary.bottom) && draggingNode && (
+            <div
+              className="absolute left-0 top-0 pointer-events-none"
+              style={{
+                width: canvasSize.w * zoomScale,
+                height: canvasSize.h * zoomScale,
+                zIndex: 250,
+              }}
+            >
+              <div
+                className="absolute inset-0"
+                style={{
+                  borderTopRightRadius: 18,
+                  borderBottomRightRadius: 18,
+                  borderBottomLeftRadius: 18,
+                  boxShadow:
+                    "inset -10px 0 18px -16px rgba(253,224,71,0.9), inset 0 -10px 18px -16px rgba(253,224,71,0.9)",
+                }}
+              >
+                {nearBoundary.right && (
+                  <>
+                    <div
+                      className="absolute"
+                      style={{
+                        top: 18,
+                        right: 0,
+                        bottom: 18,
+                        borderRight: "2px dotted rgba(253,224,71,0.95)",
+                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.95))",
+                      }}
+                    />
+                    <div
+                      className="absolute"
+                      style={{
+                        top: 0,
+                        right: 0,
+                        width: 18,
+                        height: 18,
+                        borderTop: "2px dotted rgba(253,224,71,0.9)",
+                        borderRight: "2px dotted rgba(253,224,71,0.95)",
+                        borderTopRightRadius: 18,
+                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.9))",
+                      }}
+                    />
+                  </>
+                )}
+                {nearBoundary.bottom && (
+                  <>
+                    <div
+                      className="absolute"
+                      style={{
+                        left: 18,
+                        right: 18,
+                        bottom: 0,
+                        borderBottom: "2px dotted rgba(253,224,71,0.95)",
+                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.95))",
+                      }}
+                    />
+                    <div
+                      className="absolute"
+                      style={{
+                        left: 0,
+                        bottom: 0,
+                        width: 18,
+                        height: 18,
+                        borderLeft: "2px dotted rgba(253,224,71,0.9)",
+                        borderBottom: "2px dotted rgba(253,224,71,0.95)",
+                        borderBottomLeftRadius: 18,
+                        filter: "drop-shadow(0 0 6px rgba(253,224,71,0.9))",
+                      }}
+                    />
+                  </>
+                )}
+                {(nearBoundary.right || nearBoundary.bottom) && (
+                  <div
+                    className="absolute"
+                    style={{
+                      right: 0,
+                      bottom: 0,
+                      width: 18,
+                      height: 18,
+                      borderRight: "2px dotted rgba(253,224,71,0.95)",
+                      borderBottom: "2px dotted rgba(253,224,71,0.95)",
+                      borderBottomRightRadius: 18,
+                      filter: "drop-shadow(0 0 7px rgba(253,224,71,0.95))",
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+          )}
           <div
             style={{
               width: canvasSize.w,
@@ -2284,7 +2351,11 @@ export default function GraphView() {
 
           {/* ── Legend panel (overlay, doesn't scroll) ── */}
           {showPanel && (
-            <div className="absolute bottom-6 right-4 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 px-4 py-3 text-[10px] space-y-1.5 z-30 shadow-lg">
+            <div
+              className={`absolute right-4 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 px-4 py-3 text-[10px] space-y-1.5 z-30 shadow-lg ${
+                isFullscreen ? "bottom-14" : "bottom-6"
+              }`}
+            >
               <div className="font-semibold text-[11px] text-slate-600 dark:text-slate-300 mb-1.5">
                 Controls
               </div>
