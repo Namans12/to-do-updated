@@ -19,6 +19,7 @@ function buildConnectionResponse(
     is_completed: number;
     high_priority: number;
     completed_at: string | null;
+    created_at: string;
     position: number;
   }>
 ) {
@@ -36,6 +37,7 @@ function buildConnectionResponse(
       is_completed: i.is_completed,
       high_priority: i.high_priority,
       completed_at: i.completed_at,
+      created_at: i.created_at,
       position: i.position,
     })),
     progress: {
@@ -44,6 +46,7 @@ function buildConnectionResponse(
       percentage,
     },
     is_fully_complete: total > 0 && completed === total,
+    created_at: connection.created_at,
   };
 }
 
@@ -81,6 +84,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         is_completed: todos.is_completed,
         high_priority: todos.high_priority,
         completed_at: todos.completed_at,
+        created_at: todos.created_at,
         position: connectionItems.position,
       })
       .from(connectionItems)
@@ -151,18 +155,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         }
       }
 
-      // Check that none of the todos already belong to 2 connections (max allowed)
+      // A todo can only belong to one connection at a time.
       for (const todoId of todoIds) {
-        const existingCount = drizzleDb
+        const existingMembership = drizzleDb
           .select()
           .from(connectionItems)
           .where(eq(connectionItems.todo_id, todoId))
-          .all().length;
+          .get();
 
-        if (existingCount >= 2) {
+        if (existingMembership) {
           return c.json(
             {
-              error: `Todo '${todoId}' already belongs to ${existingCount} connections. A todo can belong to at most 2 connections.`,
+              error: `Todo '${todoId}' already belongs to a connection. A todo can belong to at most 1 connection.`,
             },
             400
           );
@@ -723,12 +727,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Todo not found or is deleted" }, 404);
       }
 
-      // Check if todo already belongs to 2 connections (max allowed)
-      const existingCount = drizzleDb
+      // A todo can only belong to one connection at a time.
+      const existingMembership = drizzleDb
         .select()
         .from(connectionItems)
         .where(eq(connectionItems.todo_id, todoId))
-        .all().length;
+        .get();
 
       // Also check it's not already in THIS specific connection
       const alreadyInThis = drizzleDb
@@ -751,11 +755,11 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
 
-      if (existingCount >= 2) {
+      if (existingMembership) {
         return c.json(
           {
             error:
-              "Todo already belongs to 2 connections. A todo can belong to at most 2 connections.",
+              "Todo already belongs to a connection. A todo can belong to at most 1 connection.",
           },
           400
         );

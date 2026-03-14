@@ -8,6 +8,10 @@ import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
 import toast from "react-hot-toast";
 import type { Todo } from "../types";
 
+function compareByCreatedAtOldestFirst(a: { created_at: string }, b: { created_at: string }) {
+  return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+}
+
 export default function TodoList() {
   const {
     todos,
@@ -69,12 +73,14 @@ export default function TodoList() {
   const soloTodos = activeTodos.filter((t) => !connectedTodoIds.has(t.id));
   const sortedSoloTodos = [...soloTodos].sort((a, b) => {
     if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
-    return a.position - b.position;
+    if (a.position !== b.position) return a.position - b.position;
+    return compareByCreatedAtOldestFirst(a, b);
   });
   const orderedAllTodos = useMemo(() => {
     return [...activeTodos].sort((a, b) => {
       if (a.high_priority !== b.high_priority) return b.high_priority - a.high_priority;
-      return a.position - b.position;
+      if (a.position !== b.position) return a.position - b.position;
+      return compareByCreatedAtOldestFirst(a, b);
     });
   }, [activeTodos]);
   const orderIndexById = useMemo(() => {
@@ -113,6 +119,9 @@ export default function TodoList() {
     prevCompletedCountRef.current = next;
   }, [completedSoloTodos.length, completedConnections.length]);
   const sortedActiveConnections = useMemo(() => {
+    const isHighPriorityConnection = (conn: (typeof groupConnections)[number]) =>
+      conn.items.some((item) => item.high_priority === 1);
+
     const rankFor = (conn: (typeof groupConnections)[number]) => {
       // Use the first item that belongs to this group — conn.items[0] may be from another group
       for (const item of conn.items) {
@@ -121,14 +130,31 @@ export default function TodoList() {
       }
       return Number.MAX_SAFE_INTEGER;
     };
-    return [...activeConnections].sort((a, b) => rankFor(a) - rankFor(b));
-  }, [activeConnections, orderIndexById]);
-  const activeTodoHighPriorityIds = useMemo(() => {
-    const s = new Set<string>();
-    activeTodos.forEach((t) => { if (t.high_priority === 1) s.add(t.id); });
-    return s;
-  }, [activeTodos]);
 
+    const highPriorityRankFor = (conn: (typeof groupConnections)[number]) => {
+      let bestRank = Number.MAX_SAFE_INTEGER;
+      for (const item of conn.items) {
+        if (item.high_priority !== 1) continue;
+        const rank = orderIndexById.get(item.todo_id);
+        if (rank !== undefined && rank < bestRank) {
+          bestRank = rank;
+        }
+      }
+      return bestRank;
+    };
+
+    return [...activeConnections].sort((a, b) => {
+      const aHigh = isHighPriorityConnection(a);
+      const bHigh = isHighPriorityConnection(b);
+      if (aHigh !== bHigh) return aHigh ? -1 : 1;
+      if (aHigh && bHigh) {
+        const aRank = highPriorityRankFor(a);
+        const bRank = highPriorityRankFor(b);
+        if (aRank !== bRank) return aRank - bRank;
+      }
+      return rankFor(a) - rankFor(b);
+    });
+  }, [activeConnections, orderIndexById]);
   const orderedActiveItems = useMemo(() => {
     const items: Array<
       | { type: "conn"; id: string; order: number; highPriority: boolean; conn: (typeof groupConnections)[number] }
@@ -142,8 +168,8 @@ export default function TodoList() {
         const rank = orderIndexById.get(item.todo_id);
         if (rank !== undefined) { order = rank; break; }
       }
-      // Connection is high priority if any of its items is a high priority todo
-      const highPriority = conn.items.some((item) => activeTodoHighPriorityIds.has(item.todo_id));
+      // Connection is high priority if any of its items is high priority, even from another group.
+      const highPriority = conn.items.some((item) => item.high_priority === 1);
       items.push({ type: "conn", id: conn.id, order, highPriority, conn });
     }
 
@@ -152,13 +178,30 @@ export default function TodoList() {
       items.push({ type: "todo", id: todo.id, order, highPriority: todo.high_priority === 1, todo });
     }
 
-    // High priority items always float to the top, then sort by position
+    const highPriorityRankFor = (conn: (typeof groupConnections)[number]) => {
+      let bestRank = Number.MAX_SAFE_INTEGER;
+      for (const item of conn.items) {
+        if (item.high_priority !== 1) continue;
+        const rank = orderIndexById.get(item.todo_id);
+        if (rank !== undefined && rank < bestRank) {
+          bestRank = rank;
+        }
+      }
+      return bestRank;
+    };
+
+    // High priority items always float to the top, then sort oldest-first within the band.
     items.sort((a, b) => {
       if (a.highPriority !== b.highPriority) return a.highPriority ? -1 : 1;
+      if (a.type === "conn" && b.type === "conn" && a.highPriority && b.highPriority) {
+        const aRank = highPriorityRankFor(a.conn);
+        const bRank = highPriorityRankFor(b.conn);
+        if (aRank !== bRank) return aRank - bRank;
+      }
       return a.order - b.order;
     });
     return items;
-  }, [sortedActiveConnections, activeSoloTodos, orderIndexById, activeTodoHighPriorityIds]);
+  }, [sortedActiveConnections, activeSoloTodos, orderIndexById]);
 
   const orderedActiveIds = useMemo(
     () => orderedActiveItems.map((item) => ({
@@ -222,9 +265,7 @@ export default function TodoList() {
   const getPriorityGroup = (item: { type: "conn" | "todo"; id: string }) => {
     if (item.type === "todo") return activeTodoById.get(item.id)?.high_priority ?? 0;
     const conn = activeConnById.get(item.id);
-    const firstId = conn?.items[0]?.todo_id;
-    if (!firstId) return 0;
-    return activeTodos.find((t) => t.id === firstId)?.high_priority ?? 0;
+    return conn?.items.some((connItem) => connItem.high_priority === 1) ? 1 : 0;
   };
 
   const moveDraggedToIndex = (targetIndex: number) => {
@@ -510,7 +551,7 @@ export default function TodoList() {
           className={`relative space-y-2 mb-4 ${reorderMode ? "cursor-grab select-none touch-none" : ""}`}
         >
           <AnimatePresence mode="popLayout">
-            {reorderList.map((item, index) => {
+            {reorderList.map((item) => {
             if (item.type === "conn") {
               const conn = activeConnById.get(item.id);
               if (!conn) return null;

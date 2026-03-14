@@ -90,6 +90,7 @@ describe("Node Connections API", () => {
       expect(body.data.items[0].position).toBe(0);
       expect(body.data.items[0].high_priority).toBe(0);
       expect(body.data.items[0].completed_at).toBeNull();
+      expect(body.data.items[0].created_at).toBeTruthy();
       expect(body.data.items[1].todo_id).toBe(todo2.id);
       expect(body.data.items[1].position).toBe(1);
       expect(body.data.progress).toEqual({
@@ -98,6 +99,7 @@ describe("Node Connections API", () => {
         percentage: 0,
       });
       expect(body.data.is_fully_complete).toBe(false);
+      expect(body.data.created_at).toBeTruthy();
     });
 
     it("should create a connection without a name", async () => {
@@ -188,7 +190,7 @@ describe("Node Connections API", () => {
       expect(body.error).toContain(todo2.id);
     });
 
-    it("should allow a todo to belong to 2 connections", async () => {
+    it("should return 400 if a todo already belongs to a connection", async () => {
       const todo1 = await createTodo(testGroupId, "connected 1");
       const todo2 = await createTodo(testGroupId, "connected 2");
       const todo3 = await createTodo(testGroupId, "new todo");
@@ -196,33 +198,14 @@ describe("Node Connections API", () => {
       // Create first connection
       await createConnection([todo1.id, todo2.id], "First");
 
-      // Second connection with todo1 should succeed (2 max)
+      // A second connection with the same todo should fail.
       const { res, body } = await createConnection(
         [todo1.id, todo3.id],
         "Second"
       );
 
-      expect(res.status).toBe(201);
-    });
-
-    it("should return 400 if a todo already belongs to 2 connections", async () => {
-      const todo1 = await createTodo(testGroupId, "connected 1");
-      const todo2 = await createTodo(testGroupId, "connected 2");
-      const todo3 = await createTodo(testGroupId, "new todo");
-      const todo4 = await createTodo(testGroupId, "extra");
-
-      // Create first and second connections
-      await createConnection([todo1.id, todo2.id], "First");
-      await createConnection([todo1.id, todo3.id], "Second");
-
-      // Third connection with todo1 should fail
-      const { res, body } = await createConnection(
-        [todo1.id, todo4.id],
-        "Third"
-      );
-
       expect(res.status).toBe(400);
-      expect(body.error).toContain("already belongs to 2 connections");
+      expect(body.error).toContain("at most 1 connection");
     });
 
     it("should return 400 for duplicate todoIds", async () => {
@@ -619,13 +602,12 @@ describe("Node Connections API", () => {
       expect(body.error).toContain("not found");
     });
 
-    it("should return 400 if todo already belongs to 2 connections", async () => {
+    it("should return 400 if todo already belongs to a connection", async () => {
       const todo1 = await createTodo(testGroupId, "t1");
       const todo2 = await createTodo(testGroupId, "t2");
       const todo3 = await createTodo(testGroupId, "t3");
-      const todo5 = await createTodo(testGroupId, "t5");
 
-      const { body: conn1Body } = await createConnection(
+      await createConnection(
         [todo1.id, todo2.id],
         "Conn1"
       );
@@ -634,24 +616,8 @@ describe("Node Connections API", () => {
         "Conn2"
       );
 
-      // Add todo1 to conn2 (second connection, allowed)
-      const addRes = await ctx.app.request(
-        `/api/connections/${conn2Body.data.id}/items`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ todoId: todo1.id }),
-        }
-      );
-      expect(addRes.status).toBe(200);
-
-      // Create a 3rd connection and try to add todo1 to it (should fail)
-      const { body: conn3Body } = await createConnection(
-        [todo5.id, (await createTodo(testGroupId, "t6")).id],
-        "Conn3"
-      );
       const res = await ctx.app.request(
-        `/api/connections/${conn3Body.data.id}/items`,
+        `/api/connections/${conn2Body.data.id}/items`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -661,7 +627,7 @@ describe("Node Connections API", () => {
       const body = await res.json();
 
       expect(res.status).toBe(400);
-      expect(body.error).toContain("already belongs to 2 connections");
+      expect(body.error).toContain("at most 1 connection");
     });
 
     it("should return 400 if todoId is missing", async () => {
@@ -767,7 +733,7 @@ describe("Node Connections API", () => {
       expect(todoBody.data.id).toBe(todo2.id);
     });
 
-    it("should auto-delete connection when removing the last item", async () => {
+    it("should auto-delete connection when removing an item from a 2-item connection", async () => {
       const todo1 = await createTodo(testGroupId, "last one");
       const todo2 = await createTodo(testGroupId, "second");
 
@@ -777,15 +743,8 @@ describe("Node Connections API", () => {
       );
       const connectionId = createBody.data.id;
 
-      // Remove first item (leaves 1)
-      await ctx.app.request(
-        `/api/connections/${connectionId}/items/${todo1.id}`,
-        { method: "DELETE" }
-      );
-
-      // Remove last item — should auto-delete connection
       const res = await ctx.app.request(
-        `/api/connections/${connectionId}/items/${todo2.id}`,
+        `/api/connections/${connectionId}/items/${todo1.id}`,
         { method: "DELETE" }
       );
       const body = await res.json();
@@ -1070,30 +1029,22 @@ describe("Node Connections API", () => {
   // ─── Uniqueness Constraint ─────────────────────────
 
   describe("Uniqueness: todo can belong to at most one connection", () => {
-    it("should enforce that a todo cannot be in more than 2 connections", async () => {
+    it("should enforce that a todo cannot be in more than one connection", async () => {
       const todo1 = await createTodo(testGroupId, "shared");
       const todo2 = await createTodo(testGroupId, "partner a");
       const todo3 = await createTodo(testGroupId, "partner b");
-      const todo4 = await createTodo(testGroupId, "partner c");
 
       // First connection with todo1
       await createConnection([todo1.id, todo2.id], "Conn 1");
 
-      // Second connection with todo1 — should succeed
-      const { res: res2 } = await createConnection(
+      // A second connection with todo1 should fail.
+      const { res, body } = await createConnection(
         [todo1.id, todo3.id],
         "Conn 2"
       );
-      expect(res2.status).toBe(201);
-
-      // Third connection with todo1 — should fail
-      const { res, body } = await createConnection(
-        [todo1.id, todo4.id],
-        "Conn 3"
-      );
 
       expect(res.status).toBe(400);
-      expect(body.error).toContain("already belongs to 2 connections");
+      expect(body.error).toContain("at most 1 connection");
     });
 
     it("should return 400 when adding todo already in this connection", async () => {

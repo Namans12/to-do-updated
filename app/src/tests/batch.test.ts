@@ -357,6 +357,7 @@ describe("Batch Operations API", () => {
 
   describe("POST /api/todos/batch/move", () => {
     it("should move multiple todos to another group and return 200", async () => {
+      const { body: existingTarget } = await createTodo(testGroupId2, "Existing target");
       const { body: body1 } = await createTodo(testGroupId, "Todo 1");
       const { body: body2 } = await createTodo(testGroupId, "Todo 2");
       const { body: body3 } = await createTodo(testGroupId, "Todo 3");
@@ -383,6 +384,10 @@ describe("Batch Operations API", () => {
       expect(todo1?.group_id).toBe(testGroupId2);
       expect(todo2?.group_id).toBe(testGroupId2);
       expect(todo3?.group_id).toBe(testGroupId2);
+      expect(existingTarget.data.position).toBe(0);
+      expect(todo1?.position).toBe(1);
+      expect(todo2?.position).toBe(2);
+      expect(todo3?.position).toBe(3);
     });
 
     it("should skip non-existent todos and report them", async () => {

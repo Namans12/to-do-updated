@@ -1,4 +1,4 @@
-import type { Group, Todo, TrashItem, TrashPayload, Connection } from "../types";
+import type { Group, Todo, TrashPayload, Connection } from "../types";
 
 const BASE = "/api";
 

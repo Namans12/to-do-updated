@@ -46,6 +46,7 @@ export interface ConnectionItem {
   is_completed: number;
   high_priority: number;
   completed_at: string | null;
+  created_at: string;
   position: number;
 }
 

@@ -332,7 +332,7 @@ export default function TodoItem({
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={handleSaveEdit} className="btn-primary !py-1.5 !px-3 text-xs">
+                <button onClick={() => void handleSaveEdit()} className="btn-primary !py-1.5 !px-3 text-xs">
                   Save
                 </button>
                 <button
