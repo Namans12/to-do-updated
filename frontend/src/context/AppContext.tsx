@@ -15,6 +15,7 @@ import { isSupabaseSyncEnabled } from "../sync/config";
 import {
   flushPendingOperations,
   primeSyncState,
+  readSyncedSnapshot,
   setSyncSession,
   subscribeToRealtime,
 } from "../sync/repository";
@@ -306,6 +307,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const hydrateFromSyncSnapshot = useCallback(async () => {
+    if (!isSupabaseSyncEnabled || !stateRef.current.session) return;
+    const snapshot = await readSyncedSnapshot();
+    const groups = snapshot.groups;
+    const nextSelectedGroupId =
+      stateRef.current.selectedGroupId && groups.some((group) => group.id === stateRef.current.selectedGroupId)
+        ? stateRef.current.selectedGroupId
+        : groups[0]?.id ?? null;
+
+    todosCacheRef.current = Object.fromEntries(
+      groups.map((group) => [group.id, snapshot.todos.filter((todo) => todo.group_id === group.id)])
+    );
+    const selectedTodos = nextSelectedGroupId ? todosCacheRef.current[nextSelectedGroupId] ?? [] : [];
+
+    setState((s) => ({
+      ...s,
+      groups,
+      selectedGroupId: nextSelectedGroupId,
+      todos: selectedTodos,
+      allTodos: snapshot.todos,
+      connections: snapshot.connections,
+    }));
+  }, []);
+
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
     setState((s) => {
@@ -368,6 +393,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const ensureAllTodosLoaded = useCallback(async () => {
+    if (isSupabaseSyncEnabled && stateRef.current.session) {
+      const snapshot = await readSyncedSnapshot();
+      todosCacheRef.current = Object.fromEntries(
+        stateRef.current.groups.map((group) => [
+          group.id,
+          snapshot.todos.filter((todo) => todo.group_id === group.id),
+        ])
+      );
+      setState((s) => ({ ...s, allTodos: snapshot.todos }));
+      return snapshot.todos;
+    }
+
     const groups = stateRef.current.groups;
     if (groups.length === 0) return [];
 
@@ -670,8 +707,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           authReady: true,
         }));
         if (session) {
-          await refreshGroups();
-          await refreshConnections();
+          await hydrateFromSyncSnapshot();
         }
       } catch (error) {
         console.error(error);
@@ -704,8 +740,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         connections: [],
       }));
       if (session) {
-        await refreshGroups();
-        await refreshConnections();
+        await hydrateFromSyncSnapshot();
       }
     });
 
@@ -717,7 +752,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Refresh todos when group changes
   useEffect(() => {
-    if (state.selectedGroupId && (!isSupabaseSyncEnabled || state.session)) {
+    if (
+      state.selectedGroupId &&
+      (!isSupabaseSyncEnabled ||
+        (state.session && !todosCacheRef.current[state.selectedGroupId]))
+    ) {
       refreshTodos();
     }
   }, [state.selectedGroupId, state.session, refreshTodos]);
@@ -739,7 +778,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Warm cache so switching groups feels instant after initial load.
   useEffect(() => {
     if (state.groups.length === 0) return;
-    if (isSupabaseSyncEnabled && !state.session) return;
+    if (isSupabaseSyncEnabled) return;
     let cancelled = false;
     const warm = async () => {
       await Promise.all(
@@ -774,14 +813,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isSupabaseSyncEnabled || !state.session) return;
     return subscribeToRealtime(() => {
-      void refreshGroups();
-      void refreshConnections();
-      if (stateRef.current.selectedGroupId) {
-        void refreshTodos();
-      }
+      void hydrateFromSyncSnapshot();
       void flushPendingOperations();
     });
-  }, [state.session, refreshConnections, refreshGroups, refreshTodos]);
+  }, [state.session, hydrateFromSyncSnapshot]);
 
   useEffect(() => {
     if (!isSupabaseSyncEnabled) return;

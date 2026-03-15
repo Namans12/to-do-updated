@@ -607,69 +607,98 @@ export default function SettingsView() {
           </div>
         </Panel>
 
-        <Panel
-          title="Backups"
-          description="Create offline restore points before bigger edits or experiments."
-          icon={<DatabaseBackup size={16} className="text-emerald-500" />}
-        >
-          <div className="flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
-            <div>
-              <div className="text-sm font-medium">Create a snapshot</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Stores groups, tasks, connections, and activity in a reusable local file.
+        {!syncEnabled && (
+          <Panel
+            title="Backups"
+            description="Create offline restore points before bigger edits or experiments."
+            icon={<DatabaseBackup size={16} className="text-emerald-500" />}
+          >
+            <div className="flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
+              <div>
+                <div className="text-sm font-medium">Create a snapshot</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  Stores groups, tasks, connections, and activity in a reusable local file.
+                </div>
               </div>
+              <button onClick={handleBackupCreate} className="btn-primary !py-2 !px-3 text-xs" disabled={creatingBackup}>
+                {creatingBackup ? "Saving..." : "Create Backup"}
+              </button>
             </div>
-            <button onClick={handleBackupCreate} className="btn-primary !py-2 !px-3 text-xs" disabled={creatingBackup}>
-              {creatingBackup ? "Saving..." : "Create Backup"}
-            </button>
-          </div>
-          <div className="space-y-2">
-            {backups.length === 0 && !loadingBackups ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 px-4 py-5 text-sm text-slate-400 dark:text-slate-500">
-                No snapshots yet.
-              </div>
-            ) : (
-              backups.map((backup) => (
-                <div
-                  key={backup.id}
-                  className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="text-sm font-medium">{backup.label}</div>
-                      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        {new Date(backup.created_at).toLocaleString()}
+            <div className="space-y-2">
+              {backups.length === 0 && !loadingBackups ? (
+                <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 px-4 py-5 text-sm text-slate-400 dark:text-slate-500">
+                  No snapshots yet.
+                </div>
+              ) : (
+                backups.map((backup) => (
+                  <div
+                    key={backup.id}
+                    className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium">{backup.label}</div>
+                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          {new Date(backup.created_at).toLocaleString()}
+                        </div>
+                        <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                          {backup.counts.groups} groups, {backup.counts.todos} tasks, {backup.counts.connections} connections
+                        </div>
                       </div>
-                      <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                        {backup.counts.groups} groups, {backup.counts.todos} tasks, {backup.counts.connections} connections
+                      <div className="flex gap-2">
+                        <button onClick={() => handleBackupRestore(backup.id)} className="btn-ghost !py-2 !px-3 text-xs">
+                          Restore
+                        </button>
+                        <button onClick={() => handleBackupDelete(backup.id)} className="btn-ghost !py-2 !px-3 text-xs text-red-500">
+                          Delete
+                        </button>
                       </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <button onClick={() => handleBackupRestore(backup.id)} className="btn-ghost !py-2 !px-3 text-xs">
-                        Restore
-                      </button>
-                      <button onClick={() => handleBackupDelete(backup.id)} className="btn-ghost !py-2 !px-3 text-xs text-red-500">
-                        Delete
-                      </button>
                     </div>
                   </div>
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
+                ))
+              )}
+            </div>
+          </Panel>
+        )}
       </section>
 
-      <Panel
-        title="Sync & Devices"
-        description={
-          syncEnabled
-            ? "Supabase live sync is active. Manual package import/export remains as a legacy tool."
-            : "Manual multi-device transfer without needing an always-on server."
-        }
-        icon={<Smartphone size={16} className="text-cyan-500" />}
-      >
-        {syncEnabled && (
+      {!syncEnabled ? (
+        <Panel
+          title="Sync & Devices"
+          description="Manual multi-device transfer without needing an always-on server."
+          icon={<Smartphone size={16} className="text-cyan-500" />}
+        >
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="text-sm font-medium">Export a sync package</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Copy the package below onto another device, then import it there.
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={handleSyncExport} className="btn-primary !px-3 !py-2 text-xs" disabled={syncBusy}>
+                {syncBusy ? "Working..." : "Export Sync Package"}
+              </button>
+              <button onClick={handleSyncImport} className="btn-ghost !px-3 !py-2 text-xs" disabled={syncBusy || !syncPackage.trim()}>
+                Import Package
+              </button>
+            </div>
+          </div>
+          <textarea
+            value={syncPackage}
+            onChange={(event) => setSyncPackage(event.target.value)}
+            rows={10}
+            className="input-base min-h-[14rem] !py-3 font-mono text-xs"
+            placeholder="Sync package JSON will appear here after export, or paste one here to import."
+            aria-label="Sync package"
+          />
+        </Panel>
+      ) : (
+        <Panel
+          title="Sync & Devices"
+          description="Supabase live sync is active on this device."
+          icon={<Smartphone size={16} className="text-cyan-500" />}
+        >
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 text-sm">
             <div className="font-medium">
               {session ? "Signed in to live sync" : "Not signed in"}
@@ -680,109 +709,87 @@ export default function SettingsView() {
                 : "Offline mode is active. Cached reads stay available and writes queue locally."}
             </div>
           </div>
-        )}
-        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="text-sm font-medium">Export a sync package</div>
+        </Panel>
+      )}
+
+      {!syncEnabled && (
+        <Panel
+          title="Templates"
+          description="Capture reusable project boards, dependency setups, and planning flows from the selected group."
+          icon={<Stamp size={16} className="text-violet-500" />}
+        >
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 space-y-3">
+            <div className="text-sm font-medium">
+              Create from current sidebar group
+            </div>
             <div className="text-xs text-slate-500 dark:text-slate-400">
-              Copy the package below onto another device, then import it there.
+              Current source group: {groups.find((group) => group.id === selectedGroupId)?.name ?? "None selected"}
             </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button onClick={handleSyncExport} className="btn-primary !px-3 !py-2 text-xs" disabled={syncBusy}>
-              {syncBusy ? "Working..." : "Export Sync Package"}
+            <input
+              value={templateName}
+              onChange={(event) => setTemplateName(event.target.value)}
+              className="input-base !py-2.5 text-sm"
+              placeholder="Template name"
+              aria-label="Template name"
+            />
+            <textarea
+              value={templateDescription}
+              onChange={(event) => setTemplateDescription(event.target.value)}
+              className="input-base min-h-[5rem] !py-2.5 text-sm"
+              placeholder="What this template is for"
+              aria-label="Template description"
+            />
+            <button type="button" onClick={handleTemplateCreate} className="btn-primary !px-3 !py-2 text-xs">
+              Save Template
             </button>
-            <button onClick={handleSyncImport} className="btn-ghost !px-3 !py-2 text-xs" disabled={syncBusy || !syncPackage.trim()}>
-              Import Package
-            </button>
           </div>
-        </div>
-        <textarea
-          value={syncPackage}
-          onChange={(event) => setSyncPackage(event.target.value)}
-          rows={10}
-          className="input-base min-h-[14rem] !py-3 font-mono text-xs"
-          placeholder="Sync package JSON will appear here after export, or paste one here to import."
-          aria-label="Sync package"
-        />
-      </Panel>
 
-      <Panel
-        title="Templates"
-        description="Capture reusable project boards, dependency setups, and planning flows from the selected group."
-        icon={<Stamp size={16} className="text-violet-500" />}
-      >
-        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 space-y-3">
-          <div className="text-sm font-medium">
-            Create from current sidebar group
-          </div>
-          <div className="text-xs text-slate-500 dark:text-slate-400">
-            Current source group: {groups.find((group) => group.id === selectedGroupId)?.name ?? "None selected"}
-          </div>
-          <input
-            value={templateName}
-            onChange={(event) => setTemplateName(event.target.value)}
-            className="input-base !py-2.5 text-sm"
-            placeholder="Template name"
-            aria-label="Template name"
-          />
-          <textarea
-            value={templateDescription}
-            onChange={(event) => setTemplateDescription(event.target.value)}
-            className="input-base min-h-[5rem] !py-2.5 text-sm"
-            placeholder="What this template is for"
-            aria-label="Template description"
-          />
-          <button type="button" onClick={handleTemplateCreate} className="btn-primary !px-3 !py-2 text-xs">
-            Save Template
-          </button>
-        </div>
-
-        <div className="space-y-2">
-          {templates.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 px-4 py-5 text-sm text-slate-400 dark:text-slate-500">
-              No templates saved yet.
-            </div>
-          ) : (
-            templates.map((template) => (
-              <div
-                key={template.id}
-                className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-medium">{template.name}</div>
-                    {template.description && (
-                      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        {template.description}
+          <div className="space-y-2">
+            {templates.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 px-4 py-5 text-sm text-slate-400 dark:text-slate-500">
+                No templates saved yet.
+              </div>
+            ) : (
+              templates.map((template) => (
+                <div
+                  key={template.id}
+                  className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-medium">{template.name}</div>
+                      {template.description && (
+                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          {template.description}
+                        </div>
+                      )}
+                      <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                        {template.counts.todos} tasks, {template.counts.connections} connections
                       </div>
-                    )}
-                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                      {template.counts.todos} tasks, {template.counts.connections} connections
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleTemplateApply(template.id)}
+                        className="btn-primary !px-3 !py-2 text-xs"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleTemplateDelete(template.id)}
+                        className="btn-ghost !px-3 !py-2 text-xs text-red-500"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleTemplateApply(template.id)}
-                      className="btn-primary !px-3 !py-2 text-xs"
-                    >
-                      Apply
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleTemplateDelete(template.id)}
-                      className="btn-ghost !px-3 !py-2 text-xs text-red-500"
-                    >
-                      Delete
-                    </button>
-                  </div>
                 </div>
-              </div>
-            ))
-          )}
-        </div>
-      </Panel>
+              ))
+            )}
+          </div>
+        </Panel>
+      )}
 
       {settings.showDebugStats && (
         <Panel
