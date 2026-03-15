@@ -16,19 +16,22 @@
   "license": "ISC",
   "description": "A standalone, offline, local-only To-Do list application with node-based task connections",
   "dependencies": {
-    "@hono/node-server": "^1.19.9",
+    "@hono/node-server": "^1.19.11",
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
-    "hono": "^4.11.9",
+    "hono": "^4.12.8",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.2.3",
     "@types/uuid": "^10.0.0",
-    "drizzle-kit": "^0.18.1",
+    "drizzle-kit": "^0.31.9",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "rollup": "^4.59.0"
   }
 }

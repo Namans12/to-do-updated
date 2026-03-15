@@ -699,13 +699,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const session = await getSyncSession();
         if (cancelled) return;
         setSyncSession(session);
-        await primeSyncState(session);
-        if (cancelled) return;
         setState((s) => ({
           ...s,
           session,
           authReady: true,
         }));
+        await primeSyncState(session);
+        if (cancelled) return;
         if (session) {
           await hydrateFromSyncSnapshot();
         }
@@ -724,23 +724,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void initSync();
 
     const subscription = onSyncAuthStateChange(async (_event, session) => {
-      setSyncSession(session);
-      await primeSyncState(session);
-      if (cancelled) return;
-      todosCacheRef.current = {};
-      setState((s) => ({
-        ...s,
-        session,
-        authReady: true,
-        loading: false,
-        groups: [],
-        selectedGroupId: null,
-        todos: [],
-        allTodos: [],
-        connections: [],
-      }));
-      if (session) {
-        await hydrateFromSyncSnapshot();
+      try {
+        setSyncSession(session);
+        if (cancelled) return;
+        todosCacheRef.current = {};
+        setState((s) => ({
+          ...s,
+          session,
+          authReady: true,
+          loading: false,
+          groups: [],
+          selectedGroupId: null,
+          todos: [],
+          allTodos: [],
+          connections: [],
+        }));
+        await primeSyncState(session);
+        if (cancelled) return;
+        if (session) {
+          await hydrateFromSyncSnapshot();
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setState((s) => ({ ...s, authReady: true, loading: false }));
+        }
       }
     });
 
