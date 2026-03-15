@@ -1,4 +1,16 @@
-import type { Group, Todo, TrashItem, TrashPayload, Connection } from "../types";
+import type {
+  ActivityLog,
+  BackupSnapshot,
+  Connection,
+  ConnectionKind,
+  Group,
+  RecurrenceRule,
+  SyncPackage,
+  TemplateSummary,
+  Todo,
+  TrashPayload,
+  BackupTaskPreview,
+} from "../types";
 
 const BASE = "/api";
 
@@ -10,9 +22,29 @@ async function request<T>(
     headers: { "Content-Type": "application/json", ...options?.headers },
     ...options,
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || `Request failed: ${res.status}`);
-  return json.data ?? json;
+  const text = await res.text();
+  let json: any = null;
+
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      if (!res.ok) {
+        throw new Error(`Request failed: ${res.status}`);
+      }
+      return text as T;
+    }
+  }
+
+  if (!res.ok) {
+    throw new Error(json?.error || `Request failed: ${res.status}`);
+  }
+
+  if (!text) {
+    return undefined as T;
+  }
+
+  return (json?.data ?? json) as T;
 }
 
 // ── Groups ──────────────────────────────────────────────
@@ -47,7 +79,13 @@ export const todosApi = {
     groupId: string,
     title: string,
     description?: string,
-    options?: { high_priority?: boolean; reminder_at?: string | null }
+    options?: {
+      high_priority?: boolean;
+      reminder_at?: string | null;
+      recurrence_rule?: RecurrenceRule | null;
+      planning_level?: number;
+      parent_todo_id?: string | null;
+    }
   ) =>
     request<Todo>(`/groups/${groupId}/todos`, {
       method: "POST",
@@ -56,6 +94,9 @@ export const todosApi = {
         description,
         high_priority: options?.high_priority,
         reminder_at: options?.reminder_at,
+        recurrence_rule: options?.recurrence_rule,
+        planning_level: options?.planning_level,
+        parent_todo_id: options?.parent_todo_id,
       }),
     }),
   update: (
@@ -65,12 +106,17 @@ export const todosApi = {
       description?: string | null;
       high_priority?: boolean;
       reminder_at?: string | null;
+      recurrence_rule?: RecurrenceRule | null;
+      planning_level?: number;
+      parent_todo_id?: string | null;
     }
   ) =>
     request<Todo>(`/todos/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
+  acknowledgeReminder: (id: string) =>
+    request<Todo>(`/todos/${id}/reminder/ack`, { method: "POST" }),
   toggleComplete: (id: string) =>
     request<Todo>(`/todos/${id}/complete`, { method: "PATCH" }),
   delete: (id: string) =>
@@ -119,15 +165,15 @@ export const trashApi = {
 export const connectionsApi = {
   list: () => request<Connection[]>("/connections"),
   get: (id: string) => request<Connection>(`/connections/${id}`),
-  create: (todoIds: string[], name?: string) =>
+  create: (todoIds: string[], name?: string, kind?: ConnectionKind) =>
     request<Connection>("/connections", {
       method: "POST",
-      body: JSON.stringify({ todoIds, name }),
+      body: JSON.stringify({ todoIds, name, kind }),
     }),
-  update: (id: string, name: string | null) =>
+  update: (id: string, data: { name?: string | null; kind?: ConnectionKind }) =>
     request<Connection>(`/connections/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(data),
     }),
   addItem: (connectionId: string, todoId: string) =>
     request<void>(`/connections/${connectionId}/items`, {
@@ -147,6 +193,11 @@ export const connectionsApi = {
         body: JSON.stringify({ fromTodoId, toTodoId }),
       }
     ),
+  reorderItems: (connectionId: string, todoIds: string[]) =>
+    request<Connection>(`/connections/${connectionId}/reorder`, {
+      method: "PATCH",
+      body: JSON.stringify({ todoIds }),
+    }),
   removeItem: (connectionId: string, todoId: string) =>
     request<void>(`/connections/${connectionId}/items/${todoId}`, {
       method: "DELETE",
@@ -157,10 +208,36 @@ export const connectionsApi = {
 
 // ── Search ──────────────────────────────────────────────
 export const searchApi = {
-  search: async (q: string, completed?: boolean, groupId?: string) => {
+  search: async (
+    q: string,
+    filters?: {
+      completed?: "all" | "true" | "false";
+      groupId?: string;
+      highPriority?: "all" | "true" | "false";
+      hasReminder?: "all" | "true" | "false";
+      connectionKind?: ConnectionKind | "all";
+      planningLevel?: number | "all";
+      sort?: "relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest";
+    }
+  ) => {
     const params = new URLSearchParams({ q });
-    if (completed !== undefined) params.set("completed", String(completed));
-    if (groupId) params.set("group_id", groupId);
+    if (filters?.completed && filters.completed !== "all") params.set("completed", filters.completed);
+    if (filters?.groupId) params.set("group_id", filters.groupId);
+    if (filters?.highPriority && filters.highPriority !== "all") {
+      params.set("high_priority", filters.highPriority);
+    }
+    if (filters?.hasReminder && filters.hasReminder !== "all") {
+      params.set("has_reminder", filters.hasReminder);
+    }
+    if (filters?.connectionKind && filters.connectionKind !== "all") {
+      params.set("connection_kind", filters.connectionKind);
+    }
+    if (filters?.planningLevel !== undefined && filters.planningLevel !== "all") {
+      params.set("planning_level", String(filters.planningLevel));
+    }
+    if (filters?.sort && filters.sort !== "relevance") {
+      params.set("sort", filters.sort);
+    }
     const data = await request<{ query: string; count: number; results: SearchResult[] }>(`/search?${params}`);
     return data.results;
   },
@@ -173,7 +250,87 @@ export interface SearchResult {
   high_priority: number;
   is_completed: number;
   position: number;
+  reminder_at: string | null;
+  recurrence_rule: RecurrenceRule | null;
+  planning_level: number;
+  parent_todo_id: string | null;
+  connection_kind: ConnectionKind | null;
   group: { id: string; name: string };
   created_at: string;
   updated_at: string;
 }
+
+export const activityApi = {
+  list: (limit = 50) => request<ActivityLog[]>(`/activity?limit=${limit}`),
+  entityHistory: (entityType: string, entityId: string, limit = 100) =>
+    request<ActivityLog[]>(`/activity/${entityType}/${entityId}?limit=${limit}`),
+};
+
+export const backupsApi = {
+  list: () => request<BackupSnapshot[]>("/backups"),
+  create: (label?: string) =>
+    request<BackupSnapshot>("/backups", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
+  restore: (id: string) =>
+    request<BackupSnapshot>(`/backups/${id}/restore`, {
+      method: "POST",
+    }),
+  previewTask: (backupId: string, todoId: string) =>
+    request<BackupTaskPreview>(`/backups/${backupId}/todos/${todoId}`),
+  restoreTask: (backupId: string, todoId: string) =>
+    request<Todo>(`/backups/${backupId}/todos/${todoId}/restore`, {
+      method: "POST",
+    }),
+  delete: (id: string) =>
+    request<void>(`/backups/${id}`, {
+      method: "DELETE",
+    }),
+};
+
+export const templatesApi = {
+  list: () => request<TemplateSummary[]>("/templates"),
+  create: (payload: { source_group_id: string; name?: string; description?: string | null }) =>
+    request<TemplateSummary>("/templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  apply: (id: string, groupId: string) =>
+    request<{
+      group_id: string;
+      template_id: string;
+      created_todo_count: number;
+      created_connection_count: number;
+    }>(`/templates/${id}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId }),
+    }),
+  delete: (id: string) =>
+    request<void>(`/templates/${id}`, {
+      method: "DELETE",
+    }),
+};
+
+export const syncApi = {
+  exportPackage: (deviceName?: string) =>
+    request<SyncPackage>(
+      `/sync/export${deviceName ? `?device_name=${encodeURIComponent(deviceName)}` : ""}`
+    ),
+  importPackage: (payload: SyncPackage) =>
+    request<{
+      version: 1;
+      exported_at: string;
+      device_name: string | null;
+      counts: {
+        groups: number;
+        todos: number;
+        connections: number;
+        connection_items: number;
+        activity_logs: number;
+      };
+    }>("/sync/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+};

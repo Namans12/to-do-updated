@@ -492,6 +492,60 @@ describe("Groups CRUD API", () => {
 
       expect(res.status).toBe(400);
     });
+
+    it("should return 400 for duplicate group ids", async () => {
+      const res1 = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "First" }),
+      });
+      const res2 = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Second" }),
+      });
+      const g1 = await res1.json();
+      const g2 = await res2.json();
+
+      const reorderRes = await ctx.app.request("/api/groups/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [
+            { id: g1.data.id, position: 0 },
+            { id: g1.data.id, position: 1 },
+            { id: g2.data.id, position: 2 },
+          ],
+        }),
+      });
+
+      expect(reorderRes.status).toBe(400);
+    });
+
+    it("should return 400 when payload does not include every active group", async () => {
+      const res1 = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "First" }),
+      });
+      const res2 = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Second" }),
+      });
+      const g1 = await res1.json();
+      await res2.json();
+
+      const reorderRes = await ctx.app.request("/api/groups/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [{ id: g1.data.id, position: 0 }],
+        }),
+      });
+
+      expect(reorderRes.status).toBe(400);
+    });
   });
 
   // ─── Response shape tests ──────────────────────────────────

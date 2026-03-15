@@ -122,12 +122,60 @@ export function createGroupsRouter(dbOverride?: DbOverride) {
 
       // Validate each item has id and position
       for (const item of items) {
-        if (!item.id || typeof item.position !== "number") {
+        if (
+          !item.id ||
+          typeof item.position !== "number" ||
+          !Number.isInteger(item.position) ||
+          item.position < 0
+        ) {
           return c.json({ error: "Each item must have an id (string) and position (number)" }, 400);
         }
       }
 
       const { db: drizzleDb, sqlite } = db();
+      const ids = items.map((item) => item.id);
+      const positions = items.map((item) => item.position);
+
+      if (new Set(ids).size !== ids.length) {
+        return c.json({ error: "Duplicate group ids are not allowed" }, 400);
+      }
+
+      if (new Set(positions).size !== positions.length) {
+        return c.json({ error: "Duplicate positions are not allowed" }, 400);
+      }
+
+      const expectedPositions = [...positions].sort((a, b) => a - b);
+      for (let i = 0; i < expectedPositions.length; i += 1) {
+        if (expectedPositions[i] !== i) {
+          return c.json(
+            { error: "Positions must form a contiguous range starting at 0" },
+            400
+          );
+        }
+      }
+
+      const activeGroups = drizzleDb
+        .select({ id: groups.id })
+        .from(groups)
+        .where(isNull(groups.deleted_at))
+        .all();
+
+      if (activeGroups.length !== items.length) {
+        return c.json(
+          { error: "Reorder payload must include every active group exactly once" },
+          400
+        );
+      }
+
+      const activeIds = new Set(activeGroups.map((group) => group.id));
+      for (const id of ids) {
+        if (!activeIds.has(id)) {
+          return c.json(
+            { error: "Reorder payload must include every active group exactly once" },
+            400
+          );
+        }
+      }
 
       // Run in a transaction
       const transaction = sqlite.transaction(() => {

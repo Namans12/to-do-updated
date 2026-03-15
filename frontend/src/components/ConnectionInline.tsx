@@ -5,6 +5,7 @@ import type { Connection } from "../types";
 import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
 
 interface ConnectionInlineProps {
   connection: Connection;
@@ -16,10 +17,8 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
   const [expanded, setExpanded] = useState(false);
   const { progress, is_fully_complete } = connection;
 
-  const nextTaskIndex = connection.items.findIndex(
-    (item) => !item.is_completed
-  );
-  const nextTask = nextTaskIndex >= 0 ? connection.items[nextTaskIndex] : null;
+  const nextTask = getConnectionNextItem(connection);
+  const nextTaskIndex = connection.items.findIndex((item) => item.todo_id === nextTask?.todo_id);
   const hasHighlightedTodo = !!(
     highlightTodoId && connection.items.some((item) => item.todo_id === highlightTodoId)
   );
@@ -112,9 +111,24 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
               >
                 {connection.name || "Connection"}
               </span>
+              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                {connectionKindMeta[connection.kind].label}
+              </span>
               <span className="text-[10px] text-slate-400 dark:text-slate-500">
                 {progress.completed}/{progress.total}
               </span>
+              {!is_fully_complete && (
+                <>
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                    {progress.available_count} ready · {progress.blocked_count} blocked
+                  </span>
+                  {progress.critical_path_length ? (
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                      Path {progress.critical_path_length}
+                    </span>
+                  ) : null}
+                </>
+              )}
             </div>
 
             {/* Current / Next task preview */}
@@ -193,6 +207,11 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
             className="overflow-hidden"
           >
             <div className="px-4 pb-3 pt-1 border-t border-slate-100 dark:border-slate-800">
+              {connection.kind === "dependency" && progress.blocked_titles?.length ? (
+                <div className="mb-3 rounded-2xl bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                  Blocked chain: {progress.blocked_titles.join(" -> ")}
+                </div>
+              ) : null}
               <div className="pl-1 pt-2">
                 {connection.items.map((item, index) => {
                   const isNext = index === nextTaskIndex;
@@ -272,6 +291,9 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                           >
                             {item.title}
                           </span>
+                          <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                            {getConnectionSequenceLabel(connection, index, item)}
+                          </span>
                           {isNext && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400">
                               <Zap size={8} />
@@ -287,7 +309,11 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                           </button>
                         </div>
                         <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                          Step {index + 1} of {connection.items.length}
+                          {connection.kind === "branch"
+                            ? index === 0
+                              ? "Root task"
+                              : `Branch ${index} of ${Math.max(connection.items.length - 1, 1)}`
+                            : `Step ${index + 1} of ${connection.items.length}`}
                         </span>
                       </div>
                     </div>

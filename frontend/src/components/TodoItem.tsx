@@ -5,19 +5,32 @@ import type { Todo } from "../types";
 import {
   Trash2,
   ChevronDown,
+  ChevronUp,
   Pencil,
   Check,
+  History,
   Bell,
   CalendarDays,
   Clock3,
+  Layers3,
+  Repeat,
+  Spline,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import toast from "react-hot-toast";
+import { getActionErrorMessage } from "../utils/errors";
+import TaskNotes, { getCollapsedNotePreview, isLongNote } from "./TaskNotes";
+import TodoHistoryModal from "./TodoHistoryModal";
 
 interface TodoItemProps {
   todo: Todo;
   isHighlighted?: boolean;
   nextTodoId?: string | null;
+  layoutId?: string;
+  depth?: number;
+  childCount?: number;
+  childCompletion?: { completed: number; total: number };
+  parentTitle?: string | null;
 }
 
 function toLocalDateTimeParts(iso: string | null): { date: string; time: string } {
@@ -44,8 +57,13 @@ export default function TodoItem({
   todo,
   isHighlighted = false,
   nextTodoId = null,
+  layoutId,
+  depth = 0,
+  childCount = 0,
+  childCompletion,
+  parentTitle = null,
 }: TodoItemProps) {
-  const { refreshTodos, refreshConnections } = useApp();
+  const { refreshTodos, refreshConnections, settings, todos, connections } = useApp();
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(todo.title);
   const [editDesc, setEditDesc] = useState(todo.description ?? "");
@@ -53,13 +71,33 @@ export default function TodoItem({
   const [editHighPriority, setEditHighPriority] = useState(todo.high_priority === 1);
   const [editReminderDate, setEditReminderDate] = useState(initialReminder.date);
   const [editReminderTime, setEditReminderTime] = useState(initialReminder.time);
+  const [editRecurrenceRule, setEditRecurrenceRule] = useState(todo.recurrence_rule ?? "");
+  const [editPlanningLevel, setEditPlanningLevel] = useState(String(todo.planning_level ?? 0));
+  const [editParentTodoId, setEditParentTodoId] = useState(todo.parent_todo_id ?? "");
   const [isChecking, setIsChecking] = useState(false);
   const [descriptionMode, setDescriptionMode] = useState(false);
+  const [notesExpanded, setNotesExpanded] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const descRef = useRef<HTMLTextAreaElement>(null);
   const editDescRef = useRef<HTMLTextAreaElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const todayDate = new Date().toISOString().slice(0, 10);
+  const siblingTodos = todos.filter((item) => item.group_id === todo.group_id && item.id !== todo.id && !item.deleted_at);
+  const dependencyImpact = connections.reduce(
+    (acc, connection) => {
+      if (connection.kind !== "dependency") return acc;
+      const index = connection.items.findIndex((item) => item.todo_id === todo.id);
+      if (index === -1) return acc;
+      const blocked = connection.items.slice(index + 1).filter((item) => item.is_completed !== 1);
+      if (blocked.length === 0) return acc;
+      return {
+        blockedCount: acc.blockedCount + blocked.length,
+        sampleTitle: acc.sampleTitle ?? blocked[0]?.title ?? null,
+      };
+    },
+    { blockedCount: 0, sampleTitle: null as string | null }
+  );
 
   useEffect(() => {
     if (isEditing && titleRef.current) titleRef.current.focus();
@@ -85,20 +123,28 @@ export default function TodoItem({
         await refreshConnections();
         setIsChecking(false);
       }, 400);
-    } catch {
-      toast.error("Failed to update");
+    } catch (error) {
+      toast.error(getActionErrorMessage("update the task", error));
       setIsChecking(false);
     }
   };
 
   const handleDelete = async () => {
+    if (dependencyImpact.blockedCount > 0) {
+      const confirmed = window.confirm(
+        `This task is currently blocking ${dependencyImpact.blockedCount} dependency task(s)${
+          dependencyImpact.sampleTitle ? `, including "${dependencyImpact.sampleTitle}"` : ""
+        }. Delete it anyway?`
+      );
+      if (!confirmed) return;
+    }
     try {
       await todosApi.delete(todo.id);
       await refreshTodos();
       await refreshConnections();
       toast.success("Moved to trash");
     } catch {
-      toast.error("Failed to delete");
+      toast.error(getActionErrorMessage("move the task to trash", new Error("Delete failed")));
     }
   };
 
@@ -107,7 +153,7 @@ export default function TodoItem({
     if (!title) return;
     const cleanedDesc = editDesc.trim();
     const descriptionValue = cleanedDesc.length > 0 ? cleanedDesc : null;
-    const defaultTime = "10:00";
+    const defaultTime = settings.defaultReminderTime || "10:00";
     const hasAnyReminderField = !!(editReminderDate || editReminderTime);
     const resolvedDate = hasAnyReminderField ? (editReminderDate || todayDate) : "";
     const resolvedTime = hasAnyReminderField ? (editReminderTime || defaultTime) : "";
@@ -130,6 +176,9 @@ export default function TodoItem({
         description: descriptionValue,
         high_priority: editHighPriority,
         reminder_at: reminderAt,
+        recurrence_rule: editRecurrenceRule ? (editRecurrenceRule as "daily" | "weekly" | "monthly") : null,
+        planning_level: Number(editPlanningLevel),
+        parent_todo_id: editParentTodoId || null,
       });
       await refreshTodos();
       setIsEditing(false);
@@ -146,7 +195,7 @@ export default function TodoItem({
         focusNewTodoInput();
       }
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "Failed to update");
+      toast.error(getActionErrorMessage("save the task", e));
     }
   };
 
@@ -160,8 +209,64 @@ export default function TodoItem({
       await refreshTodos();
       setDescriptionMode(false);
     } catch {
-      toast.error("Failed to save description");
+      toast.error(getActionErrorMessage("save the notes", new Error("Save failed")));
     }
+  };
+
+  const handleToggleChecklistLine = async (lineIndex: number) => {
+    if (!todo.description) return;
+    const lines = todo.description.split(/\r?\n/);
+    const line = lines[lineIndex];
+    if (line === undefined) return;
+    const toggled = line.replace(
+      /^(\s*[-*]\s+\[)( |x|X)(\]\s+.*)$/,
+      (_, open, mark, rest) => `${open}${mark.toLowerCase() === "x" ? " " : "x"}${rest}`
+    );
+    if (toggled === line) return;
+    lines[lineIndex] = toggled;
+
+    try {
+      await todosApi.update(todo.id, {
+        description: lines.join("\n"),
+      });
+      await refreshTodos();
+    } catch (error) {
+      toast.error(getActionErrorMessage("update the checklist item", error));
+    }
+  };
+
+  const insertNoteTemplate = (template: string) => {
+    const target = descriptionMode ? descRef.current : editDescRef.current;
+    if (!target) {
+      setEditDesc((prev) => `${prev}${prev ? "\n" : ""}${template}`);
+      return;
+    }
+    const start = target.selectionStart ?? editDesc.length;
+    const end = target.selectionEnd ?? editDesc.length;
+    const nextValue = `${editDesc.slice(0, start)}${template}${editDesc.slice(end)}`;
+    setEditDesc(nextValue);
+    requestAnimationFrame(() => {
+      target.focus();
+      const caret = start + template.length;
+      target.setSelectionRange(caret, caret);
+    });
+  };
+
+  const wrapNoteSelection = (prefix: string, suffix = prefix) => {
+    const target = descriptionMode ? descRef.current : editDescRef.current;
+    if (!target) {
+      setEditDesc((prev) => `${prev}${prefix}${suffix}`);
+      return;
+    }
+    const start = target.selectionStart ?? editDesc.length;
+    const end = target.selectionEnd ?? editDesc.length;
+    const selected = editDesc.slice(start, end);
+    const nextValue = `${editDesc.slice(0, start)}${prefix}${selected}${suffix}${editDesc.slice(end)}`;
+    setEditDesc(nextValue);
+    requestAnimationFrame(() => {
+      target.focus();
+      target.setSelectionRange(start + prefix.length, end + prefix.length);
+    });
   };
 
   const focusNewTodoInput = () => {
@@ -200,6 +305,9 @@ export default function TodoItem({
       const parts = toLocalDateTimeParts(todo.reminder_at);
       setEditReminderDate(parts.date);
       setEditReminderTime(parts.time);
+      setEditRecurrenceRule(todo.recurrence_rule ?? "");
+      setEditPlanningLevel(String(todo.planning_level ?? 0));
+      setEditParentTodoId(todo.parent_todo_id ?? "");
     }
   };
 
@@ -210,6 +318,7 @@ export default function TodoItem({
     <motion.div
       ref={cardRef}
       layout
+      layoutId={layoutId}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, x: -24, transition: { duration: 0.2 } }}
@@ -220,10 +329,11 @@ export default function TodoItem({
         isHighlighted ? "ring-2 ring-indigo-500/60 shadow-xl shadow-indigo-500/20" : ""
       }`}
     >
-      <div className="flex items-start gap-3 px-4 py-3.5">
+      <div className="flex items-start gap-3 px-4 py-3.5" style={{ paddingLeft: `${16 + depth * 18}px` }}>
         {/* Checkbox */}
         <button
           onClick={handleToggle}
+          aria-label={isCompleted ? `Mark ${todo.title} incomplete` : `Mark ${todo.title} complete`}
           className={`
             mt-0.5 flex-shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center
             transition-all duration-300
@@ -248,6 +358,12 @@ export default function TodoItem({
 
         {/* Content */}
         <div className="flex-1 min-w-0">
+          {!isEditing && depth > 0 && (
+            <div className="mb-2 inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-indigo-600 dark:text-indigo-300">
+              <Spline size={10} />
+              Subtask
+            </div>
+          )}
           {isEditing ? (
             <div className="space-y-2">
               <input
@@ -260,8 +376,8 @@ export default function TodoItem({
               <textarea
                 ref={editDescRef}
                 className="input-base !py-2 text-sm resize-none"
-                placeholder="Add a description (optional)..."
-                rows={2}
+                placeholder={"Add notes (optional)...\nTip: paste links or use - [ ] checklist lines"}
+                rows={5}
                 value={editDesc}
                 onChange={(e) => setEditDesc(e.target.value)}
                 onKeyDown={(e) => {
@@ -275,6 +391,29 @@ export default function TodoItem({
                   if (e.key === "Escape") setIsEditing(false);
                 }}
               />
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <button type="button" onClick={() => wrapNoteSelection("**")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Bold
+                </button>
+                <button type="button" onClick={() => wrapNoteSelection("*")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Italic
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("- [ ] ")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Checklist
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("- ")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Bullet
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("https://")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Link
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("## Heading\n")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Heading
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("```\ncode\n```")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Code
+                </button>
+              </div>
               <div className="flex flex-wrap items-center gap-3">
                 <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
                   <input
@@ -327,9 +466,51 @@ export default function TodoItem({
                     Clear
                   </button>
                 )}
+                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                  <Repeat size={12} />
+                  <select
+                    value={editRecurrenceRule}
+                    onChange={(e) => setEditRecurrenceRule(e.target.value)}
+                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs"
+                  >
+                    <option value="">No repeat</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </label>
+                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                  <Layers3 size={12} />
+                  <select
+                    value={editPlanningLevel}
+                    onChange={(e) => setEditPlanningLevel(e.target.value)}
+                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs"
+                  >
+                    {[0, 1, 2, 3, 4, 5].map((level) => (
+                      <option key={level} value={String(level)}>
+                        Level {level}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                  <Spline size={12} />
+                  <select
+                    value={editParentTodoId}
+                    onChange={(e) => setEditParentTodoId(e.target.value)}
+                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs max-w-[160px]"
+                  >
+                    <option value="">No parent task</option>
+                    {siblingTodos.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={handleSaveEdit} className="btn-primary !py-1.5 !px-3 text-xs">
+                <button onClick={() => void handleSaveEdit()} className="btn-primary !py-1.5 !px-3 text-xs">
                   Save
                 </button>
                 <button
@@ -341,13 +522,16 @@ export default function TodoItem({
                     const parts = toLocalDateTimeParts(todo.reminder_at);
                     setEditReminderDate(parts.date);
                     setEditReminderTime(parts.time);
+                    setEditRecurrenceRule(todo.recurrence_rule ?? "");
+                    setEditPlanningLevel(String(todo.planning_level ?? 0));
+                    setEditParentTodoId(todo.parent_todo_id ?? "");
                   }}
                   className="btn-ghost !py-1.5 !px-3 text-xs"
                 >
                   Cancel
                 </button>
                 <span className="text-[10px] text-slate-400 dark:text-slate-500 ml-auto">
-                  Shift+Enter for description
+                  Shift+Enter for notes. Links and `- [ ]` checklists are supported in preview.
                 </span>
               </div>
             </div>
@@ -359,8 +543,8 @@ export default function TodoItem({
               <textarea
                 ref={descRef}
                 className="input-base !py-2 text-sm resize-none !ring-emerald-500/50 !border-emerald-500 focus:!ring-emerald-500/50 focus:!border-emerald-500"
-                placeholder="Add a description..."
-                rows={2}
+                placeholder="Add notes..."
+                rows={5}
                 value={editDesc}
                 onChange={(e) => setEditDesc(e.target.value)}
                 onKeyDown={(e) => {
@@ -373,6 +557,29 @@ export default function TodoItem({
                   if (e.key === "Escape") setDescriptionMode(false);
                 }}
               />
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <button type="button" onClick={() => wrapNoteSelection("**")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Bold
+                </button>
+                <button type="button" onClick={() => wrapNoteSelection("*")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Italic
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("- [ ] ")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Checklist
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("- ")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Bullet
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("https://")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Link
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("## Heading\n")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Heading
+                </button>
+                <button type="button" onClick={() => insertNoteTemplate("```\ncode\n```")} className="btn-ghost !px-2 !py-1 text-[11px]">
+                  Code
+                </button>
+              </div>
               <div className="flex gap-2">
                 <button onClick={handleSaveDescription} className="btn-primary !py-1.5 !px-3 text-xs">
                   Save
@@ -383,6 +590,9 @@ export default function TodoItem({
                 >
                   Cancel
                 </button>
+                <span className="ml-auto text-[10px] text-slate-400 dark:text-slate-500">
+                  Use `- [ ]` for checklist items and paste links directly.
+                </span>
               </div>
             </div>
           ) : (
@@ -404,19 +614,81 @@ export default function TodoItem({
                     {new Date(todo.reminder_at).toLocaleString()}
                   </span>
                 )}
+                {todo.recurrence_enabled === 1 && todo.recurrence_rule && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
+                    <Repeat size={10} />
+                    {todo.recurrence_rule}
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-500 dark:text-slate-300">
+                  <Layers3 size={10} />
+                  Level {todo.planning_level}
+                </span>
               </div>
 
-              {/* Description subtext */}
+              {(parentTitle || childCount > 0) && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
+                  {parentTitle && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                      <Spline size={10} />
+                      Child of {parentTitle}
+                    </span>
+                  )}
+                  {childCount > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-1 font-semibold text-indigo-600 dark:text-indigo-300">
+                      <Spline size={10} />
+                      {childCount} subtask{childCount !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {childCompletion && childCompletion.total > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-1 font-semibold text-emerald-600 dark:text-emerald-300">
+                      <Check size={10} />
+                      Subtasks {childCompletion.completed}/{childCompletion.total}
+                    </span>
+                  )}
+                  {dependencyImpact.blockedCount > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-1 font-semibold text-amber-700 dark:text-amber-300">
+                      <Bell size={10} />
+                      Blocks {dependencyImpact.blockedCount}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Notes preview */}
               {todo.description && (
-                <p
-                  className={`mt-0.5 text-xs leading-relaxed pl-0.5 whitespace-pre-wrap ${
-                    isCompleted
-                      ? "text-slate-300 dark:text-slate-600"
-                      : "text-slate-400 dark:text-slate-500"
-                  }`}
-                >
-                  {todo.description}
-                </p>
+                <div className="mt-1.5 space-y-1">
+                  <TaskNotes
+                    text={notesExpanded ? todo.description : getCollapsedNotePreview(todo.description, 2)}
+                    sourceText={todo.description}
+                    expanded={notesExpanded}
+                    onToggleChecklistLine={handleToggleChecklistLine}
+                    className={`text-xs leading-relaxed pl-0.5 ${
+                      isCompleted
+                        ? "text-slate-300 dark:text-slate-600"
+                        : "text-slate-400 dark:text-slate-500"
+                    }`}
+                  />
+                  {isLongNote(todo.description) && (
+                    <button
+                      type="button"
+                      onClick={() => setNotesExpanded((value) => !value)}
+                      className="inline-flex items-center gap-1 pl-0.5 text-[11px] font-medium text-indigo-500 hover:text-indigo-400"
+                    >
+                      {notesExpanded ? (
+                        <>
+                          <ChevronUp size={12} />
+                          Show less
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown size={12} />
+                          Show more
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -430,11 +702,15 @@ export default function TodoItem({
                 setEditTitle(todo.title);
                 setEditDesc(todo.description ?? "");
                 setIsEditing(true);
+                setEditRecurrenceRule(todo.recurrence_rule ?? "");
+                setEditPlanningLevel(String(todo.planning_level ?? 0));
+                setEditParentTodoId(todo.parent_todo_id ?? "");
               }}
               data-edit-btn="true"
               data-todo-id={todo.id}
               className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
               title="Edit"
+              aria-label={`Edit ${todo.title}`}
             >
               <Pencil size={14} className="text-slate-400" />
             </button>
@@ -444,20 +720,40 @@ export default function TodoItem({
                 setDescriptionMode(true);
               }}
               className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-              title="Add description (Shift+Enter)"
+              title="Edit notes (Shift+Enter)"
+              aria-label={`Edit notes for ${todo.title}`}
             >
               <ChevronDown size={14} className="text-slate-400" />
+            </button>
+            <button
+              onClick={() => setHistoryOpen(true)}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              title="Task history"
+              aria-label={`View history for ${todo.title}`}
+            >
+              <History size={14} className="text-slate-400" />
             </button>
             <button
               onClick={handleDelete}
               className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
               title="Delete"
+              aria-label={`Delete ${todo.title}`}
             >
               <Trash2 size={14} className="text-slate-400 hover:text-red-500" />
             </button>
           </div>
         )}
       </div>
+
+      <TodoHistoryModal
+        todo={todo}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onRestored={async () => {
+          await refreshTodos();
+          await refreshConnections();
+        }}
+      />
     </motion.div>
   );
 }

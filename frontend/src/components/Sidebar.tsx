@@ -7,6 +7,7 @@ import {
   Trash2,
   Share2,
   Search,
+  AlarmClock,
   Sun,
   Moon,
   FolderOpen,
@@ -15,6 +16,8 @@ import {
   X,
   Check,
   GitBranch,
+  GripVertical,
+  Settings,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
@@ -24,6 +27,7 @@ export default function Sidebar() {
     groups,
     selectedGroupId,
     selectGroup,
+    startReorder,
     setCurrentView,
     currentView,
     refreshGroups,
@@ -36,6 +40,7 @@ export default function Sidebar() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; left: number; direction: "up" | "down" } | null>(null);
 
   const handleCreateGroup = async () => {
     const name = newGroupName.trim();
@@ -80,7 +85,9 @@ export default function Sidebar() {
     { id: "trash" as const, icon: Trash2, label: "Trash" },
     { id: "connections" as const, icon: Share2, label: "Connections" },
     { id: "graph" as const, icon: GitBranch, label: "GraphPlan" },
+    { id: "planner" as const, icon: AlarmClock, label: "Agenda" },
     { id: "search" as const, icon: Search, label: "Search" },
+    { id: "settings" as const, icon: Settings, label: "Settings" },
   ];
 
   return (
@@ -145,6 +152,7 @@ export default function Sidebar() {
           </span>
           <button
             onClick={() => setShowNewGroup(true)}
+            aria-label="Create group"
             className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           >
             <Plus size={16} className="text-slate-400" />
@@ -242,6 +250,8 @@ export default function Sidebar() {
                         ? "active"
                         : ""
                     }`}
+                    role="button"
+                    aria-current={selectedGroupId === group.id && currentView === "todos" ? "page" : undefined}
                     onClick={() => {
                       selectGroup(group.id);
                     }}
@@ -261,7 +271,26 @@ export default function Sidebar() {
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setMenuOpenId(menuOpenId === group.id ? null : group.id);
+                        if (menuOpenId === group.id) {
+                          setMenuOpenId(null);
+                          setMenuAnchor(null);
+                          return;
+                        }
+                        const buttonRect = e.currentTarget.getBoundingClientRect();
+                        const MENU_HEIGHT = 132;
+                        const MENU_WIDTH = 144;
+                        const GAP = 6;
+                        const openUp = window.innerHeight - buttonRect.bottom < MENU_HEIGHT + 16 && buttonRect.top > window.innerHeight - buttonRect.bottom;
+                        const top = openUp
+                          ? Math.max(8, buttonRect.top - MENU_HEIGHT - GAP)
+                          : Math.min(window.innerHeight - MENU_HEIGHT - 8, buttonRect.bottom + GAP);
+                        const left = Math.min(window.innerWidth - MENU_WIDTH - 8, Math.max(8, buttonRect.right - MENU_WIDTH));
+                        setMenuAnchor({
+                          top,
+                          left,
+                          direction: openUp ? "up" : "down",
+                        });
+                        setMenuOpenId(group.id);
                       }}
                       className="p-1 rounded-lg opacity-0 group-hover/item:opacity-100 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
                     >
@@ -269,42 +298,64 @@ export default function Sidebar() {
                     </button>
                   </div>
                 )}
-
-                {/* Context menu */}
-                <AnimatePresence>
-                  {menuOpenId === group.id && (
-                    <motion.div
-                      onMouseDown={(e) => e.stopPropagation()}
-                      initial={{ opacity: 0, scale: 0.95, y: -4 }}
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      exit={{ opacity: 0, scale: 0.95, y: -4 }}
-                      transition={{ duration: 0.15 }}
-                      className="absolute right-2 top-full z-10 mt-1 py-1.5 w-36 glass rounded-xl"
-                    >
-                      <button
-                        onClick={() => {
-                          setEditName(group.name);
-                          setEditingId(group.id);
-                          setMenuOpenId(null);
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-                      >
-                        <Pencil size={14} /> Rename
-                      </button>
-                      <button
-                        onClick={() => handleDeleteGroup(group.id)}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
-                      >
-                        <Trash2 size={14} /> Delete
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
               </motion.div>
             ))}
           </AnimatePresence>
         </div>
       </div>
+
+      <AnimatePresence>
+        {menuOpenId && menuAnchor && (
+          <motion.div
+            onMouseDown={(e) => e.stopPropagation()}
+            initial={{ opacity: 0, scale: 0.95, y: menuAnchor.direction === "up" ? 4 : -4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: menuAnchor.direction === "up" ? 4 : -4 }}
+            transition={{ duration: 0.15 }}
+            className="fixed z-20 w-36 rounded-xl py-1.5 glass"
+            style={{ top: menuAnchor.top, left: menuAnchor.left }}
+          >
+            {(() => {
+              const group = groups.find((item) => item.id === menuOpenId);
+              if (!group) return null;
+              return (
+                <>
+                  <button
+                    onClick={() => {
+                      setEditName(group.name);
+                      setEditingId(group.id);
+                      setMenuOpenId(null);
+                      setMenuAnchor(null);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  >
+                    <Pencil size={14} /> Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      startReorder(group.id);
+                      setMenuOpenId(null);
+                      setMenuAnchor(null);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  >
+                    <GripVertical size={14} /> Reorder
+                  </button>
+                  <button
+                    onClick={() => {
+                      void handleDeleteGroup(group.id);
+                      setMenuAnchor(null);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+                  >
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </>
+              );
+            })()}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Bottom nav */}
       <div className="px-3 pb-4 pt-2 border-t border-slate-200 dark:border-slate-800 space-y-0.5">
@@ -314,6 +365,7 @@ export default function Sidebar() {
             onClick={() => {
               setCurrentView(item.id);
             }}
+            aria-current={currentView === item.id ? "page" : undefined}
             className={`sidebar-item w-full ${
               currentView === item.id ? "active" : ""
             }`}

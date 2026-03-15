@@ -77,3 +77,7 @@ data/
 # Temporary files
 *.tmp
 *.swp
+
+.codex-e2e/
+.playwright-cli/
+.playwright-mcp/

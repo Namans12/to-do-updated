@@ -1,20 +1,21 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { todosApi, connectionsApi } from "../api/client";
-import type { Todo } from "../types";
+import type { Connection, Todo, ConnectionKind, GraphLayoutMode } from "../types";
 import {
   GitBranch,
   FolderOpen,
   Check,
   Zap,
-  GripVertical,
-  Eye,
-  EyeOff,
-  Maximize2,
-  Minimize2,
-  Scissors,
+  Sparkles,
 } from "lucide-react";
 import toast from "react-hot-toast";
+import GraphToolbar from "./graph/GraphToolbar";
+import GraphBoundaryOverlay from "./graph/GraphBoundaryOverlay";
+import GraphLegend from "./graph/GraphLegend";
+import GraphConnectionInspector from "./graph/GraphConnectionInspector";
+import GraphTodoInspector from "./graph/GraphTodoInspector";
+import { connectionKindMeta, getConnectionEdgePairs } from "../utils/connectionKinds";
 
 /* ─── Types ────────────────────────────────────────── */
 
@@ -34,6 +35,12 @@ interface DragState {
 
 type PortSide = "left" | "right" | "top" | "bottom";
 type AdjPair = { a: string; b: string; axis: "x" | "y"; };
+type GraphEdge = {
+  key: string;
+  conn: Connection;
+  fromId: string;
+  toId: string;
+};
 
 /* ─── Constants ────────────────────────────────────── */
 
@@ -44,10 +51,17 @@ const BASE_CANVAS_W = 2400;   // virtual canvas width
 const BASE_CANVAS_H = 1600;   // virtual canvas height
 const NORMAL_VIEW_EXTRA_W = 360;
 const NORMAL_VIEW_EXTRA_H = 240;
+const MAX_CANVAS_W = 4200;   // hard right boundary — dragging past this is blocked
+const MAX_CANVAS_H = 3000;   // hard bottom boundary
 const SNAP_PX = 12;
+const PORT_CONNECT_THRESHOLD = 4;
 const PORT_SIDES: PortSide[] = ["left", "right", "top", "bottom"];
 const OVERLAP_EPS = 0.1;
 const LEFT_TOP_BOUNDARY = 20;
+const RIGHT_BOTTOM_BOUNDARY = GRID; // one grid line gap before the right/bottom wall
+const MIN_ZOOM = 0.4;
+const MAX_ZOOM = 2.0;
+const ZOOM_STEP = 0.1;
 const CUT_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f43f5e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cpath d='M20 4 8.12 15.88'/%3E%3Cpath d='M14.47 14.48 20 20'/%3E%3Cpath d='M8.12 8.12 12 12'/%3E%3C/svg%3E\") 6 6, crosshair";
 
@@ -56,6 +70,14 @@ const snapGrid = (v: number, max: number, min = 0) =>
 
 const canonicalPairKey = (a: string, b: string) =>
   a < b ? `${a}|${b}` : `${b}|${a}`;
+
+const layoutLabelMap: Record<GraphLayoutMode, string> = {
+  smart: "Smart",
+  horizontal: "Horizontal",
+  vertical: "Vertical",
+  radial: "Radial",
+  planning: "Planning",
+};
 
 const oppositeSide = (side: PortSide): PortSide => {
   switch (side) {
@@ -127,10 +149,206 @@ const getClosestOppositePortsAt = (
   return best;
 };
 
+/** Find the closest port pair between any two nodes (not limited to opposite sides) */
+const getClosestAnyPortsAt = (
+  pos: Record<string, NodePosition>,
+  fromId: string,
+  toId: string,
+  maxDistance = Number.POSITIVE_INFINITY
+) => {
+  let best:
+    | {
+        fromSide: PortSide;
+        toSide: PortSide;
+        from: { x: number; y: number };
+        to: { x: number; y: number };
+        dist: number;
+      }
+    | null = null;
+
+  for (const fromSide of PORT_SIDES) {
+    const fromPort = getPortAt(pos, fromId, fromSide);
+    if (!fromPort) continue;
+    for (const toSide of PORT_SIDES) {
+      const toPort = getPortAt(pos, toId, toSide);
+      if (!toPort) continue;
+      const dist = Math.hypot(toPort.x - fromPort.x, toPort.y - fromPort.y);
+      if (dist > maxDistance) continue;
+      if (!best || dist < best.dist) {
+        best = {
+          fromSide,
+          toSide,
+          from: fromPort,
+          to: toPort,
+          dist,
+        };
+      }
+    }
+  }
+
+  return best;
+};
+
+function buildAutoLayout(
+  todos: Todo[],
+  connections: Connection[],
+  canvasSize: { w: number; h: number },
+  layoutMode: GraphLayoutMode
+) {
+  const fresh: Record<string, NodePosition> = {};
+  const todoById = new Map(todos.map((todo) => [todo.id, todo] as const));
+  const relevantConnections = connections.filter((conn) =>
+    conn.items.some((item) => todoById.has(item.todo_id))
+  );
+  const placed = new Set<string>();
+  let laneY = 80;
+
+  const place = (todoId: string, x: number, y: number) => {
+    if (placed.has(todoId)) return;
+    let nextX = snapGrid(x, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
+    let nextY = snapGrid(y, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
+    let guard = 0;
+    while (
+      Object.values(fresh).some(
+        (pos) => Math.abs(pos.x - nextX) < NODE_W && Math.abs(pos.y - nextY) < NODE_H
+      ) &&
+      guard < 20
+    ) {
+      nextX = snapGrid(
+        nextX + 80,
+        canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
+        LEFT_TOP_BOUNDARY
+      );
+      if (guard % 3 === 2) {
+        nextY = snapGrid(
+          nextY + 100,
+          canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
+          LEFT_TOP_BOUNDARY
+        );
+      }
+      guard += 1;
+    }
+    fresh[todoId] = { x: nextX, y: nextY };
+    placed.add(todoId);
+  };
+
+  for (const conn of relevantConnections) {
+    const items = conn.items.filter((item) => todoById.has(item.todo_id));
+    if (items.length === 0) continue;
+
+    if (layoutMode === "horizontal") {
+      const baseX = 120;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX + index * 220, laneY);
+      });
+      laneY += 180;
+      continue;
+    }
+
+    if (layoutMode === "vertical") {
+      const baseX = 180;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX, laneY + index * 140);
+      });
+      laneY += Math.max(220, items.length * 140);
+      continue;
+    }
+
+    if (layoutMode === "radial") {
+      const centerX = 360 + (laneY % 2 === 0 ? 0 : 220);
+      const centerY = laneY + 110;
+      items.forEach((item, index) => {
+        const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
+        place(
+          item.todo_id,
+          centerX + Math.cos(angle) * 180,
+          centerY + Math.sin(angle) * 120
+        );
+      });
+      laneY += 300;
+      continue;
+    }
+
+    if (layoutMode === "planning") {
+      items.forEach((item, index) => {
+        const level = todoById.get(item.todo_id)?.planning_level ?? 0;
+        place(item.todo_id, 90 + level * 240, laneY + index * 120);
+      });
+      laneY += Math.max(220, items.length * 120);
+      continue;
+    }
+
+    if (conn.kind === "branch") {
+      const root = items[0];
+      if (!root) continue;
+      const rootLevel = todoById.get(root.todo_id)?.planning_level ?? 0;
+      const baseX = 140 + rootLevel * 240;
+      const baseY = laneY + 70;
+      place(root.todo_id, baseX, baseY);
+      const branchOffsets = items.length <= 2 ? [0] : [-140, 140];
+      items.slice(1).forEach((item, index) => {
+        place(item.todo_id, baseX + 280, baseY + (branchOffsets[index] ?? index * 120));
+      });
+      laneY += 280;
+      continue;
+    }
+
+    if (conn.kind === "dependency") {
+      const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+      const baseX = 140 + baseLevel * 240;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX + (index % 2 === 0 ? 0 : 120), laneY + index * 120);
+      });
+      laneY += Math.max(220, items.length * 140);
+      continue;
+    }
+
+    if (conn.kind === "related") {
+      const centerLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+      const centerX = 180 + centerLevel * 240;
+      const centerY = laneY + 110;
+      items.forEach((item, index) => {
+        const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
+        place(
+          item.todo_id,
+          centerX + Math.cos(angle) * 180,
+          centerY + Math.sin(angle) * 120
+        );
+      });
+      laneY += 280;
+      continue;
+    }
+
+    const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+    const baseX = 120 + baseLevel * 240;
+    items.forEach((item, index) => {
+      place(item.todo_id, baseX + index * 220, laneY);
+    });
+    laneY += 180;
+  }
+
+  const leftovers = todos.filter((todo) => !placed.has(todo.id));
+  const groupedByLevel = new Map<number, Todo[]>();
+  leftovers.forEach((todo) => {
+    const bucket = groupedByLevel.get(todo.planning_level) ?? [];
+    bucket.push(todo);
+    groupedByLevel.set(todo.planning_level, bucket);
+  });
+
+  for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
+    levelTodos.forEach((todo, index) => {
+      place(todo.id, 80 + level * 240 + (index % 3) * 220, laneY + Math.floor(index / 3) * 140);
+    });
+    laneY += Math.max(180, Math.ceil(levelTodos.length / 3) * 140 + 40);
+  }
+
+  return fresh;
+}
+
 /* ─── Component ────────────────────────────────────── */
 
 export default function GraphView() {
-  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId } =
+  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId, settings } =
     useApp();
   const [groupId, setGroupId] = useState<string | null>(selectedGroupId);
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -139,10 +357,25 @@ export default function GraphView() {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [connectDrag, setConnectDrag] = useState<DragState | null>(null);
   const [hoverTarget, setHoverTarget] = useState<string | null>(null);
+  const [, setHoverPort] = useState<{ todoId: string; side: PortSide } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showPanel, setShowPanel] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCutMode, setIsCutMode] = useState(false);
+  const [hoverEdgeKey, setHoverEdgeKey] = useState<string | null>(null);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
+  const [draftConnectionName, setDraftConnectionName] = useState("");
+  const [draftConnectionKind, setDraftConnectionKind] = useState<ConnectionKind>("sequence");
+  const [draftTodoTitle, setDraftTodoTitle] = useState("");
+  const [draftTodoDescription, setDraftTodoDescription] = useState("");
+  const [draftTodoHighPriority, setDraftTodoHighPriority] = useState(false);
+  const [draftTodoPlanningLevel, setDraftTodoPlanningLevel] = useState(0);
+  const [draftTodoRecurrenceRule, setDraftTodoRecurrenceRule] = useState<"" | "daily" | "weekly" | "monthly">("");
+  const [draftTodoParentId, setDraftTodoParentId] = useState("");
+  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>(settings.graphDefaultLayout);
+  const [nearBoundary, setNearBoundary] = useState({ right: false, bottom: false });
+  const [zoomScale, setZoomScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({
     w: BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W,
     h: BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H,
@@ -165,6 +398,15 @@ export default function GraphView() {
   useEffect(() => {
     refreshConnections().catch(() => undefined);
   }, [refreshConnections]);
+  useEffect(() => {
+    if (!isCutMode) setHoverEdgeKey(null);
+  }, [isCutMode]);
+  useEffect(() => {
+    setLayoutMode(settings.graphDefaultLayout);
+  }, [settings.graphDefaultLayout]);
+  useEffect(() => {
+    if (!draggingNode) setNearBoundary({ right: false, bottom: false });
+  }, [draggingNode]);
 
   /* ── Load todos ─────────────────────────────────── */
 
@@ -206,12 +448,12 @@ export default function GraphView() {
             updated[t.id] = {
               x: snapGrid(
                 60 + (i % cols) * (NODE_W + 40),
-                canvasSize.w - NODE_W,
+                canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
                 LEFT_TOP_BOUNDARY
               ),
               y: snapGrid(
                 60 + Math.floor(i / cols) * (NODE_H + 60),
-                canvasSize.h - NODE_H,
+                canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
                 LEFT_TOP_BOUNDARY
               ),
             };
@@ -220,12 +462,12 @@ export default function GraphView() {
             const current = updated[t.id] as NodePosition;
             const clampedX = snapGrid(
               current.x,
-              canvasSize.w - NODE_W,
+              canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
               LEFT_TOP_BOUNDARY
             );
             const clampedY = snapGrid(
               current.y,
-              canvasSize.h - NODE_H,
+              canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
               LEFT_TOP_BOUNDARY
             );
             if (clampedX !== current.x || clampedY !== current.y) {
@@ -241,25 +483,10 @@ export default function GraphView() {
         /* fall through */
       }
     }
-    const cols = Math.max(3, Math.ceil(Math.sqrt(todos.length)));
-    const fresh: Record<string, NodePosition> = {};
-    todos.forEach((t, i) => {
-      fresh[t.id] = {
-        x: snapGrid(
-          60 + (i % cols) * (NODE_W + 40),
-          canvasSize.w - NODE_W,
-          LEFT_TOP_BOUNDARY
-        ),
-        y: snapGrid(
-          60 + Math.floor(i / cols) * (NODE_H + 60),
-          canvasSize.h - NODE_H,
-          LEFT_TOP_BOUNDARY
-        ),
-      };
-    });
+    const fresh = buildAutoLayout(todos, connections, canvasSize, layoutMode);
     setPositions(fresh);
     localStorage.setItem(key, JSON.stringify(fresh));
-  }, [todos, groupId, canvasSize.w, canvasSize.h]);
+  }, [todos, groupId, canvasSize.w, canvasSize.h, connections, layoutMode]);
 
   const savePositions = useCallback(
     (pos: Record<string, NodePosition>) => {
@@ -274,35 +501,69 @@ export default function GraphView() {
     const ids = new Set(todos.map((t) => t.id));
     return connections.filter((c) => c.items.some((i) => ids.has(i.todo_id)));
   }, [connections, todos]);
+  const selectedConnection =
+    groupConnections.find((conn) => conn.id === selectedConnectionId) ?? null;
+  const selectedTodo = todos.find((todo) => todo.id === selectedTodoId) ?? null;
+
+  useEffect(() => {
+    if (!selectedConnection) {
+      setDraftConnectionName("");
+      setDraftConnectionKind("sequence");
+      return;
+    }
+    setDraftConnectionName(selectedConnection.name ?? "");
+    setDraftConnectionKind(selectedConnection.kind);
+  }, [selectedConnection]);
+  useEffect(() => {
+    if (!selectedTodo) {
+      setDraftTodoTitle("");
+      setDraftTodoDescription("");
+      setDraftTodoHighPriority(false);
+      setDraftTodoPlanningLevel(0);
+      setDraftTodoRecurrenceRule("");
+      setDraftTodoParentId("");
+      return;
+    }
+    setDraftTodoTitle(selectedTodo.title);
+    setDraftTodoDescription(selectedTodo.description ?? "");
+    setDraftTodoHighPriority(selectedTodo.high_priority === 1);
+    setDraftTodoPlanningLevel(selectedTodo.planning_level ?? 0);
+    setDraftTodoRecurrenceRule((selectedTodo.recurrence_rule as "" | "daily" | "weekly" | "monthly" | null) ?? "");
+    setDraftTodoParentId(selectedTodo.parent_todo_id ?? "");
+  }, [selectedTodo]);
+
+  const groupEdges = useMemo<GraphEdge[]>(() => {
+    return groupConnections.flatMap((conn) =>
+      getConnectionEdgePairs(conn)
+        .filter((pair) => positions[pair.from] && positions[pair.to])
+        .map((pair) => ({
+          key: `${conn.id}:${pair.from}:${pair.to}`,
+          conn,
+          fromId: pair.from,
+          toId: pair.to,
+        }))
+    );
+  }, [groupConnections, positions]);
 
   const connectedAdjacents = useMemo(() => {
     const pairs = new Map<string, AdjPair>();
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const aId = conn.items[i]!.todo_id;
-        const bId = conn.items[i + 1]!.todo_id;
-        const aPos = positions[aId];
-        const bPos = positions[bId];
-        if (!aPos || !bPos) continue;
-
-        const bestTouch = getClosestOppositePortsAt(positions, aId, bId, SNAP_PX);
-
-        if (!bestTouch) continue;
-        const key = canonicalPairKey(aId, bId);
-        if (pairs.has(key)) continue;
-        pairs.set(key, {
-          a: aId < bId ? aId : bId,
-          b: aId < bId ? bId : aId,
-          axis:
-            bestTouch.fromSide === "left" || bestTouch.fromSide === "right"
-              ? "x"
-              : "y",
-        });
-      }
+    for (const edge of groupEdges) {
+      const bestTouch = getClosestOppositePortsAt(positions, edge.fromId, edge.toId, SNAP_PX);
+      if (!bestTouch) continue;
+      const key = canonicalPairKey(edge.fromId, edge.toId);
+      if (pairs.has(key)) continue;
+      pairs.set(key, {
+        a: edge.fromId < edge.toId ? edge.fromId : edge.toId,
+        b: edge.fromId < edge.toId ? edge.toId : edge.fromId,
+        axis:
+          bestTouch.fromSide === "left" || bestTouch.fromSide === "right"
+            ? "x"
+            : "y",
+      });
     }
 
     return pairs;
-  }, [groupConnections, positions]);
+  }, [groupEdges, positions]);
 
   const fusedGraph = useMemo(() => {
     const graph = new Map<string, Set<string>>();
@@ -530,14 +791,19 @@ export default function GraphView() {
       return points;
     };
 
-    const edgeKeys: Array<{ edgeKey: string; fromId: string; toId: string; rankDist: number }> = [];
+    const edgeKeys: Array<{ 
+      edgeKey: string; 
+      fromId: string; 
+      toId: string; 
+      rankDist: number;
+      constraintLevel: number; // 0 = unconstrained, higher = more constrained
+    }> = [];
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const fromId = conn.items[i]!.todo_id;
-        const toId = conn.items[i + 1]!.todo_id;
+    for (const edge of groupEdges) {
+        const fromId = edge.fromId;
+        const toId = edge.toId;
 
-        // rank edges by best possible distance so short links reserve clean ports first
+        // rank edges by best possible distance
         let bestDist = Number.MAX_SAFE_INTEGER;
         for (const fs of sides) {
           const fp = getPort(fromId, fs);
@@ -548,16 +814,31 @@ export default function GraphView() {
             bestDist = Math.min(bestDist, Math.hypot(tp.x - fp.x, tp.y - fp.y));
           }
         }
+
+        // Calculate constraint level: count available port combinations
+        // (fewer available = more constrained = higher priority)
+        const fromUsed = usedByNode.get(fromId) ?? new Set<PortSide>();
+        const toUsed = usedByNode.get(toId) ?? new Set<PortSide>();
+        const availableFrom = sides.filter((s) => !fromUsed.has(s)).length;
+        const availableTo = sides.filter((s) => !toUsed.has(s)).length;
+        const constraintLevel = (4 - availableFrom) + (4 - availableTo);
+
         edgeKeys.push({
-          edgeKey: `${conn.id}:${fromId}:${toId}`,
+          edgeKey: edge.key,
           fromId,
           toId,
           rankDist: bestDist,
+          constraintLevel,
         });
-      }
     }
 
-    edgeKeys.sort((a, b) => a.rankDist - b.rankDist);
+    // Sort by constraint level (most constrained first), then by distance
+    edgeKeys.sort((a, b) => {
+      if (a.constraintLevel !== b.constraintLevel) {
+        return b.constraintLevel - a.constraintLevel; // More constrained first
+      }
+      return a.rankDist - b.rankDist;
+    });
 
     for (const edge of edgeKeys) {
       const fromUsed = usedByNode.get(edge.fromId) ?? new Set<PortSide>();
@@ -655,12 +936,12 @@ export default function GraphView() {
           }, 0);
           const score =
             dist +
-            reusePenalty * 120 +
-            outsidePenalty * 20 +
+            obstaclePenalty * 20000 +  // never route through a node body
+            reusePenalty * 8000 +      // avoid sharing a port > avoid crossings
+            crossingPenalty * 5000 +   // avoid crossings > direction aesthetics
             directionPenalty * 90 +
-            detourPenalty * 0.8 +
-            obstaclePenalty * 20000 +
-            crossingPenalty * 5000;
+            outsidePenalty * 20 +
+            detourPenalty * 0.8;
 
           candidates.push({
             from: { ...from, side: fromSide },
@@ -681,9 +962,9 @@ export default function GraphView() {
         if (Math.abs(a.score - b.score) > 0.001) return a.score - b.score;
         if (a.obstaclePenalty !== b.obstaclePenalty)
           return a.obstaclePenalty - b.obstaclePenalty;
+        if (a.reusePenalty !== b.reusePenalty) return a.reusePenalty - b.reusePenalty;
         if (a.crossingPenalty !== b.crossingPenalty)
           return a.crossingPenalty - b.crossingPenalty;
-        if (a.reusePenalty !== b.reusePenalty) return a.reusePenalty - b.reusePenalty;
         if (a.directionPenalty !== b.directionPenalty)
           return a.directionPenalty - b.directionPenalty;
         if (Math.abs(a.detourPenalty - b.detourPenalty) > 0.001)
@@ -692,42 +973,31 @@ export default function GraphView() {
         return a.outsidePenalty - b.outsidePenalty;
       });
 
-      // Hard-prioritize node/edge avoidance before direction aesthetics.
+      // Hard constraint: never route through another node body.
+      // Everything else (reuse, crossings, direction) is encoded in the score.
       const minObstaclePenalty = Math.min(
         ...candidates.map((c) => c.obstaclePenalty)
       );
-      const obstaclePool = candidates.filter(
+      const pool = candidates.filter(
         (c) => c.obstaclePenalty === minObstaclePenalty
       );
-      const minCrossingPenalty = Math.min(
-        ...obstaclePool.map((c) => c.crossingPenalty)
-      );
-      const crossingPool = obstaclePool.filter(
-        (c) => c.crossingPenalty === minCrossingPenalty
+
+      // Prefer unique ports, but allow reuse if necessary to avoid skipping edges.
+      const validPool = pool.filter(
+        (c) =>
+          !fromUsed.has(c.from.side) &&
+          !toUsed.has(c.to.side)
       );
 
-      // Then prefer direction-consistent ports, then avoid port reuse.
-      const minDirectionPenalty = Math.min(
-        ...crossingPool.map((c) => c.directionPenalty)
-      );
-      const directionPool = crossingPool.filter(
-        (c) => c.directionPenalty <= minDirectionPenalty + 1
-      );
-      const noReuseBoth = directionPool.filter(
-        (c) => !fromUsed.has(c.from.side) && !toUsed.has(c.to.side)
-      );
-      const noReuseFrom = directionPool.filter((c) => !fromUsed.has(c.from.side));
-      const noReuseTo = directionPool.filter((c) => !toUsed.has(c.to.side));
-      const pool =
-        noReuseBoth.length > 0
-          ? noReuseBoth
-          : noReuseFrom.length > 0
-          ? noReuseFrom
-          : noReuseTo.length > 0
-          ? noReuseTo
-          : directionPool;
+      let best = validPool[0];
+      
+      // Fallback: if no unique port combination, find candidate with minimum reuse
+      if (!best) {
+        const minReusePenalty = Math.min(...pool.map((c) => c.reusePenalty));
+        const reusePool = pool.filter((c) => c.reusePenalty === minReusePenalty);
+        best = reusePool[0];
+      }
 
-      const best = pool[0];
       if (!best) continue;
       map.set(edge.edgeKey, { from: best.from, to: best.to });
       fromUsed.add(best.from.side);
@@ -746,7 +1016,39 @@ export default function GraphView() {
     }
 
     return map;
-  }, [groupConnections, positions, todos]);
+  }, [groupEdges, positions, todos]);
+
+  const portFillByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const conn of groupConnections) {
+      for (let i = 0; i < conn.items.length - 1; i++) {
+        const item = conn.items[i]!;
+        const next = conn.items[i + 1]!;
+        const edgeKey = `${conn.id}:${item.todo_id}:${next.todo_id}`;
+        const ports = edgePortMap.get(edgeKey);
+        if (!ports) continue;
+
+        const itemDone = item.is_completed === 1;
+        const nextDone = next.is_completed === 1;
+        const isHoverCut = isCutMode && hoverEdgeKey === edgeKey;
+
+        const fromColor = isHoverCut
+          ? "rgb(239,68,68)"
+          : itemDone
+          ? "rgb(16,185,129)"
+          : "rgb(99,102,241)";
+        const toColor = isHoverCut
+          ? "rgb(239,68,68)"
+          : nextDone
+          ? "rgb(16,185,129)"
+          : "rgb(99,102,241)";
+
+        map.set(`${item.todo_id}:${ports.from.side}`, fromColor);
+        map.set(`${next.todo_id}:${ports.to.side}`, toColor);
+      }
+    }
+    return map;
+  }, [groupConnections, edgePortMap, hoverEdgeKey, isCutMode]);
 
   /** Smooth cubic bezier + control points */
   function curvePath(
@@ -771,7 +1073,7 @@ export default function GraphView() {
     const n2 = normal(to.side);
     const pad = 8;
     const span = Math.hypot(to.x - from.x, to.y - from.y);
-    const cPull = Math.max(16, Math.min(52, span * 0.32));
+    const cPull = Math.max(20, Math.min(78, span * 0.42));
 
     const outwardBudget = (
       point: { x: number; y: number },
@@ -795,7 +1097,7 @@ export default function GraphView() {
 
     const dx = end.x - start.x;
     const dy = end.y - start.y;
-    const bowMag = Math.max(4, Math.min(18, Math.hypot(dx, dy) * 0.06));
+    const bowMag = Math.max(8, Math.min(30, Math.hypot(dx, dy) * 0.1));
     const bowSign = offset === 0 ? 1 : Math.sign(offset);
     const isHorizontalOpposite =
       ((from.side === "right" && to.side === "left") ||
@@ -825,8 +1127,8 @@ export default function GraphView() {
       const vlen = Math.hypot(vx, vy) || 1;
       const px = -vy / vlen;
       const py = vx / vlen;
-      const ox = px * offset;
-      const oy = py * offset;
+      const ox = px * offset * 1.35;
+      const oy = py * offset * 1.35;
 
       // Keep endpoints locked to their node ports; only fan out the curve body.
       c1.x += ox;
@@ -841,17 +1143,17 @@ export default function GraphView() {
 
     if (shouldBeStraight) {
       const lc1 = {
-        x: start.x + (end.x - start.x) / 3,
-        y: start.y + (end.y - start.y) / 3,
+        x: from.x + (to.x - from.x) / 3,
+        y: from.y + (to.y - from.y) / 3,
       };
       const lc2 = {
-        x: start.x + ((end.x - start.x) * 2) / 3,
-        y: start.y + ((end.y - start.y) * 2) / 3,
+        x: from.x + ((to.x - from.x) * 2) / 3,
+        y: from.y + ((to.y - from.y) * 2) / 3,
       };
       return {
-        d: `M${start.x},${start.y} L${end.x},${end.y}`,
-        start,
-        end,
+        d: `M${from.x},${from.y} L${to.x},${to.y}`,
+        start: { x: from.x, y: from.y },
+        end: { x: to.x, y: to.y },
         c1: lc1,
         c2: lc2,
       };
@@ -877,10 +1179,12 @@ export default function GraphView() {
     const rect = canvasRef.current?.getBoundingClientRect();
     const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
     const scrollTop = canvasRef.current?.scrollTop ?? 0;
+    const contentX = (e.clientX - (rect?.left ?? 0) + scrollLeft) / zoomScale;
+    const contentY = (e.clientY - (rect?.top ?? 0) + scrollTop) / zoomScale;
     setDraggingNode(id);
     setDragOffset({
-      x: e.clientX - (rect?.left ?? 0) + scrollLeft - p.x,
-      y: e.clientY - (rect?.top ?? 0) + scrollTop - p.y,
+      x: contentX - p.x,
+      y: contentY - p.y,
     });
   };
 
@@ -903,35 +1207,107 @@ export default function GraphView() {
     });
   };
 
-  /* ── Global mouse handlers ──────────────────────── */
+  const getDragBounds = useCallback(() => {
+    const minX = LEFT_TOP_BOUNDARY;
+    const minY = LEFT_TOP_BOUNDARY;
+    const maxX = canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY;
+    const maxY = canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY;
 
-  const onMouseMove = useCallback(
-    (e: MouseEvent) => {
+    return {
+      minX,
+      minY,
+      maxX: Math.max(minX, maxX),
+      maxY: Math.max(minY, maxY),
+    };
+  }, [canvasSize.w, canvasSize.h]);
+
+  const clampScrollAtMaxZoomOut = useCallback(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    if (zoomScale > MIN_ZOOM + 0.0001) return;
+
+    // Hard-cap right/bottom scroll at canvas edge when fully zoomed out.
+    const maxScrollLeft = Math.max(0, canvasSize.w * zoomScale - el.clientWidth);
+    const maxScrollTop = Math.max(0, canvasSize.h * zoomScale - el.clientHeight);
+
+    if (el.scrollLeft > maxScrollLeft) el.scrollLeft = maxScrollLeft;
+    if (el.scrollTop > maxScrollTop) el.scrollTop = maxScrollTop;
+  }, [canvasSize.w, canvasSize.h, zoomScale]);
+
+  const applyEdgeResistance = (raw: number, max: number) => {
+    const zone = GRID * 1.5;
+    const start = max - zone;
+    if (raw <= start) return raw;
+    // Compress movement inside the last zone for a magnetic stop feel.
+    return start + (raw - start) * 0.28;
+  };
+
+  const findPortOverlapTarget = useCallback(
+    (pointerClientX: number, pointerClientY: number, sourceTodoId: string) => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
+      const scrollTop = canvasRef.current?.scrollTop ?? 0;
+      const pointerX = (pointerClientX - (rect?.left ?? 0) + scrollLeft) / zoomScale;
+      const pointerY = (pointerClientY - (rect?.top ?? 0) + scrollTop) / zoomScale;
+
+      let bestTodoId: string | null = null;
+      let bestDist = Number.POSITIVE_INFINITY;
+
+      for (const todo of todos) {
+        if (todo.id === sourceTodoId) continue;
+        for (const side of PORT_SIDES) {
+          const port = getPortAt(positions, todo.id, side);
+          if (!port) continue;
+          const dist = Math.hypot(port.x - pointerX, port.y - pointerY);
+          if (dist <= PORT_CONNECT_THRESHOLD && dist < bestDist) {
+            bestDist = dist;
+            bestTodoId = todo.id;
+          }
+        }
+      }
+
+      return bestTodoId;
+    },
+    [positions, todos, zoomScale]
+  );
+
+  /* ── Global pointer handlers ────────────────────── */
+
+  const onPointerMove = useCallback(
+    (e: PointerEvent) => {
     if (draggingNode) {
       const rect = canvasRef.current?.getBoundingClientRect();
       const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
       const scrollTop = canvasRef.current?.scrollTop ?? 0;
-      const rawX = e.clientX - (rect?.left ?? 0) + scrollLeft - dragOffset.x;
-      const rawY = e.clientY - (rect?.top ?? 0) + scrollTop - dragOffset.y;
-      const maxX = Math.max(canvasSize.w - NODE_W, rawX + 220);
-      const maxY = Math.max(canvasSize.h - NODE_H, rawY + 220);
+      const rawX = (e.clientX - (rect?.left ?? 0) + scrollLeft) / zoomScale - dragOffset.x;
+      const rawY = (e.clientY - (rect?.top ?? 0) + scrollTop) / zoomScale - dragOffset.y;
+      // Clamp to current canvas limits, mirroring top/left boundary behavior
+      const { minX, minY, maxX: maxNodeX, maxY: maxNodeY } = getDragBounds();
+      const resistedX = applyEdgeResistance(rawX, maxNodeX);
+      const resistedY = applyEdgeResistance(rawY, maxNodeY);
+      const clampedX = Math.min(Math.max(resistedX, minX), maxNodeX);
+      const clampedY = Math.min(Math.max(resistedY, minY), maxNodeY);
+      const nearRight = maxNodeX - clampedX <= GRID;
+      const nearBottom = maxNodeY - clampedY <= GRID;
+      setNearBoundary({ right: nearRight, bottom: nearBottom });
       const fused = getFusedComponent(draggingNode);
       setPositions((prev) => {
         const prevPos = prev[draggingNode];
         if (!prevPos) return prev;
         const movingIds = new Set(fused);
-        const nextX = snapGrid(rawX, maxX, LEFT_TOP_BOUNDARY);
-        const nextY = snapGrid(rawY, maxY, LEFT_TOP_BOUNDARY);
+        const nextX = snapGrid(clampedX, maxNodeX, LEFT_TOP_BOUNDARY);
+        const nextY = snapGrid(clampedY, maxNodeY, LEFT_TOP_BOUNDARY);
         const deltaX = nextX - prevPos.x;
         const deltaY = nextY - prevPos.y;
+        if (deltaX === 0 && deltaY === 0) return prev;
 
         const updated = { ...prev };
         for (const id of fused) {
           const p = prev[id];
           if (!p) continue;
           updated[id] = {
-            x: snapGrid(p.x + deltaX, canvasSize.w - NODE_W, LEFT_TOP_BOUNDARY),
-            y: snapGrid(p.y + deltaY, canvasSize.h - NODE_H, LEFT_TOP_BOUNDARY),
+            x: snapGrid(p.x + deltaX, maxNodeX, LEFT_TOP_BOUNDARY),
+            y: snapGrid(p.y + deltaY, maxNodeY, LEFT_TOP_BOUNDARY),
           };
         }
         const prevOverlap = movingOverlapArea(prev, movingIds);
@@ -942,97 +1318,74 @@ export default function GraphView() {
     }
       if (connectDrag) {
         setConnectDrag((prev) =>
-          prev ? { ...prev, currentX: e.clientX, currentY: e.clientY } : null
+          prev && (prev.currentX !== e.clientX || prev.currentY !== e.clientY)
+            ? { ...prev, currentX: e.clientX, currentY: e.clientY }
+            : prev
         );
-        const els = document.elementsFromPoint(e.clientX, e.clientY);
-        const target = els.find((el) => el.getAttribute("data-todo-id"));
-        const tId = target?.getAttribute("data-todo-id") ?? null;
-        setHoverTarget(tId && tId !== connectDrag.fromTodoId ? tId : null);
+        setHoverTarget(
+          findPortOverlapTarget(e.clientX, e.clientY, connectDrag.fromTodoId)
+        );
       }
     },
     [
       draggingNode,
       dragOffset,
       connectDrag,
-      canvasSize.w,
-      canvasSize.h,
+      findPortOverlapTarget,
       getFusedComponent,
+      getDragBounds,
       movingOverlapArea,
+      zoomScale,
     ]
   );
 
-  const onMouseUp = useCallback(() => {
+  const onPointerUp = useCallback(() => {
     if (draggingNode) {
       const moved = draggingNode;
       const fused = getFusedComponent(moved);
       const fusedSet = new Set(fused);
 
-      let bestTouch:
-        | {
-            fromId: string;
-            toId: string;
-            dx: number;
-            dy: number;
-            dist: number;
-          }
-        | null = null;
+      // Check if any port of the dragged node (or its fused group) truly overlaps
+      // another node port. Nearby is not enough.
+      const CONNECT_THRESHOLD = PORT_CONNECT_THRESHOLD;
+      let portTouchFrom: string | null = null;
+      let portTouchTo: string | null = null;
+      let portTouchBestDist = Number.POSITIVE_INFINITY;
 
       for (const fromId of fused) {
         for (const todo of todos) {
           const toId = todo.id;
           if (fusedSet.has(toId)) continue;
-          const touch = getClosestOppositePortsAt(positions, fromId, toId, SNAP_PX);
+          const touch = getClosestAnyPortsAt(positions, fromId, toId, CONNECT_THRESHOLD);
           if (!touch) continue;
-          const dx = touch.to.x - touch.from.x;
-          const dy = touch.to.y - touch.from.y;
-          if (!bestTouch || touch.dist < bestTouch.dist) {
-            bestTouch = { fromId, toId, dx, dy, dist: touch.dist };
+          if (touch.dist < portTouchBestDist) {
+            portTouchBestDist = touch.dist;
+            portTouchFrom = fromId;
+            portTouchTo = toId;
           }
         }
       }
 
-      if (bestTouch) {
-        let snapped = false;
-        setPositions((prev) => {
-          const next = { ...prev };
-          const movingIds = new Set(fused);
-          for (const id of fused) {
-            const p = prev[id];
-            if (!p) continue;
-            next[id] = {
-              x: snapGrid(
-                p.x + bestTouch.dx,
-                canvasSize.w - NODE_W,
-                LEFT_TOP_BOUNDARY
-              ),
-              y: snapGrid(
-                p.y + bestTouch.dy,
-                canvasSize.h - NODE_H,
-                LEFT_TOP_BOUNDARY
-              ),
-            };
-          }
-          const prevOverlap = movingOverlapArea(prev, movingIds);
-          const nextOverlap = movingOverlapArea(next, movingIds);
-          if (nextOverlap > prevOverlap + 0.1) {
-            savePositions(prev);
-            return prev;
-          }
-          snapped = true;
-          savePositions(next);
-          return next;
-        });
-        if (snapped) {
-          createConnection(bestTouch.fromId, bestTouch.toId);
-        }
-      } else {
-        savePositions(positions);
-      }
+      // Save positions as-is (no snapping)
+      savePositions(positions);
+      setNearBoundary({ right: false, bottom: false });
       setDraggingNode(null);
+
+      // Connect if ports overlapped — createConnection handles "already connected" silently
+      if (portTouchFrom && portTouchTo) {
+        createConnection(portTouchFrom, portTouchTo);
+      }
     }
     if (connectDrag) {
-      if (hoverTarget) {
-        createConnection(connectDrag.fromTodoId, hoverTarget);
+      const releaseTarget =
+        hoverTarget ??
+        findPortOverlapTarget(
+          connectDrag.currentX,
+          connectDrag.currentY,
+          connectDrag.fromTodoId
+        );
+      if (releaseTarget) {
+        createConnection(connectDrag.fromTodoId, releaseTarget);
       }
       setConnectDrag(null);
       setHoverTarget(null);
@@ -1043,21 +1396,21 @@ export default function GraphView() {
     positions,
     savePositions,
     hoverTarget,
+    findPortOverlapTarget,
     getFusedComponent,
-    canvasSize.w,
-    canvasSize.h,
     todos,
-    movingOverlapArea,
   ]);
 
   useEffect(() => {
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
     };
-  }, [onMouseMove, onMouseUp]);
+  }, [onPointerMove, onPointerUp]);
 
   useEffect(() => {
     const syncFullscreen = () => {
@@ -1066,8 +1419,15 @@ export default function GraphView() {
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => document.removeEventListener("fullscreenchange", syncFullscreen);
   }, []);
+  useEffect(() => {
+    if (!isFullscreen) setZoomScale(1);
+  }, [isFullscreen]);
+  useEffect(() => {
+    clampScrollAtMaxZoomOut();
+  }, [clampScrollAtMaxZoomOut]);
 
   useEffect(() => {
+    if (draggingNode) return;
     const viewW = canvasRef.current?.clientWidth ?? 0;
     const viewH = canvasRef.current?.clientHeight ?? 0;
     const maxX = Math.max(
@@ -1087,18 +1447,18 @@ export default function GraphView() {
       : BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H;
 
     const nextW = snapGrid(
-      Math.max(minCanvasW, viewW + 220, maxX),
+      Math.min(MAX_CANVAS_W, Math.max(minCanvasW, viewW + 220, maxX)),
       Number.MAX_SAFE_INTEGER
     );
     const nextH = snapGrid(
-      Math.max(minCanvasH, viewH + 220, maxY),
+      Math.min(MAX_CANVAS_H, Math.max(minCanvasH, viewH + 220, maxY)),
       Number.MAX_SAFE_INTEGER
     );
 
     setCanvasSize((prev) =>
       prev.w !== nextW || prev.h !== nextH ? { w: nextW, h: nextH } : prev
     );
-  }, [positions, isFullscreen]);
+  }, [positions, isFullscreen, draggingNode]);
 
   /* ── Create connection ──────────────────────────── */
 
@@ -1160,6 +1520,9 @@ export default function GraphView() {
   const cutEdge = async (connectionId: string, fromId: string, toId: string) => {
     try {
       await connectionsApi.cut(connectionId, fromId, toId);
+      if (selectedConnectionId === connectionId) {
+        setSelectedConnectionId(null);
+      }
       await refreshConnections();
       toast.success("Connection cut");
     } catch (e: unknown) {
@@ -1179,8 +1542,103 @@ export default function GraphView() {
       }
       await refreshConnections();
       await refreshTodos();
-    } catch {
-      toast.error("Failed to toggle");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to toggle");
+    }
+  };
+
+  const applyLayout = useCallback(
+    (mode: GraphLayoutMode) => {
+      const nextPositions = buildAutoLayout(todos, connections, canvasSize, mode);
+      setLayoutMode(mode);
+      setPositions(nextPositions);
+      if (groupId) {
+        localStorage.setItem(`graph-positions-${groupId}`, JSON.stringify(nextPositions));
+      }
+      toast.success(`${layoutLabelMap[mode]} layout applied`);
+    },
+    [todos, connections, canvasSize, groupId]
+  );
+
+  const handleSaveSelectedConnection = async () => {
+    if (!selectedConnection) return;
+    try {
+      await connectionsApi.update(selectedConnection.id, {
+        name: draftConnectionName.trim() || null,
+        kind: draftConnectionKind,
+      });
+      await refreshConnections();
+      toast.success("Connection updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update connection");
+    }
+  };
+
+  const handleDeleteSelectedConnection = async () => {
+    if (!selectedConnection) return;
+    try {
+      await connectionsApi.delete(selectedConnection.id);
+      setSelectedConnectionId(null);
+      await refreshConnections();
+      toast.success("Connection deleted");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete connection");
+    }
+  };
+
+  const handleSaveSelectedTodo = async () => {
+    if (!selectedTodo) return;
+    try {
+      const updated = await todosApi.update(selectedTodo.id, {
+        title: draftTodoTitle.trim() || selectedTodo.title,
+        description: draftTodoDescription.trim() || null,
+        high_priority: draftTodoHighPriority,
+        planning_level: draftTodoPlanningLevel,
+        recurrence_rule: draftTodoRecurrenceRule || null,
+        parent_todo_id: draftTodoParentId || null,
+      });
+      setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      await refreshTodos();
+      toast.success("Task updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update task");
+    }
+  };
+
+  const handleDeleteSelectedTodo = async () => {
+    if (!selectedTodo) return;
+    try {
+      await todosApi.delete(selectedTodo.id);
+      setSelectedTodoId(null);
+      setTodos((prev) => prev.filter((item) => item.id !== selectedTodo.id));
+      await refreshTodos();
+      await refreshConnections();
+      toast.success("Task moved to trash");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete task");
+    }
+  };
+
+  const handleQuickAddTodo = async () => {
+    if (!groupId) return;
+    try {
+      const created = await todosApi.create(groupId, "New graph task");
+      setTodos((prev) => [...prev, created]);
+      await refreshTodos();
+      setSelectedTodoId(null);
+      setSelectedConnectionId(null);
+      const nextPos = {
+        x: snapGrid(120 + (todos.length % 4) * 220, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+        y: snapGrid(100 + Math.floor(todos.length / 4) * 120, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+      };
+      setPositions((prev) => {
+        const next = { ...prev, [created.id]: nextPos };
+        savePositions(next);
+        return next;
+      });
+      toast.success("Task added to GraphPlan");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create task");
     }
   };
 
@@ -1206,61 +1664,60 @@ export default function GraphView() {
     });
   };
 
+  useEffect(() => {
+    const handler = () => {
+      void toggleFullscreen();
+    };
+    window.addEventListener("nodes:graph:toggle-fullscreen", handler as EventListener);
+    return () => {
+      window.removeEventListener("nodes:graph:toggle-fullscreen", handler as EventListener);
+    };
+  }, [toggleFullscreen]);
+
   /* ── Derived ────────────────────────────────────── */
 
   const currentGroup = groups.find((g) => g.id === groupId);
 
   const { connectionCount, connectionOrder, completionOrder } = useMemo(() => {
     const counts: Record<string, number> = {};
+    // Per-chain position: 1-based index of this todo within its own connection chain.
+    // If a todo appears in multiple chains, the first chain's index wins.
     const order: Record<string, number> = {};
-    const orderedTodoIds: string[] = [];
-    const seen = new Set<string>();
+
+    for (const edge of groupEdges) {
+      counts[edge.fromId] = (counts[edge.fromId] ?? 0) + 1;
+      counts[edge.toId] = (counts[edge.toId] ?? 0) + 1;
+    }
 
     for (const conn of groupConnections) {
-      conn.items.forEach((item) => {
-        counts[item.todo_id] = (counts[item.todo_id] ?? 0) + 1;
-
-        // Global order from "New Connections" sequence (first occurrence wins).
-        if (!seen.has(item.todo_id)) {
-          seen.add(item.todo_id);
-          orderedTodoIds.push(item.todo_id);
+      conn.items.forEach((item, idx) => {
+        if (!(item.todo_id in order)) {
+          order[item.todo_id] = idx + 1;
         }
       });
     }
 
-    orderedTodoIds.forEach((todoId, index) => {
-      order[todoId] = index + 1;
-    });
-
-    const connectedById = new Map(
-      groupConnections.flatMap((conn) => conn.items.map((item) => [item.todo_id, item] as const))
-    );
-
-    const completionCandidates = orderedTodoIds
-      .map((todoId) => {
-        const item = connectedById.get(todoId);
-        return {
-          todoId,
-          completedAt: item?.completed_at ?? null,
-          baseOrder: order[todoId] ?? Number.MAX_SAFE_INTEGER,
-        };
-      })
-      .filter((entry) => entry.completedAt);
-
-    completionCandidates.sort((a, b) => {
-      const timeDiff = Date.parse(a.completedAt!) - Date.parse(b.completedAt!);
-      if (timeDiff !== 0) return timeDiff;
-      if (a.baseOrder !== b.baseOrder) return a.baseOrder - b.baseOrder;
-      return a.todoId.localeCompare(b.todoId);
-    });
-
+    // completionOrder: within each chain, rank completed items by completion time.
+    // Each chain is numbered independently starting from 1.
     const completeOrder: Record<string, number> = {};
-    completionCandidates.forEach((entry, index) => {
-      completeOrder[entry.todoId] = index + 1;
-    });
+    for (const conn of groupConnections) {
+      const completedItems = conn.items
+        .filter((item) => item.completed_at)
+        .slice()
+        .sort((a, b) => {
+          const timeDiff = Date.parse(a.completed_at!) - Date.parse(b.completed_at!);
+          if (timeDiff !== 0) return timeDiff;
+          return a.todo_id.localeCompare(b.todo_id);
+        });
+      completedItems.forEach((item, idx) => {
+        if (!(item.todo_id in completeOrder)) {
+          completeOrder[item.todo_id] = idx + 1;
+        }
+      });
+    }
 
     return { connectionCount: counts, connectionOrder: order, completionOrder: completeOrder };
-  }, [groupConnections]);
+  }, [groupConnections, groupEdges]);
 
   const connectionEdgeOffsets = useMemo(() => {
     const offsetMap = new Map<string, number>();
@@ -1268,47 +1725,36 @@ export default function GraphView() {
 
     const keyFor = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const a = conn.items[i]!.todo_id;
-        const b = conn.items[i + 1]!.todo_id;
-        const key = keyFor(a, b);
+    for (const edge of groupEdges) {
+        const key = keyFor(edge.fromId, edge.toId);
         totalMap.set(key, (totalMap.get(key) ?? 0) + 1);
-      }
     }
 
     const seen = new Map<string, number>();
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const a = conn.items[i]!.todo_id;
-        const b = conn.items[i + 1]!.todo_id;
-        const key = keyFor(a, b);
+    for (const edge of groupEdges) {
+        const key = keyFor(edge.fromId, edge.toId);
         const total = totalMap.get(key) ?? 1;
         const idx = (seen.get(key) ?? 0);
         seen.set(key, idx + 1);
 
         if (total === 1) {
-          offsetMap.set(`${conn.id}:${a}:${b}`, 0);
+          offsetMap.set(edge.key, 0);
         } else {
-          const spacing = 12;
+          const spacing = 16;
           const centered = idx - (total - 1) / 2;
-          offsetMap.set(`${conn.id}:${a}:${b}`, centered * spacing);
+          offsetMap.set(edge.key, centered * spacing);
         }
-      }
     }
 
     return offsetMap;
-  }, [groupConnections]);
+  }, [groupEdges]);
 
   const noOverlapOffsets = useMemo(() => {
     const buckets = new Map<string, string[]>();
     const offsets = new Map<string, number>();
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const fromId = conn.items[i]!.todo_id;
-        const toId = conn.items[i + 1]!.todo_id;
-        const edgeKey = `${conn.id}:${fromId}:${toId}`;
+    for (const edge of groupEdges) {
+        const edgeKey = edge.key;
         const ports = edgePortMap.get(edgeKey);
         if (!ports) continue;
 
@@ -1326,19 +1772,18 @@ export default function GraphView() {
         const angleBucket = Math.round((Math.atan2(dy, dx) + Math.PI) / (Math.PI / 18)); // ~10deg
         const perp = (-dy * mx + dx * my) / len;
         const along = (dx * mx + dy * my) / len;
-        const perpBucket = Math.round(perp / 18);
-        const alongBucket = Math.round(along / 140);
+        const perpBucket = Math.round(perp / 14);
+        const alongBucket = Math.round(along / 110);
         const key = `${angleBucket}:${perpBucket}:${alongBucket}`;
 
         if (!buckets.has(key)) buckets.set(key, []);
         buckets.get(key)!.push(edgeKey);
-      }
     }
 
     for (const [, keys] of buckets.entries()) {
       if (keys.length <= 1) continue;
       keys.sort();
-      const spacing = 10;
+      const spacing = 16;
       keys.forEach((k, idx) => {
         const centered = idx - (keys.length - 1) / 2;
         offsets.set(k, centered * spacing);
@@ -1346,7 +1791,7 @@ export default function GraphView() {
     }
 
     return offsets;
-  }, [groupConnections, edgePortMap]);
+  }, [groupEdges, edgePortMap]);
 
   const canvasOffset = () => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -1366,14 +1811,23 @@ export default function GraphView() {
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           Drag between ports to connect tasks &middot; Max 2 connections per task
         </p>
+        <div className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-slate-200/80 bg-white/70 px-3 py-2 text-xs text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/60 dark:text-slate-300">
+          <Sparkles size={12} className="text-indigo-500" />
+          Current auto-layout: <span className="font-semibold text-slate-700 dark:text-slate-100">{layoutLabelMap[layoutMode]}</span>
+        </div>
       </div>
 
       {/* Group pills */}
-      <div className="flex flex-wrap gap-2 mb-5">
+      <div className="mb-5 overflow-x-auto overflow-y-hidden no-scrollbar">
+        <div className="flex w-max min-w-full gap-2 pb-1">
         {groups.map((g) => (
           <button
             key={g.id}
-            onClick={() => setGroupId(g.id)}
+            onClick={() => {
+              setGroupId(g.id);
+              setSelectedConnectionId(null);
+              setSelectedTodoId(null);
+            }}
             className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
               groupId === g.id
                 ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 scale-[1.02]"
@@ -1384,6 +1838,7 @@ export default function GraphView() {
             {g.name}
           </button>
         ))}
+        </div>
       </div>
 
       {/* States */}
@@ -1404,45 +1859,73 @@ export default function GraphView() {
       ) : (
         /* ── Canvas ────────────────────────────────── */
         <div ref={graphRef} className={`relative ${isFullscreen ? "" : "pb-2"}`}>
-          <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
-            <button
-              onClick={() => setShowPanel((v) => !v)}
-              title={showPanel ? "Hide controls" : "Show controls"}
-              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-            >
-              {showPanel ? (
-                <EyeOff size={14} className="text-slate-600 dark:text-slate-300" />
-              ) : (
-                <Eye size={14} className="text-slate-600 dark:text-slate-300" />
-              )}
-            </button>
-            <button
-              onClick={toggleCutMode}
-              title={isCutMode ? "Exit cut mode" : "Cut edges"}
-              className={`w-8 h-8 rounded-lg backdrop-blur-sm border flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-150 ${
-                isCutMode
-                  ? "bg-rose-500 text-white border-rose-400"
-                  : "bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800"
-              }`}
-            >
-              <Scissors size={14} className={isCutMode ? "text-white" : "text-slate-600 dark:text-slate-300"} />
-            </button>
-            <button
-              onClick={toggleFullscreen}
-              title={isFullscreen ? "Exit fullscreen" : "Open fullscreen"}
-              className="w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150"
-            >
-              {isFullscreen ? (
-                <Minimize2 size={14} className="text-slate-600 dark:text-slate-300" />
-              ) : (
-                <Maximize2 size={14} className="text-slate-600 dark:text-slate-300" />
-              )}
-            </button>
+          <GraphToolbar
+            showPanel={showPanel}
+            isCutMode={isCutMode}
+            isFullscreen={isFullscreen}
+            onTogglePanel={() => setShowPanel((value) => !value)}
+            onToggleCutMode={toggleCutMode}
+            onToggleFullscreen={() => void toggleFullscreen()}
+            onZoomOut={() =>
+              setZoomScale((z) => Math.max(MIN_ZOOM, Number((z - ZOOM_STEP).toFixed(2))))
+            }
+            onZoomIn={() =>
+              setZoomScale((z) => Math.min(MAX_ZOOM, Number((z + ZOOM_STEP).toFixed(2))))
+            }
+            onQuickAdd={() => void handleQuickAddTodo()}
+          />
+          <div className="pointer-events-none absolute left-3 top-16 z-20 sm:hidden">
+            <div className="rounded-full bg-slate-900/85 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-white shadow-sm dark:bg-slate-100/90 dark:text-slate-900">
+              Double-tap a task to edit
+            </div>
           </div>
+
+          {selectedConnection && !isCutMode && (
+            <GraphConnectionInspector
+              connection={selectedConnection}
+              draftName={draftConnectionName}
+              draftKind={draftConnectionKind}
+              layoutMode={layoutMode}
+              onDraftNameChange={setDraftConnectionName}
+              onDraftKindChange={setDraftConnectionKind}
+              onSave={() => void handleSaveSelectedConnection()}
+              onDelete={() => void handleDeleteSelectedConnection()}
+              onClose={() => setSelectedConnectionId(null)}
+              onApplyLayout={applyLayout}
+            />
+          )}
+          {selectedTodo && !isCutMode && (
+            <GraphTodoInspector
+              todo={selectedTodo}
+              draftTitle={draftTodoTitle}
+              draftDescription={draftTodoDescription}
+              draftHighPriority={draftTodoHighPriority}
+              draftPlanningLevel={draftTodoPlanningLevel}
+              draftRecurrenceRule={draftTodoRecurrenceRule}
+              parentOptions={todos.filter((item) => item.id !== selectedTodo.id)}
+              draftParentTodoId={draftTodoParentId}
+              onDraftTitleChange={setDraftTodoTitle}
+              onDraftDescriptionChange={setDraftTodoDescription}
+              onDraftHighPriorityChange={setDraftTodoHighPriority}
+              onDraftPlanningLevelChange={setDraftTodoPlanningLevel}
+              onDraftRecurrenceRuleChange={setDraftTodoRecurrenceRule}
+              onDraftParentTodoIdChange={setDraftTodoParentId}
+              onSave={() => void handleSaveSelectedTodo()}
+              onDelete={() => void handleDeleteSelectedTodo()}
+              onClose={() => setSelectedTodoId(null)}
+            />
+          )}
 
           {/* Scrollable canvas */}
           <div
             ref={canvasRef}
+            onScroll={clampScrollAtMaxZoomOut}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setSelectedConnectionId(null);
+                setSelectedTodoId(null);
+              }
+            }}
             className="relative rounded-2xl overflow-auto no-scrollbar border border-slate-200 dark:border-slate-800"
             style={{
               width: "100%",
@@ -1453,17 +1936,40 @@ export default function GraphView() {
               backgroundSize: `${GRID}px ${GRID}px`,
             }}
           >
-          {/* Inner virtual canvas — keeps nodes from escaping */}
-          <div style={{ width: canvasSize.w, height: canvasSize.h, position: "relative" }}>
+          {/* Inner virtual canvas - keeps nodes from escaping */}
+          <div
+            style={{
+              width: canvasSize.w * zoomScale,
+              height: canvasSize.h * zoomScale,
+              position: "relative",
+            }}
+          >
+          {settings.showGraphBoundaryHint && (
+            <GraphBoundaryOverlay
+              canvasWidth={canvasSize.w * zoomScale}
+              canvasHeight={canvasSize.h * zoomScale}
+              draggingNode={draggingNode}
+              nearBoundary={nearBoundary}
+            />
+          )}
+          <div
+            style={{
+              width: canvasSize.w,
+              height: canvasSize.h,
+              position: "relative",
+              transform: `scale(${zoomScale})`,
+              transformOrigin: "top left",
+            }}
+          >
           {/* ── SVG layer ──────────────────────────── */}
+          {/* Edge SVG layer — behind nodes (zIndex 1) */}
           <svg
             className="absolute inset-0"
             width={canvasSize.w}
             height={canvasSize.h}
             style={{
-              zIndex: 5,
-              pointerEvents: isCutMode ? "auto" : "none",
-              cursor: isCutMode ? CUT_CURSOR : "default",
+              zIndex: 1,
+              pointerEvents: "none",
             }}
           >
             <defs>
@@ -1475,8 +1981,146 @@ export default function GraphView() {
                 <stop offset="0%" stopColor="rgb(16,185,129)" stopOpacity="1" />
                 <stop offset="100%" stopColor="rgb(20,184,166)" stopOpacity="1" />
               </linearGradient>
+              <mask id="edge-under-node-mask" maskUnits="userSpaceOnUse">
+                <rect x="0" y="0" width={canvasSize.w} height={canvasSize.h} fill="white" />
+                {todos.map((todo) => {
+                  const pos = positions[todo.id];
+                  if (!pos) return null;
+                  return (
+                    <rect
+                      key={`edge-mask-${todo.id}`}
+                      x={pos.x + 3}
+                      y={pos.y + 3}
+                      width={Math.max(0, NODE_W - 6)}
+                      height={Math.max(0, NODE_H - 6)}
+                      rx={10}
+                      ry={10}
+                      fill="white"
+                      fillOpacity={0.68}
+                    />
+                  );
+                })}
+              </mask>
+            </defs>
+
+            {/* Only edge paths here (shadow + main line) */}
+            {groupEdges.map((edge) => {
+                const conn = edge.conn;
+                const item = conn.items.find((candidate) => candidate.todo_id === edge.fromId);
+                const next = conn.items.find((candidate) => candidate.todo_id === edge.toId);
+                if (!item || !next) return null;
+                const edgeKey = edge.key;
+                const adjKey = canonicalPairKey(edge.fromId, edge.toId);
+                if (connectedAdjacents.has(adjKey)) return null; // Skip adjacent nodes here
+                
+                const ports = edgePortMap.get(edgeKey);
+                if (!ports) return null;
+
+                const itemDone = item.is_completed === 1;
+                const nextDone = next.is_completed === 1;
+                const bothDone = itemDone && nextDone;
+                const oneDone = itemDone !== nextDone;
+                const edgeMeta = connectionKindMeta[conn.kind];
+                const edgeSolid = bothDone ? "rgb(16,185,129)" : edgeMeta.graphStroke;
+                const offset =
+                  (connectionEdgeOffsets.get(edgeKey) ?? 0) +
+                  (noOverlapOffsets.get(edgeKey) ?? 0);
+                const edgeStrokeWidth = 3;
+                const fromP = ports.from;
+                const toP = ports.to;
+                const fromAdj = fromP;
+                const toAdj = toP;
+                const pathData = curvePath(fromAdj, toAdj, offset);
+                const path = pathData.d;
+                const isStraight =
+                  Math.abs(fromAdj.x - toAdj.x) < 1 || Math.abs(fromAdj.y - toAdj.y) < 1;
+                const partialGradId = `edge-partial-${conn.id}-${item.todo_id}-${next.todo_id}`;
+
+                return (
+                  <g key={`${conn.id}-${item.id}-edge`}>
+                    {oneDone && (
+                      <defs>
+                        <linearGradient
+                          id={partialGradId}
+                          x1={fromP.x}
+                          y1={fromP.y}
+                          x2={toP.x}
+                          y2={toP.y}
+                          gradientUnits="userSpaceOnUse"
+                        >
+                          {itemDone ? (
+                            <>
+                              <stop offset="0%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="35%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="65%" stopColor="rgb(99,102,241)" stopOpacity="1" />
+                              <stop offset="100%" stopColor="rgb(139,92,246)" stopOpacity="1" />
+                            </>
+                          ) : (
+                            <>
+                              <stop offset="0%" stopColor="rgb(99,102,241)" stopOpacity="1" />
+                              <stop offset="35%" stopColor="rgb(139,92,246)" stopOpacity="1" />
+                              <stop offset="65%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                              <stop offset="100%" stopColor="rgb(16,185,129)" stopOpacity="1" />
+                            </>
+                          )}
+                        </linearGradient>
+                      </defs>
+                    )}
+                    <g mask="url(#edge-under-node-mask)">
+                      {/* Shadow */}
+                      <path
+                        d={path}
+                        fill="none"
+                        strokeWidth={5}
+                        strokeOpacity={0.14}
+                        strokeLinecap="round"
+                        stroke={edgeMeta.graphGlow}
+                      />
+                      {/* Main line */}
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke={
+                          isStraight
+                            ? edgeSolid
+                            : bothDone
+                            ? "url(#line-done)"
+                            : oneDone
+                            ? `url(#${partialGradId})`
+                            : edgeSolid
+                        }
+                        strokeWidth={edgeStrokeWidth}
+                        strokeOpacity={1}
+                        strokeLinecap="round"
+                        strokeDasharray={!bothDone && !oneDone ? edgeMeta.dashArray : undefined}
+                      />
+                    </g>
+                  </g>
+                );
+              })}
+          </svg>
+
+          {/* Interactive SVG layer — on top for cuts, junctions, particles (zIndex 5) */}
+          <svg
+            className="absolute inset-0"
+            width={canvasSize.w}
+            height={canvasSize.h}
+            style={{
+              zIndex: 5,
+              pointerEvents: "none",
+              cursor: isCutMode ? CUT_CURSOR : "default",
+            }}
+          >
+            <defs>
               <filter id="glow">
                 <feGaussianBlur stdDeviation="3" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              <filter id="cut-glow">
+                <feGaussianBlur stdDeviation="3.5" result="blur" />
                 <feMerge>
                   <feMergeNode in="blur" />
                   <feMergeNode in="SourceGraphic" />
@@ -1490,23 +2134,49 @@ export default function GraphView() {
               </marker>
             </defs>
 
-            {/* Connection paths */}
-            {groupConnections.map((conn) =>
-              conn.items.map((item, idx) => {
-                if (idx >= conn.items.length - 1) return null;
-                const next = conn.items[idx + 1]!;
-                const edgeKey = `${conn.id}:${item.todo_id}:${next.todo_id}`;
-                const adjKey = canonicalPairKey(item.todo_id, next.todo_id);
+            {/* Junction dots + cut areas + arrows + particles */}
+            {groupEdges.map((edge) => {
+                const conn = edge.conn;
+                const item = conn.items.find((candidate) => candidate.todo_id === edge.fromId);
+                const next = conn.items.find((candidate) => candidate.todo_id === edge.toId);
+                if (!item || !next) return null;
+                const edgeKey = edge.key;
+                const isCuttable = conn.items.length >= 2;
+                const isHoverCut = isCutMode && isCuttable && hoverEdgeKey === edgeKey;
+                const adjKey = canonicalPairKey(edge.fromId, edge.toId);
                 if (connectedAdjacents.has(adjKey)) {
-                  if (!isCutMode) return null;
                   const touch = getClosestOppositePortsAt(
                     positions,
-                    item.todo_id,
-                    next.todo_id
+                    edge.fromId,
+                    edge.toId
                   );
                   if (!touch) return null;
                   const cx = (touch.from.x + touch.to.x) / 2;
                   const cy = (touch.from.y + touch.to.y) / 2;
+                  const bothItemsDone = item.is_completed === 1 && next.is_completed === 1;
+                  if (!isCutMode) {
+                    // Render junction dot
+                    return (
+                      <g key={`${conn.id}-${item.id}-adj`}>
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={14}
+                          fill="transparent"
+                          style={{ pointerEvents: "all", cursor: "pointer" }}
+                          onClick={() => setSelectedConnectionId(conn.id)}
+                        />
+                        <circle
+                          cx={cx} cy={cy} r={9}
+                          fill={bothItemsDone ? "rgba(16,185,129,0.15)" : "rgba(99,102,241,0.15)"}
+                          stroke={bothItemsDone ? "rgb(16,185,129)" : "rgb(99,102,241)"}
+                          strokeOpacity={0.6}
+                          strokeWidth={1.5}
+                        />
+                        <circle cx={cx} cy={cy} r={4} fill={bothItemsDone ? "rgb(16,185,129)" : "rgb(99,102,241)"} />
+                      </g>
+                    );
+                  }
                   return (
                     <g key={`${conn.id}-${item.id}-adj-cut`}>
                       <circle
@@ -1515,7 +2185,9 @@ export default function GraphView() {
                         r={15}
                         fill="transparent"
                         style={{ pointerEvents: "all", cursor: CUT_CURSOR }}
-                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                        onMouseEnter={() => setHoverEdgeKey(edgeKey)}
+                        onMouseLeave={() => setHoverEdgeKey((prev) => (prev === edgeKey ? null : prev))}
+                        onClick={() => cutEdge(conn.id, edge.fromId, edge.toId)}
                       />
                       <circle
                         cx={cx}
@@ -1525,6 +2197,7 @@ export default function GraphView() {
                         stroke="rgba(255,255,255,0.85)"
                         strokeWidth={1.5}
                         style={{ pointerEvents: "none" }}
+                        filter={isHoverCut ? "url(#cut-glow)" : undefined}
                       />
                       <path
                         d={`M${cx - 2.5},${cy - 2.8} L${cx + 3.2},${cy + 2.6} M${cx - 2.5},${cy + 2.8} L${cx + 3.2},${cy - 2.6}`}
@@ -1540,19 +2213,20 @@ export default function GraphView() {
                 }
                 const ports = edgePortMap.get(edgeKey);
                 if (!ports) return null;
+                const edgeMeta = connectionKindMeta[conn.kind];
 
                 const itemDone = item.is_completed === 1;
                 const nextDone = next.is_completed === 1;
                 const bothDone = itemDone && nextDone;
-                const oneDone = itemDone !== nextDone;
                 const offset =
                   (connectionEdgeOffsets.get(edgeKey) ?? 0) +
                   (noOverlapOffsets.get(edgeKey) ?? 0);
                 const fromP = ports.from;
                 const toP = ports.to;
-                const pathData = curvePath(fromP, toP, offset);
+                const fromAdj = fromP;
+                const toAdj = toP;
+                const pathData = curvePath(fromAdj, toAdj, offset);
                 const path = pathData.d;
-                const partialGradId = `edge-partial-${conn.id}-${item.todo_id}-${next.todo_id}`;
 
                 // Arrow at true midpoint
                 const t = 0.5;
@@ -1612,60 +2286,22 @@ export default function GraphView() {
                 };
 
                 return (
-                  <g key={`${conn.id}-${item.id}`}>
-                    {oneDone && (
-                      <defs>
-                        <linearGradient
-                          id={partialGradId}
-                          x1={fromP.x}
-                          y1={fromP.y}
-                          x2={toP.x}
-                          y2={toP.y}
-                          gradientUnits="userSpaceOnUse"
-                        >
-                          {itemDone ? (
-                            <>
-                              <stop offset="0%" stopColor="rgb(16,185,129)" stopOpacity="1" />
-                              <stop offset="35%" stopColor="rgb(16,185,129)" stopOpacity="1" />
-                              <stop offset="65%" stopColor="rgb(99,102,241)" stopOpacity="1" />
-                              <stop offset="100%" stopColor="rgb(139,92,246)" stopOpacity="1" />
-                            </>
-                          ) : (
-                            <>
-                              <stop offset="0%" stopColor="rgb(99,102,241)" stopOpacity="1" />
-                              <stop offset="35%" stopColor="rgb(139,92,246)" stopOpacity="1" />
-                              <stop offset="65%" stopColor="rgb(16,185,129)" stopOpacity="1" />
-                              <stop offset="100%" stopColor="rgb(16,185,129)" stopOpacity="1" />
-                            </>
-                          )}
-                        </linearGradient>
-                      </defs>
+                  <g key={`${conn.id}-${item.id}-interactive`}>
+                    {/* Glow edge when hovering in cut mode */}
+                    {isHoverCut && (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="rgb(239,68,68)"
+                        strokeWidth={6}
+                        strokeOpacity={0.6}
+                        strokeLinecap="round"
+                        filter="url(#cut-glow)"
+                        style={{ pointerEvents: "none" }}
+                      />
                     )}
-                    {/* Shadow */}
-                    <path
-                      d={path}
-                      fill="none"
-                      strokeWidth={5}
-                      strokeOpacity={0.14}
-                      strokeLinecap="round"
-                      className={bothDone ? "stroke-emerald-500" : "stroke-indigo-500"}
-                    />
-                    {/* Main line */}
-                    <path
-                      d={path}
-                      fill="none"
-                      stroke={
-                        bothDone
-                          ? "url(#line-done)"
-                          : oneDone
-                          ? `url(#${partialGradId})`
-                          : "url(#line-grad)"
-                      }
-                      strokeWidth={3}
-                      strokeLinecap="round"
-                    />
                     {/* Cut hit area */}
-                    {isCutMode && (
+                    {isCutMode && isCuttable && (
                       <path
                         d={path}
                         fill="none"
@@ -1673,18 +2309,37 @@ export default function GraphView() {
                         strokeWidth={18}
                         strokeLinecap="round"
                         style={{ pointerEvents: "stroke", cursor: CUT_CURSOR }}
-                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                        onMouseEnter={() => setHoverEdgeKey(edgeKey)}
+                        onMouseLeave={() => setHoverEdgeKey((prev) => (prev === edgeKey ? null : prev))}
+                        onClick={() => cutEdge(conn.id, edge.fromId, edge.toId)}
+                      />
+                    )}
+                    {!isCutMode && (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={16}
+                        strokeLinecap="round"
+                        style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                        onClick={() => setSelectedConnectionId(conn.id)}
                       />
                     )}
                     {/* Midpoint arrow */}
                     <polygon
                       points={`${tip.x},${tip.y} ${left.x},${left.y} ${right.x},${right.y}`}
-                      fill={bothDone ? "rgb(16,185,129)" : "rgb(99,102,241)"}
-                      fillOpacity={0.7}
+                      fill={
+                        isHoverCut
+                          ? "rgb(239,68,68)"
+                          : bothDone
+                          ? "rgb(16,185,129)"
+                          : edgeMeta.graphStroke
+                      }
+                      fillOpacity={isHoverCut ? 0.85 : 0.7}
                     />
                     {/* Animated particle */}
-                    {!conn.is_fully_complete && (
-                      <circle r="3.5" fill="rgb(99,102,241)" filter="url(#glow)">
+                    {!conn.is_fully_complete && !isCutMode && (
+                      <circle r="3.5" fill={edgeMeta.graphStroke} filter="url(#glow)">
                         <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
                         <animateMotion dur="2.5s" repeatCount="indefinite" path={path} />
                         <animate attributeName="r" values="3;4.5;3" dur="2.5s" repeatCount="indefinite" />
@@ -1692,8 +2347,7 @@ export default function GraphView() {
                     )}
                   </g>
                 );
-              })
-            )}
+              })}
 
             {/* Active drag line */}
             {connectDrag &&
@@ -1706,8 +2360,8 @@ export default function GraphView() {
                   connectDrag.fromPortSide
                 );
                 if (!fromPort) return null;
-                const toX = connectDrag.currentX - off.left + scrollLeft;
-                const toY = connectDrag.currentY - off.top + scrollTop;
+                const toX = (connectDrag.currentX - off.left + scrollLeft) / zoomScale;
+                const toY = (connectDrag.currentY - off.top + scrollTop) / zoomScale;
                 const dx = toX - fromPort.x;
                 const dy = toY - fromPort.y;
                 const toSide =
@@ -1752,23 +2406,9 @@ export default function GraphView() {
           </svg>
 
           {/* ── Node layer ─────────────────────────── */}
-          <div className="absolute inset-0" style={{ zIndex: 2 }}>
+          <div className="absolute inset-0" style={{ zIndex: 2, pointerEvents: isCutMode ? "none" : "auto" }}>
             <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 60 }}>
-              {sharedAdjacentPorts.shared.map((p) => (
-                <div
-                  key={`shared-port-${p.key}`}
-                  className="absolute"
-                  style={{
-                    left: p.x - 8,
-                    top: p.y - 8,
-                    width: 16,
-                    height: 16,
-                  }}
-                >
-                  <div className="w-full h-full rounded-full border-2 border-slate-300 dark:border-slate-600 bg-white/90 dark:bg-slate-800/90 shadow-sm" />
-                  <div className="absolute left-1/2 top-1/2 w-2 h-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-400 dark:bg-slate-500" />
-                </div>
-              ))}
+              {/* Junction dots are now rendered in SVG layer above node cards */}
             </div>
             {todos.map((todo) => {
               const pos = positions[todo.id];
@@ -1782,8 +2422,7 @@ export default function GraphView() {
                 sharedAdjacentPorts.hidden.has(`${todo.id}:${side}`);
 
               const isNext = groupConnections.some((c) => {
-                const ni = c.items.findIndex((i) => !i.is_completed);
-                return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+                return c.progress.next_available_item_id === todo.id;
               });
 
               const isConnected = conns > 0;
@@ -1828,6 +2467,12 @@ export default function GraphView() {
 
                   {/* Card */}
                   <div
+                    onDoubleClick={() => {
+                      if (!isDragging) {
+                        setSelectedTodoId(todo.id);
+                        setSelectedConnectionId(null);
+                      }
+                    }}
                     className={`relative h-full rounded-xl border-2 transition-all duration-200 ${
                       todo.high_priority === 1 ? "priority-warning" : ""
                     } ${
@@ -1917,6 +2562,10 @@ export default function GraphView() {
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "top"}
                         onMouseDown={(e) => onPortDown(e, todo.id, "top")}
+                        onHoverChange={(hovered) =>
+                          setHoverPort(hovered ? { todoId: todo.id, side: "top" } : null)
+                        }
+                        edgeColor={portFillByKey.get(`${todo.id}:top`)}
                       />
                     )}
                     {!hidePort("left") && (
@@ -1925,6 +2574,10 @@ export default function GraphView() {
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "left"}
                         onMouseDown={(e) => onPortDown(e, todo.id, "left")}
+                        onHoverChange={(hovered) =>
+                          setHoverPort(hovered ? { todoId: todo.id, side: "left" } : null)
+                        }
+                        edgeColor={portFillByKey.get(`${todo.id}:left`)}
                       />
                     )}
                     {!hidePort("right") && (
@@ -1933,6 +2586,10 @@ export default function GraphView() {
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "right"}
                         onMouseDown={(e) => onPortDown(e, todo.id, "right")}
+                        onHoverChange={(hovered) =>
+                          setHoverPort(hovered ? { todoId: todo.id, side: "right" } : null)
+                        }
+                        edgeColor={portFillByKey.get(`${todo.id}:right`)}
                       />
                     )}
                     {!hidePort("bottom") && (
@@ -1941,6 +2598,10 @@ export default function GraphView() {
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "bottom"}
                         onMouseDown={(e) => onPortDown(e, todo.id, "bottom")}
+                        onHoverChange={(hovered) =>
+                          setHoverPort(hovered ? { todoId: todo.id, side: "bottom" } : null)
+                        }
+                        edgeColor={portFillByKey.get(`${todo.id}:bottom`)}
                       />
                     )}
                   </div>
@@ -1956,8 +2617,7 @@ export default function GraphView() {
 
                 const isCompleted = todo.is_completed === 1;
                 const isNext = groupConnections.some((c) => {
-                  const ni = c.items.findIndex((i) => !i.is_completed);
-                  return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+                  return c.progress.next_available_item_id === todo.id;
                 });
                 if (isCompleted) return null;
                 const badgeNumber = isCompleted
@@ -1986,29 +2646,13 @@ export default function GraphView() {
             </div>
           </div>
 
+          </div>{/* end scaled inner virtual canvas */}
           </div>{/* end inner virtual canvas */}
           </div>{/* end scrollable canvas */}
 
           {/* ── Legend panel (overlay, doesn't scroll) ── */}
           {showPanel && (
-            <div className="absolute bottom-6 right-4 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 px-4 py-3 text-[10px] space-y-1.5 z-30 shadow-lg">
-              <div className="font-semibold text-[11px] text-slate-600 dark:text-slate-300 mb-1.5">
-                Controls
-              </div>
-              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-                <GripVertical size={10} /> Drag card to reposition
-              </div>
-              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-                <div className="w-3 h-3 rounded-full border-2 border-indigo-400 bg-indigo-400/20" />
-                Drag port to connect (max 2)
-              </div>
-              <div className="flex items-center gap-2 text-indigo-500">
-                <svg width="20" height="8">
-                  <path d="M0 4 Q5 0 10 4 T20 4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                </svg>
-                Connection path
-              </div>
-            </div>
+            <GraphLegend isFullscreen={isFullscreen} />
           )}
         </div>
       )}
@@ -2023,11 +2667,15 @@ function Port({
   canConnect,
   isActive,
   onMouseDown,
+  onHoverChange,
+  edgeColor,
 }: {
   side: "left" | "right" | "top" | "bottom";
   canConnect: boolean;
   isActive: boolean;
   onMouseDown: (e: React.MouseEvent) => void;
+  onHoverChange: (hovered: boolean) => void;
+  edgeColor?: string;
 }) {
   const posClass =
     side === "left"
@@ -2041,14 +2689,26 @@ function Port({
   if (!canConnect && !isActive) {
     return (
       <div
-        className={`absolute ${posClass} w-2.5 h-2.5 rounded-full bg-slate-200 dark:bg-slate-700 opacity-40 pointer-events-none`}
-      />
+        onMouseEnter={() => onHoverChange(true)}
+        onMouseLeave={() => onHoverChange(false)}
+        className={`absolute ${posClass} pointer-events-none`}
+        style={{ zIndex: 30 }}
+      >
+        <div className="w-3.5 h-3.5 rounded-full flex items-center justify-center bg-white dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 opacity-60">
+          <div
+            className="w-1.5 h-1.5 rounded-full bg-slate-300 dark:bg-slate-600"
+            style={edgeColor ? { backgroundColor: edgeColor, opacity: 0.9 } : undefined}
+          />
+        </div>
+      </div>
     );
   }
 
   return (
     <div
       onMouseDown={onMouseDown}
+      onMouseEnter={() => onHoverChange(true)}
+      onMouseLeave={() => onHoverChange(false)}
       className={`absolute ${posClass} group/port cursor-crosshair`}
       style={{ zIndex: 30 }}
     >
@@ -2065,6 +2725,7 @@ function Port({
               ? "w-2.5 h-2.5 bg-indigo-500"
               : "w-1.5 h-1.5 bg-slate-300 dark:bg-slate-600 group-hover/port:bg-indigo-500"
           }`}
+          style={edgeColor && !isActive ? { backgroundColor: edgeColor } : undefined}
         />
       </div>
     </div>

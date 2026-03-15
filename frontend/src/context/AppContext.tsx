@@ -7,7 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import type { Group, Todo, Connection, View } from "../types";
+import type { AppSettings, Group, Todo, Connection, View } from "../types";
 import { groupsApi, todosApi, connectionsApi } from "../api/client";
 import toast from "react-hot-toast";
 
@@ -15,9 +15,11 @@ interface AppState {
   groups: Group[];
   selectedGroupId: string | null;
   todos: Todo[];
+  allTodos: Todo[];
   connections: Connection[];
   highlightTodoId: string | null;
   currentView: View;
+  reorderMode: boolean;
   loading: boolean;
   sidebarOpen: boolean;
   activeReminderAlarm: {
@@ -27,22 +29,52 @@ interface AppState {
     highPriority: boolean;
     groupName: string;
   } | null;
+  settings: AppSettings;
+  shortcutHelpOpen: boolean;
 }
 
 interface AppContextType extends AppState {
   setCurrentView: (view: View) => void;
   selectGroup: (id: string | null) => void;
+  startReorder: (groupId: string) => void;
+  setReorderMode: (value: boolean) => void;
   jumpToTodo: (groupId: string, todoId: string) => void;
   clearHighlightedTodo: () => void;
   refreshGroups: () => Promise<void>;
   refreshTodos: () => Promise<void>;
   refreshConnections: () => Promise<void>;
+  ensureAllTodosLoaded: () => Promise<Todo[]>;
   setSidebarOpen: (open: boolean) => void;
   stopReminderAlarm: () => Promise<void>;
+  updateSettings: (settings: Partial<AppSettings>) => void;
+  setShortcutHelpOpen: (open: boolean) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
 const REMINDER_ACK_KEY = "nodes-todo-reminder-ack";
+const APP_SETTINGS_KEY = "nodes-todo-settings";
+const DEFAULT_SHORTCUT_BINDINGS: AppSettings["shortcutBindings"] = {
+  search: "/",
+  newTask: "n",
+  todos: "t",
+  connections: "c",
+  graph: "g",
+  planner: "r",
+  settings: "s",
+  fullscreenGraph: "f",
+  help: "?",
+};
+
+const DEFAULT_SETTINGS: AppSettings = {
+  defaultReminderTime: "10:00",
+  enableKeyboardShortcuts: true,
+  showShortcutHintsOnStart: true,
+  showDebugStats: true,
+  showGraphBoundaryHint: true,
+  syncDeviceName: "My device",
+  graphDefaultLayout: "smart",
+  shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
+};
 
 function readReminderAcks(): Record<string, string> {
   try {
@@ -58,20 +90,72 @@ function writeReminderAcks(value: Record<string, string>) {
   localStorage.setItem(REMINDER_ACK_KEY, JSON.stringify(value));
 }
 
+function readSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(APP_SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      shortcutBindings: {
+        ...DEFAULT_SHORTCUT_BINDINGS,
+        ...(parsed.shortcutBindings ?? {}),
+      },
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function writeSettings(value: AppSettings) {
+  localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(value));
+}
+
+function buildAllTodosSnapshot(
+  groups: Group[],
+  selectedGroupId: string | null,
+  visibleTodos: Todo[],
+  cache: Record<string, Todo[]>
+) {
+  const seen = new Set<string>();
+  const merged: Todo[] = [];
+
+  for (const group of groups) {
+    const source = group.id === selectedGroupId ? visibleTodos : cache[group.id] ?? [];
+    for (const todo of source) {
+      if (seen.has(todo.id)) continue;
+      seen.add(todo.id);
+      merged.push(todo);
+    }
+  }
+
+  return merged;
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>({
     groups: [],
     selectedGroupId: null,
     todos: [],
+    allTodos: [],
     connections: [],
     highlightTodoId: null,
     currentView: "todos",
+    reorderMode: false,
     loading: true,
     sidebarOpen: true,
     activeReminderAlarm: null,
+    settings: readSettings(),
+    shortcutHelpOpen: false,
   });
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const refreshGroups = useCallback(async () => {
     try {
@@ -84,12 +168,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
             delete todosCacheRef.current[cachedGroupId];
           }
         }
-        return {
+        const nextState = {
           ...s,
           groups,
           selectedGroupId: groupStillExists ? s.selectedGroupId : groups[0]?.id ?? null,
           // Clear stale todos immediately when the active group was deleted
           todos: groupStillExists ? s.todos : [],
+        };
+        return {
+          ...nextState,
+          allTodos: buildAllTodosSnapshot(
+            nextState.groups,
+            nextState.selectedGroupId,
+            nextState.todos,
+            todosCacheRef.current
+          ),
         };
       });
     } catch (e) {
@@ -107,9 +200,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const todos = await todosApi.list(currentGroupId);
       todosCacheRef.current[currentGroupId] = todos;
-      setState((s) =>
-        s.selectedGroupId === currentGroupId ? { ...s, todos } : s
-      );
+      setState((s) => {
+        const nextState =
+          s.selectedGroupId === currentGroupId ? { ...s, todos } : s;
+        return {
+          ...nextState,
+          allTodos: buildAllTodosSnapshot(
+            nextState.groups,
+            nextState.selectedGroupId,
+            nextState.todos,
+            todosCacheRef.current
+          ),
+        };
+      });
     } catch (e) {
       toast.error("Failed to load todos");
       console.error(e);
@@ -128,14 +231,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
+    setState((s) => {
+      const nextState = {
+        ...s,
+        selectedGroupId: id,
+        todos: cached ?? [],
+        currentView: "todos" as const,
+        highlightTodoId: null,
+        reorderMode: false,
+      };
+      return {
+        ...nextState,
+        allTodos: buildAllTodosSnapshot(
+          nextState.groups,
+          nextState.selectedGroupId,
+          nextState.todos,
+          todosCacheRef.current
+        ),
+      };
+    });
+  }, []);
+
+  const startReorder = useCallback((groupId: string) => {
+    const cached = todosCacheRef.current[groupId] ?? [];
     setState((s) => ({
       ...s,
-      selectedGroupId: id,
-      todos: cached ?? [],
+      selectedGroupId: groupId,
+      todos: cached,
       currentView: "todos",
       highlightTodoId: null,
+      reorderMode: true,
     }));
-  }, [refreshTodos]);
+  }, []);
+
+  const setReorderMode = useCallback((value: boolean) => {
+    setState((s) => ({ ...s, reorderMode: value }));
+  }, []);
 
   const jumpToTodo = useCallback((groupId: string, todoId: string) => {
     setState((s) => ({
@@ -143,6 +274,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selectedGroupId: groupId,
       currentView: "todos",
       highlightTodoId: todoId,
+      reorderMode: false,
     }));
   }, []);
 
@@ -151,11 +283,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setCurrentView = useCallback((view: View) => {
-    setState((s) => ({ ...s, currentView: view }));
+    setState((s) => ({ ...s, currentView: view, reorderMode: view === "todos" ? s.reorderMode : false }));
   }, []);
 
   const setSidebarOpen = useCallback((open: boolean) => {
     setState((s) => ({ ...s, sidebarOpen: open }));
+  }, []);
+
+  const ensureAllTodosLoaded = useCallback(async () => {
+    const groups = stateRef.current.groups;
+    if (groups.length === 0) return [];
+
+    await Promise.all(
+      groups.map(async (group) => {
+        if (todosCacheRef.current[group.id]) return;
+        try {
+          todosCacheRef.current[group.id] = await todosApi.list(group.id);
+        } catch {
+          // Keep best-effort behavior; visible group fetches still use refreshTodos.
+        }
+      })
+    );
+
+    const currentState = stateRef.current;
+    const merged = buildAllTodosSnapshot(
+      currentState.groups,
+      currentState.selectedGroupId,
+      currentState.todos,
+      todosCacheRef.current
+    );
+    setState((s) => ({ ...s, allTodos: merged }));
+    return merged;
   }, []);
 
   const stopReminderAlarm = useCallback(async () => {
@@ -166,25 +324,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     acks[alarmToStop.todoId] = alarmToStop.reminderAt;
     writeReminderAcks(acks);
     try {
-      // Alarm acknowledged: clear reminder date/time from the todo.
-      await todosApi.update(alarmToStop.todoId, { reminder_at: null });
+      await todosApi.acknowledgeReminder(alarmToStop.todoId);
       await refreshTodos();
     } catch {
       // Keep UX smooth if clearing reminder fails.
     }
   }, [state.activeReminderAlarm, refreshTodos]);
 
+  const updateSettings = useCallback((settingsUpdate: Partial<AppSettings>) => {
+    setState((s) => {
+      const nextSettings = {
+        ...s.settings,
+        ...settingsUpdate,
+        shortcutBindings: {
+          ...s.settings.shortcutBindings,
+          ...(settingsUpdate.shortcutBindings ?? {}),
+        },
+      };
+      writeSettings(nextSettings);
+      return { ...s, settings: nextSettings };
+    });
+  }, []);
+
+  const setShortcutHelpOpen = useCallback((open: boolean) => {
+    setState((s) => ({ ...s, shortcutHelpOpen: open }));
+  }, []);
+
   const checkDueReminders = useCallback(async () => {
     try {
-      const allGroups = await groupsApi.list();
-      if (allGroups.length === 0) return;
+      if (state.groups.length === 0) return;
 
-      const lists = await Promise.all(allGroups.map((g) => todosApi.list(g.id)));
-      const allTodos = lists.flat();
+      const allTodos = state.groups.flatMap((group) => {
+        if (group.id === state.selectedGroupId) {
+          return state.todos;
+        }
+        return todosCacheRef.current[group.id] ?? [];
+      });
       const now = Date.now();
       const acks = readReminderAcks();
       let updated = false;
-      const groupNameById = new Map(allGroups.map((g) => [g.id, g.name] as const));
+      const groupNameById = new Map(state.groups.map((g) => [g.id, g.name] as const));
 
       const activeReminderIds = new Set<string>();
       const dueAlarms: Array<{
@@ -273,7 +452,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore reminder polling errors to avoid noisy UX
     }
-  }, []);
+  }, [state.groups, state.selectedGroupId, state.todos]);
 
   // Initial load
   useEffect(() => {
@@ -292,6 +471,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [state.selectedGroupId, refreshTodos]);
 
+  useEffect(() => {
+    if (!state.selectedGroupId) return;
+    todosCacheRef.current[state.selectedGroupId] = state.todos;
+    setState((s) => ({
+      ...s,
+      allTodos: buildAllTodosSnapshot(
+        s.groups,
+        s.selectedGroupId,
+        s.todos,
+        todosCacheRef.current
+      ),
+    }));
+  }, [state.selectedGroupId, state.todos]);
+
   // Warm cache so switching groups feels instant after initial load.
   useEffect(() => {
     if (state.groups.length === 0) return;
@@ -304,6 +497,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
             const todos = await todosApi.list(group.id);
             if (!cancelled) {
               todosCacheRef.current[group.id] = todos;
+              setState((s) => ({
+                ...s,
+                allTodos: buildAllTodosSnapshot(
+                  s.groups,
+                  s.selectedGroupId,
+                  s.todos,
+                  todosCacheRef.current
+                ),
+              }));
             }
           } catch {
             // Ignore cache warm failures; regular refresh handles visible state.
@@ -320,7 +522,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (state.loading) return;
     checkDueReminders();
-    const interval = setInterval(checkDueReminders, 5_000);
+    const interval = setInterval(checkDueReminders, 15_000);
     return () => clearInterval(interval);
   }, [state.loading, checkDueReminders]);
 
@@ -330,13 +532,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ...state,
         setCurrentView,
         selectGroup,
+        startReorder,
+        setReorderMode,
         jumpToTodo,
         clearHighlightedTodo,
         refreshGroups,
         refreshTodos,
         refreshConnections,
+        ensureAllTodosLoaded,
         setSidebarOpen,
         stopReminderAlarm,
+        updateSettings,
+        setShortcutHelpOpen,
       }}
     >
       {children}

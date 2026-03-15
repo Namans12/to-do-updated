@@ -3,15 +3,27 @@ import { eq, and, asc, sql, isNull, inArray, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
 import { connections, connectionItems, todos } from "../db/schema.js";
+import { logActivity } from "../lib/activity.js";
 
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
+const CONNECTION_KINDS = ["sequence", "dependency", "branch", "related"] as const;
+type ConnectionKind = (typeof CONNECTION_KINDS)[number];
+
+function normalizeConnectionKind(value: unknown): ConnectionKind | null {
+  if (value === undefined || value === null || value === "") return "sequence";
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return CONNECTION_KINDS.includes(normalized as ConnectionKind)
+    ? (normalized as ConnectionKind)
+    : null;
+}
 
 /**
  * Helper: build the response shape for a connection with its items and progress.
  */
 function buildConnectionResponse(
-  connection: { id: string; name: string | null; created_at: string },
+  connection: { id: string; name: string | null; kind: string; created_at: string },
   items: Array<{
     id: string;
     todo_id: string;
@@ -19,16 +31,63 @@ function buildConnectionResponse(
     is_completed: number;
     high_priority: number;
     completed_at: string | null;
+    created_at: string;
     position: number;
   }>
 ) {
   const total = items.length;
   const completed = items.filter((i) => i.is_completed === 1).length;
   const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const incompleteItems = items.filter((item) => item.is_completed !== 1);
+  let blockedCount = 0;
+  let availableCount = incompleteItems.length;
+  let nextAvailableItemId: string | null = incompleteItems[0]?.todo_id ?? null;
+  let blockedTitles: string[] = [];
+  let nextUnlockTitle: string | null = incompleteItems[1]?.title ?? null;
+  let criticalPathLength = incompleteItems.length;
+
+  if (connection.kind === "dependency") {
+    const firstIncompleteIndex = items.findIndex((item) => item.is_completed !== 1);
+    if (firstIncompleteIndex === -1) {
+      availableCount = 0;
+      blockedCount = 0;
+      nextAvailableItemId = null;
+      blockedTitles = [];
+      nextUnlockTitle = null;
+      criticalPathLength = 0;
+    } else {
+      availableCount = 1;
+      const blockedItems = items
+        .slice(firstIncompleteIndex + 1)
+        .filter((item) => item.is_completed !== 1);
+      blockedCount = blockedItems.length;
+      nextAvailableItemId = items[firstIncompleteIndex]!.todo_id;
+      blockedTitles = blockedItems.map((item) => item.title);
+      nextUnlockTitle = blockedItems[0]?.title ?? null;
+      criticalPathLength = items.slice(firstIncompleteIndex).filter((item) => item.is_completed !== 1).length;
+    }
+  } else if (connection.kind === "branch") {
+    const root = items[0] ?? null;
+    const branchItems = items.slice(1);
+    const rootIncomplete = !!root && root.is_completed !== 1;
+    if (rootIncomplete) {
+      availableCount = 1;
+      blockedCount = branchItems.filter((item) => item.is_completed !== 1).length;
+      nextAvailableItemId = root.todo_id;
+    } else {
+      availableCount = incompleteItems.length;
+      blockedCount = 0;
+      nextAvailableItemId = incompleteItems[0]?.todo_id ?? null;
+      blockedTitles = [];
+      nextUnlockTitle = incompleteItems[0]?.title ?? null;
+      criticalPathLength = incompleteItems.length;
+    }
+  }
 
   return {
     id: connection.id,
     name: connection.name,
+    kind: connection.kind,
     items: items.map((i) => ({
       id: i.id,
       todo_id: i.todo_id,
@@ -36,14 +95,22 @@ function buildConnectionResponse(
       is_completed: i.is_completed,
       high_priority: i.high_priority,
       completed_at: i.completed_at,
+      created_at: i.created_at,
       position: i.position,
     })),
     progress: {
       total,
       completed,
       percentage,
+      blocked_count: blockedCount,
+      available_count: availableCount,
+      next_available_item_id: nextAvailableItemId,
+      blocked_titles: blockedTitles,
+      next_unlock_title: nextUnlockTitle,
+      critical_path_length: criticalPathLength,
     },
     is_fully_complete: total > 0 && completed === total,
+    created_at: connection.created_at,
   };
 }
 
@@ -57,6 +124,7 @@ function buildConnectionResponse(
  *   POST   /api/connections/merge                — Merge two connections by linking endpoints
  *   POST   /api/connections/:id/cut              — Cut a connection between adjacent items
  *   POST   /api/connections/:id/items            — Add a todo to a connection
+ *   PATCH  /api/connections/:id/reorder          — Reorder connection items
  *   DELETE /api/connections/:id/items/:todoId    — Remove a todo from a connection
  *   DELETE /api/connections/:id                  — Delete a connection (not the todos)
  */
@@ -80,6 +148,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         is_completed: todos.is_completed,
         high_priority: todos.high_priority,
         completed_at: todos.completed_at,
+        created_at: todos.created_at,
         position: connectionItems.position,
       })
       .from(connectionItems)
@@ -100,7 +169,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
   router.post("/", async (c) => {
     try {
       const body = await c.req.json();
-      const { name, todoIds } = body;
+      const { name, todoIds, kind } = body;
 
       // Validate todoIds
       if (!Array.isArray(todoIds) || todoIds.length < 2) {
@@ -150,18 +219,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         }
       }
 
-      // Check that none of the todos already belong to 2 connections (max allowed)
+      // A todo can only belong to one connection at a time.
       for (const todoId of todoIds) {
-        const existingCount = drizzleDb
+        const existingMembership = drizzleDb
           .select()
           .from(connectionItems)
           .where(eq(connectionItems.todo_id, todoId))
-          .all().length;
+          .get();
 
-        if (existingCount >= 2) {
+        if (existingMembership) {
           return c.json(
             {
-              error: `Todo '${todoId}' already belongs to ${existingCount} connections. A todo can belong to at most 2 connections.`,
+              error: `Todo '${todoId}' already belongs to a connection. A todo can belong to at most 1 connection.`,
             },
             400
           );
@@ -173,6 +242,19 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         if (typeof name !== "string") {
           return c.json({ error: "Name must be a string" }, 400);
         }
+      }
+      const normalizedKind = normalizeConnectionKind(kind);
+      if (!normalizedKind) {
+        return c.json(
+          { error: `kind must be one of: ${CONNECTION_KINDS.join(", ")}` },
+          400
+        );
+      }
+      if (normalizedKind === "branch" && todoIds.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
       }
 
       const now = new Date().toISOString();
@@ -201,6 +283,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           .values({
             id: connectionId,
             name: trimmedName,
+            kind: normalizedKind,
             created_at: now,
           })
           .run();
@@ -228,6 +311,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "created",
+        summary: `Created ${normalizedKind} connection${trimmedName ? ` "${trimmedName}"` : ""}`,
+        payload: {
+          todo_ids: todoIds,
+          kind: normalizedKind,
+        },
+      });
 
       return c.json({ data: response }, 201);
     } catch (error: any) {
@@ -296,7 +389,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
     try {
       const id = c.req.param("id");
       const body = await c.req.json();
-      const { name } = body;
+      const { name, kind } = body;
 
       const { db: drizzleDb } = db();
 
@@ -313,11 +406,15 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       // Validate name
       if (name === undefined) {
-        return c.json({ error: "Name field is required" }, 400);
+        if (kind === undefined) {
+          return c.json({ error: "At least one of name or kind must be provided" }, 400);
+        }
       }
 
-      let updatedName: string | null;
-      if (name === null) {
+      let updatedName = connection.name;
+      if (name === undefined) {
+        updatedName = connection.name;
+      } else if (name === null) {
         updatedName = null;
       } else if (typeof name === "string") {
         updatedName = name.trim() || null;
@@ -336,10 +433,24 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           return c.json({ error: "A connection with this name already exists" }, 400);
         }
       }
+      const normalizedKind = kind === undefined ? connection.kind : normalizeConnectionKind(kind);
+      if (!normalizedKind) {
+        return c.json(
+          { error: `kind must be one of: ${CONNECTION_KINDS.join(", ")}` },
+          400
+        );
+      }
+      const existingItems = getConnectionItems(drizzleDb, id);
+      if (normalizedKind === "branch" && existingItems.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
 
       drizzleDb
         .update(connections)
-        .set({ name: updatedName })
+        .set({ name: updatedName, kind: normalizedKind })
         .where(eq(connections.id, id))
         .run();
 
@@ -352,6 +463,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, id);
       const response = buildConnectionResponse(updated, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: id,
+        action: "updated",
+        summary: `Updated connection${updated.name ? ` "${updated.name}"` : ""}`,
+        payload: {
+          kind: normalizedKind,
+          name: updatedName,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -489,6 +610,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      const mergedKind = fromConnection.kind;
+      if (mergedKind === "branch" && mergedTodoIds.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
       const dedup = new Set(mergedTodoIds);
       if (dedup.size !== mergedTodoIds.length) {
         return c.json({ error: "Merged chain produced duplicate todos" }, 400);
@@ -531,6 +659,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         .get()!;
       const updatedItems = getConnectionItems(drizzleDb, fromConnectionId);
       const response = buildConnectionResponse(updated, updatedItems);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: fromConnectionId,
+        action: "merged",
+        summary: `Merged two connections into ${updated.name ?? "a shared chain"}`,
+        payload: {
+          todo_ids: mergedTodoIds,
+          merged_connection_id: toConnectionId,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -627,6 +765,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
             .values({
               id: newConnectionId,
               name: null,
+              kind: connection.kind,
               created_at: now,
             })
             .run();
@@ -669,6 +808,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
               .where(eq(connections.id, newConnectionId))
               .get()
           : null;
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "cut",
+        summary: `Cut a connection into ${leftConn ? "left" : "single"} and ${rightConn ? "right" : "single"} parts`,
+        payload: {
+          from_todo_id: fromTodoId,
+          to_todo_id: toTodoId,
+          left_count: left.length,
+          right_count: right.length,
+        },
+      });
 
       return c.json({
         data: {
@@ -722,12 +873,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Todo not found or is deleted" }, 404);
       }
 
-      // Check if todo already belongs to 2 connections (max allowed)
-      const existingCount = drizzleDb
+      // A todo can only belong to one connection at a time.
+      const existingMembership = drizzleDb
         .select()
         .from(connectionItems)
         .where(eq(connectionItems.todo_id, todoId))
-        .all().length;
+        .get();
 
       // Also check it's not already in THIS specific connection
       const alreadyInThis = drizzleDb
@@ -750,11 +901,11 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
 
-      if (existingCount >= 2) {
+      if (existingMembership) {
         return c.json(
           {
             error:
-              "Todo already belongs to 2 connections. A todo can belong to at most 2 connections.",
+              "Todo already belongs to a connection. A todo can belong to at most 1 connection.",
           },
           400
         );
@@ -775,6 +926,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      if (connection.kind === "branch" && nextPosition >= 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
 
       // Insert the new connection item
       drizzleDb
@@ -790,6 +947,120 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       // Return the updated connection
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "item_added",
+        summary: `Added "${todo.title}" to a connection`,
+        payload: {
+          todo_id: todoId,
+          connection_id: connectionId,
+        },
+      });
+
+      return c.json({ data: response });
+    } catch (error: any) {
+      if (error instanceof SyntaxError) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      return c.json({ error: "Internal server error" }, 500);
+    }
+  });
+
+  // PATCH /api/connections/:id/reorder — Reorder connection items
+  router.patch("/:id/reorder", async (c) => {
+    try {
+      const connectionId = c.req.param("id");
+      const body = await c.req.json();
+      const { todoIds } = body ?? {};
+
+      if (!Array.isArray(todoIds) || todoIds.length < 2) {
+        return c.json(
+          { error: "todoIds must be an array with at least 2 items" },
+          400
+        );
+      }
+      if (todoIds.length > 7) {
+        return c.json(
+          { error: "Connections can have at most 7 items" },
+          400
+        );
+      }
+      for (const id of todoIds) {
+        if (typeof id !== "string" || id.trim().length === 0) {
+          return c.json(
+            { error: "Each todoId must be a non-empty string" },
+            400
+          );
+        }
+      }
+      const unique = new Set(todoIds);
+      if (unique.size !== todoIds.length) {
+        return c.json({ error: "Duplicate todoIds are not allowed" }, 400);
+      }
+
+      const { db: drizzleDb, sqlite } = db();
+
+      const connection = drizzleDb
+        .select()
+        .from(connections)
+        .where(eq(connections.id, connectionId))
+        .get();
+      if (!connection) {
+        return c.json({ error: "Connection not found" }, 404);
+      }
+
+      const existingItems = drizzleDb
+        .select({ todo_id: connectionItems.todo_id })
+        .from(connectionItems)
+        .where(eq(connectionItems.connection_id, connectionId))
+        .all()
+        .map((r) => r.todo_id);
+
+      if (existingItems.length !== todoIds.length) {
+        return c.json(
+          { error: "todoIds must match all items in this connection" },
+          400
+        );
+      }
+
+      const existingSet = new Set(existingItems);
+      for (const id of todoIds) {
+        if (!existingSet.has(id)) {
+          return c.json(
+            { error: "todoIds must match all items in this connection" },
+            400
+          );
+        }
+      }
+
+      const transaction = sqlite.transaction(() => {
+        for (let i = 0; i < todoIds.length; i++) {
+          drizzleDb
+            .update(connectionItems)
+            .set({ position: i })
+            .where(
+              and(
+                eq(connectionItems.connection_id, connectionId),
+                eq(connectionItems.todo_id, todoIds[i]!)
+              )
+            )
+            .run();
+        }
+      });
+      transaction();
+
+      const items = getConnectionItems(drizzleDb, connectionId);
+      const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "reordered",
+        summary: `Reordered tasks inside a connection`,
+        payload: {
+          todo_ids: todoIds,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -861,6 +1132,14 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         });
         transaction();
 
+        logActivity(drizzleDb, {
+          entity_type: "connection",
+          entity_id: connectionId,
+          action: "deleted",
+          summary: `Deleted a connection after removing "${todoId}"`,
+          payload: { todo_id: todoId },
+        });
+
         return c.json({
           data: { message: "Connection deleted (minimum size not met)" },
         });
@@ -886,6 +1165,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(updatedConnection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "item_removed",
+        summary: `Removed a task from a connection`,
+        payload: { todo_id: todoId },
+      });
 
       return c.json({ data: response });
     } catch {
@@ -923,6 +1209,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           .run();
       });
       transaction();
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: id,
+        action: "deleted",
+        summary: `Deleted connection${connection.name ? ` "${connection.name}"` : ""}`,
+      });
 
       return c.json({
         data: { message: "Connection deleted successfully" },

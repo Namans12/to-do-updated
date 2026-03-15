@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createTestContext } from "./helpers.js";
-import { groups, todos } from "../db/schema.js";
+import { connectionItems, connections, groups, todos } from "../db/schema.js";
 import { v4 as uuid } from "uuid";
 
 describe("Search API - GET /api/search", () => {
@@ -34,6 +34,10 @@ describe("Search API - GET /api/search", () => {
     title: string,
     options: {
       description?: string | null;
+      high_priority?: number;
+      reminder_at?: string | null;
+      recurrence_rule?: string | null;
+      planning_level?: number;
       is_completed?: number;
       deleted_at?: string | null;
       position?: number;
@@ -48,13 +52,40 @@ describe("Search API - GET /api/search", () => {
       group_id: groupId,
       title,
       description: options.description ?? null,
+      high_priority: options.high_priority ?? 0,
+      reminder_at: options.reminder_at ?? null,
+      recurrence_rule: options.recurrence_rule ?? null,
+      recurrence_enabled: options.recurrence_rule ? 1 : 0,
+      next_occurrence_at: options.recurrence_rule ? (options.reminder_at ?? now) : null,
       is_completed: options.is_completed ?? 0,
       position: options.position ?? 0,
+      parent_todo_id: null,
+      planning_level: options.planning_level ?? 0,
       deleted_at: options.deleted_at ?? null,
       created_at: now,
       updated_at: options.updated_at ?? now,
     }).run();
     return id;
+  }
+
+  function createConnection(kind: "sequence" | "dependency" | "branch" | "related", todoIds: string[]) {
+    const connectionId = uuid();
+    const createdAt = new Date().toISOString();
+    ctx.db.insert(connections).values({
+      id: connectionId,
+      name: `${kind} link`,
+      kind,
+      created_at: createdAt,
+    }).run();
+
+    todoIds.forEach((todoId, index) => {
+      ctx.db.insert(connectionItems).values({
+        id: uuid(),
+        connection_id: connectionId,
+        todo_id: todoId,
+        position: index,
+      }).run();
+    });
   }
 
   describe("Basic Search", () => {
@@ -300,6 +331,32 @@ describe("Search API - GET /api/search", () => {
       const body = await res.json();
       expect(body.data.count).toBe(1);
       expect(body.data.results[0].title).toBe("Work task completed");
+    });
+
+    it("should filter by high priority, reminder, connection kind, and planning level", async () => {
+      const groupId = createGroup("Advanced");
+      const reminderAt = new Date(Date.now() + 60_000).toISOString();
+      const matchingTodo = createTodo(groupId, "Advanced task", {
+        high_priority: 1,
+        reminder_at: reminderAt,
+        recurrence_rule: "daily",
+        planning_level: 3,
+      });
+      const otherTodo = createTodo(groupId, "Advanced other", {
+        high_priority: 0,
+        planning_level: 1,
+      });
+      createConnection("dependency", [matchingTodo, otherTodo]);
+
+      const res = await ctx.app.request(
+        `/api/search?q=Advanced&high_priority=true&has_reminder=true&connection_kind=dependency&planning_level=3`
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.count).toBe(1);
+      expect(body.data.results[0].id).toBe(matchingTodo);
+      expect(body.data.results[0].connection_kind).toBe("dependency");
+      expect(body.data.results[0].planning_level).toBe(3);
     });
   });
 

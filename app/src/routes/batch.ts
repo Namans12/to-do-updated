@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { eq, inArray, isNull } from "drizzle-orm";
+import { eq, inArray, isNull, and, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { groups, todos } from "../db/schema.js";
 
@@ -178,7 +178,7 @@ export function createBatchRouter(dbOverride?: DbOverride) {
       const targetGroup = drizzleDb
         .select()
         .from(groups)
-        .where(eq(groups.id, targetGroupId))
+        .where(and(eq(groups.id, targetGroupId), isNull(groups.deleted_at)))
         .get();
 
       if (!targetGroup) {
@@ -191,6 +191,15 @@ export function createBatchRouter(dbOverride?: DbOverride) {
 
       // Run in a transaction
       const transaction = sqlite.transaction(() => {
+        const maxPosResult = drizzleDb
+          .select({
+            maxPos: sql<number>`COALESCE(MAX(${todos.position}), -1)`,
+          })
+          .from(todos)
+          .where(and(eq(todos.group_id, targetGroupId), isNull(todos.deleted_at)))
+          .get();
+        let nextPosition = (maxPosResult?.maxPos ?? -1) + 1;
+
         for (const id of ids) {
           // Find the todo (only non-deleted todos can be moved)
           const todo = drizzleDb
@@ -207,10 +216,11 @@ export function createBatchRouter(dbOverride?: DbOverride) {
           // Move to target group (update group_id and updated_at)
           drizzleDb
             .update(todos)
-            .set({ group_id: targetGroupId, updated_at: now })
+            .set({ group_id: targetGroupId, position: nextPosition, updated_at: now })
             .where(eq(todos.id, id))
             .run();
 
+          nextPosition += 1;
           affectedCount++;
         }
       });

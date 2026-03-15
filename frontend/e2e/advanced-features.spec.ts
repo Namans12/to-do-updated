@@ -1,0 +1,58 @@
+import { expect, test } from "@playwright/test";
+
+test("templates, task history, and graph quick add work together", async ({ page }) => {
+  const unique = Date.now();
+  const sourceGroupName = `Template Source ${unique}`;
+  const targetGroupName = `Template Target ${unique}`;
+  const todoTitle = `Template Task ${unique}`;
+  const updatedTodoTitle = `${todoTitle} Updated`;
+  const templateName = `Weekly Board ${unique}`;
+
+  const sourceGroupRes = await page.request.post("/api/groups", { data: { name: sourceGroupName } });
+  const sourceGroup = await sourceGroupRes.json();
+  const targetGroupRes = await page.request.post("/api/groups", { data: { name: targetGroupName } });
+  const targetGroup = await targetGroupRes.json();
+  await page.request.post(`/api/groups/${sourceGroup.data.id}/todos`, {
+    data: { title: todoTitle, planning_level: 2, recurrence_rule: "weekly" },
+  });
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("nodes-todo-shortcuts-seen", "true");
+  });
+  await page.goto("/");
+
+  await page.getByText(sourceGroupName, { exact: true }).click();
+  await expect(page.getByRole("heading", { name: sourceGroupName, exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: `Edit ${todoTitle}` }).click();
+  await page.locator(`input[value="${todoTitle}"]`).fill(updatedTodoTitle);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText(updatedTodoTitle, { exact: true }).first()).toBeVisible();
+
+  await page.locator(`[aria-label="View history for ${updatedTodoTitle}"]`).click({ force: true });
+  await expect(page.getByRole("heading", { name: "Task History" })).toBeVisible();
+  await expect(page.getByText(updatedTodoTitle, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Title", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(todoTitle, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(updatedTodoTitle, { exact: true }).first()).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Template name").fill(templateName);
+  await page.getByLabel("Template description").fill("Reusable weekly planning board");
+  await page.getByRole("button", { name: "Save Template" }).click();
+  await expect(page.getByText(templateName, { exact: true })).toBeVisible();
+
+  await page.getByText(targetGroupName, { exact: true }).click();
+  await page.keyboard.press("s");
+  await page.getByRole("button", { name: "Apply" }).first().click();
+  await page.keyboard.press("t");
+  await expect(page.getByText(updatedTodoTitle, { exact: true })).toBeVisible();
+
+  await page.keyboard.press("g");
+  await page.getByLabel("Quick add task").click();
+  await expect(page.getByText("New graph task", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("GraphPlan Task", { exact: true })).toHaveCount(0);
+  await page.getByText("New graph task", { exact: true }).first().dblclick();
+  await expect(page.getByText("GraphPlan Task", { exact: true })).toBeVisible();
+});

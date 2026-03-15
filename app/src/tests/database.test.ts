@@ -119,6 +119,16 @@ describe("Database Setup", () => {
     expect(columnNames).toContain("position");
   });
 
+  it("should enforce a unique todo_id index on connection_items", () => {
+    const indexes = sqlite.prepare("PRAGMA index_list(connection_items)").all() as {
+      name: string;
+      unique: number;
+    }[];
+    expect(
+      indexes.some((index) => index.name === "idx_connection_items_todo_id_unique" && index.unique === 1)
+    ).toBe(true);
+  });
+
   it("should be able to use Drizzle ORM with the database", () => {
     const db = drizzle(sqlite, { schema });
     // Simple query to verify Drizzle works
