@@ -28,6 +28,7 @@ export default function Sidebar() {
     selectedGroupId,
     selectGroup,
     startReorder,
+    setSidebarOpen,
     setCurrentView,
     currentView,
     refreshGroups,
@@ -42,6 +43,13 @@ export default function Sidebar() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; left: number; direction: "up" | "down" } | null>(null);
 
+  const closeMobileSidebarIfNeeded = () => {
+    if (typeof window === "undefined") return;
+    if (window.matchMedia("(max-width: 1023px)").matches) {
+      setSidebarOpen(false);
+    }
+  };
+
   const handleCreateGroup = async () => {
     const name = newGroupName.trim();
     if (!name) return;
@@ -49,6 +57,7 @@ export default function Sidebar() {
       const created = await groupsApi.create(name);
       selectGroup(created.id);
       await refreshGroups();
+      closeMobileSidebarIfNeeded();
       setNewGroupName("");
       setShowNewGroup(false);
       toast.success(`Created "${name}"`);
@@ -254,6 +263,7 @@ export default function Sidebar() {
                     aria-current={selectedGroupId === group.id && currentView === "todos" ? "page" : undefined}
                     onClick={() => {
                       selectGroup(group.id);
+                      closeMobileSidebarIfNeeded();
                     }}
                   >
                     <FolderOpen
@@ -364,6 +374,7 @@ export default function Sidebar() {
             key={item.id}
             onClick={() => {
               setCurrentView(item.id);
+              closeMobileSidebarIfNeeded();
             }}
             aria-current={currentView === item.id ? "page" : undefined}
             className={`sidebar-item w-full ${

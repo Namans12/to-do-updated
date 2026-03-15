@@ -36,7 +36,7 @@ export default function GraphConnectionInspector({
   const meta = connectionKindMeta[draftKind];
 
   return (
-    <aside className="absolute inset-x-3 bottom-3 z-30 rounded-3xl border border-slate-200/80 bg-white/95 p-3.5 shadow-xl backdrop-blur-md dark:border-slate-700/80 dark:bg-slate-900/90 lg:inset-x-auto lg:left-3 lg:top-0 lg:bottom-auto lg:w-[min(25rem,calc(100%-1.5rem))]">
+    <aside className="absolute inset-x-2 bottom-2 z-30 max-h-[min(72vh,36rem)] overflow-y-auto rounded-3xl border border-slate-200/80 bg-white/95 p-3 shadow-xl backdrop-blur-md dark:border-slate-700/80 dark:bg-slate-900/90 sm:inset-x-3 sm:bottom-3 sm:p-3.5 lg:inset-x-auto lg:left-3 lg:top-0 lg:bottom-auto lg:max-h-none lg:w-[min(25rem,calc(100%-1.5rem))] lg:overflow-visible">
       <div className="flex items-start gap-3">
         <div
           className="rounded-2xl p-3"
@@ -135,18 +135,18 @@ export default function GraphConnectionInspector({
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
             {connection.items.length} task{connection.items.length !== 1 ? "s" : ""} in this link
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="mt-2 grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
             <button
               type="button"
               onClick={onSave}
-              className="inline-flex items-center gap-2 rounded-2xl bg-indigo-500 px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-indigo-400"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-indigo-500 px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-indigo-400 sm:w-auto"
             >
               Save changes
             </button>
             <button
               type="button"
               onClick={onDelete}
-              className="inline-flex items-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10 sm:w-auto"
             >
               <Trash2 size={12} />
               Delete connection

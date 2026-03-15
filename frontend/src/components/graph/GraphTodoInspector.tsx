@@ -39,7 +39,7 @@ export default function GraphTodoInspector({
   onClose: () => void;
 }) {
   return (
-    <aside className="absolute inset-x-3 bottom-3 z-30 rounded-3xl border border-slate-200/80 bg-white/95 p-4 shadow-xl backdrop-blur-md dark:border-slate-700/80 dark:bg-slate-900/90 lg:inset-x-auto lg:left-3 lg:top-0 lg:bottom-auto lg:w-[min(26rem,calc(100%-1.5rem))]">
+    <aside className="absolute inset-x-2 bottom-2 z-30 max-h-[min(72vh,36rem)] overflow-y-auto rounded-3xl border border-slate-200/80 bg-white/95 p-3.5 shadow-xl backdrop-blur-md dark:border-slate-700/80 dark:bg-slate-900/90 sm:inset-x-3 sm:bottom-3 sm:p-4 lg:inset-x-auto lg:left-3 lg:top-0 lg:bottom-auto lg:max-h-none lg:w-[min(26rem,calc(100%-1.5rem))] lg:overflow-visible">
       <div className="flex items-start gap-3">
         <div className="rounded-2xl bg-indigo-500/10 p-3 text-indigo-500">
           <CheckSquare size={18} />
@@ -61,7 +61,7 @@ export default function GraphTodoInspector({
         </button>
       </div>
 
-      <div className="mt-4 space-y-3">
+      <div className="mt-3.5 space-y-3">
         <input
           value={draftTitle}
           onChange={(event) => onDraftTitleChange(event.target.value)}
@@ -128,11 +128,11 @@ export default function GraphTodoInspector({
             </select>
           </label>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={onSave} className="btn-primary !px-3 !py-2 text-xs">
+        <div className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
+          <button type="button" onClick={onSave} className="btn-primary w-full !px-3 !py-2 text-xs sm:w-auto">
             Save task
           </button>
-          <button type="button" onClick={onDelete} className="btn-ghost !px-3 !py-2 text-xs text-red-500">
+          <button type="button" onClick={onDelete} className="btn-ghost w-full !px-3 !py-2 text-xs text-red-500 sm:w-auto">
             <Trash2 size={12} />
             Delete task
           </button>

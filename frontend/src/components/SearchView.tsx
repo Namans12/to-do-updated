@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, type ReactNode } from "react";
 import { searchApi } from "../api/client";
 import type { SearchResult } from "../api/client";
 import { useApp } from "../context/AppContext";
-import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, Layers3, ChevronDown } from "lucide-react";
+import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, Layers3, ChevronDown, SlidersHorizontal } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import EmptyState from "./EmptyState";
 
@@ -20,8 +20,19 @@ export default function SearchView() {
   const [connectionKind, setConnectionKind] = useState<"all" | "sequence" | "dependency" | "branch" | "related">("all");
   const [planningLevel, setPlanningLevel] = useState<"all" | "0" | "1" | "2" | "3" | "4" | "5">("all");
   const [sort, setSort] = useState<"relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest">("relevance");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const activeFilterCount = [
+    completed !== "all",
+    !!groupId,
+    highPriority !== "all",
+    hasReminder !== "all",
+    connectionKind !== "all",
+    planningLevel !== "all",
+    sort !== "relevance",
+  ].filter(Boolean).length;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -71,7 +82,7 @@ export default function SearchView() {
   return (
     <div className="animate-fade-in">
       {/* Header */}
-      <div className="mb-8">
+      <div className="mb-6 sm:mb-8">
         <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3 mb-4">
           <Search size={24} className="text-slate-400" />
           Search
@@ -103,56 +114,93 @@ export default function SearchView() {
           )}
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <FilterSelect label="Status" value={completed} onChange={setCompleted}>
-            <option value="all">All status</option>
-            <option value="false">Active only</option>
-            <option value="true">Completed only</option>
-          </FilterSelect>
-          <FilterSelect label="Group" value={groupId} onChange={setGroupId}>
-            <option value="">All groups</option>
-            {groups.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name}
-              </option>
-            ))}
-          </FilterSelect>
-          <FilterSelect label="Priority" value={highPriority} onChange={setHighPriority}>
-            <option value="all">All priority</option>
-            <option value="true">High priority</option>
-            <option value="false">Normal priority</option>
-          </FilterSelect>
-          <FilterSelect label="Reminder" value={hasReminder} onChange={setHasReminder}>
-            <option value="all">All reminders</option>
-            <option value="true">Has reminder</option>
-            <option value="false">No reminder</option>
-          </FilterSelect>
-          <FilterSelect label="Connection" value={connectionKind} onChange={setConnectionKind}>
-            <option value="all">All connection kinds</option>
-            <option value="sequence">Sequence</option>
-            <option value="dependency">Dependency</option>
-            <option value="branch">Branch</option>
-            <option value="related">Related</option>
-          </FilterSelect>
-          <FilterSelect label="Level" value={planningLevel} onChange={setPlanningLevel}>
-            <option value="all">All levels</option>
-            {[0, 1, 2, 3, 4, 5].map((level) => (
-              <option key={level} value={String(level)}>
-                Level {level}
-              </option>
-            ))}
-          </FilterSelect>
-        </div>
+        <div className="mt-4 space-y-4">
+          <div className="flex items-center justify-between gap-3 md:hidden">
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((value) => !value)}
+              className="inline-flex min-h-[2.75rem] items-center gap-2 rounded-2xl border border-slate-200 bg-white/80 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition-colors hover:bg-white dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:bg-slate-900"
+            >
+              <SlidersHorizontal size={16} />
+              {filtersOpen ? "Hide filters" : "Show filters"}
+              {activeFilterCount > 0 && (
+                <span className="rounded-full bg-indigo-500 px-2 py-0.5 text-[11px] font-semibold text-white">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+            {activeFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCompleted("all");
+                  setGroupId("");
+                  setHighPriority("all");
+                  setHasReminder("all");
+                  setConnectionKind("all");
+                  setPlanningLevel("all");
+                  setSort("relevance");
+                }}
+                className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 transition-colors hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                Reset
+              </button>
+            )}
+          </div>
 
-        <div className="mt-4 flex justify-center">
-          <div className="w-full max-w-md">
-          <FilterSelect label="Sort" value={sort} onChange={setSort}>
-            <option value="relevance">Best match</option>
-            <option value="created_oldest">Created oldest first</option>
-            <option value="created_newest">Created newest first</option>
-            <option value="updated_oldest">Updated oldest first</option>
-            <option value="updated_newest">Updated newest first</option>
-          </FilterSelect>
+          <div className={`${filtersOpen ? "block" : "hidden"} space-y-4 md:block`}>
+            <div className="grid gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <FilterSelect label="Status" value={completed} onChange={setCompleted}>
+                <option value="all">All status</option>
+                <option value="false">Active only</option>
+                <option value="true">Completed only</option>
+              </FilterSelect>
+              <FilterSelect label="Group" value={groupId} onChange={setGroupId}>
+                <option value="">All groups</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </FilterSelect>
+              <FilterSelect label="Priority" value={highPriority} onChange={setHighPriority}>
+                <option value="all">All priority</option>
+                <option value="true">High priority</option>
+                <option value="false">Normal priority</option>
+              </FilterSelect>
+              <FilterSelect label="Reminder" value={hasReminder} onChange={setHasReminder}>
+                <option value="all">All reminders</option>
+                <option value="true">Has reminder</option>
+                <option value="false">No reminder</option>
+              </FilterSelect>
+              <FilterSelect label="Connection" value={connectionKind} onChange={setConnectionKind}>
+                <option value="all">All connection kinds</option>
+                <option value="sequence">Sequence</option>
+                <option value="dependency">Dependency</option>
+                <option value="branch">Branch</option>
+                <option value="related">Related</option>
+              </FilterSelect>
+              <FilterSelect label="Level" value={planningLevel} onChange={setPlanningLevel}>
+                <option value="all">All levels</option>
+                {[0, 1, 2, 3, 4, 5].map((level) => (
+                  <option key={level} value={String(level)}>
+                    Level {level}
+                  </option>
+                ))}
+              </FilterSelect>
+            </div>
+
+            <div className="flex justify-center md:justify-center">
+              <div className="w-full max-w-full sm:max-w-md">
+                <FilterSelect label="Sort" value={sort} onChange={setSort}>
+                  <option value="relevance">Best match</option>
+                  <option value="created_oldest">Created oldest first</option>
+                  <option value="created_newest">Created newest first</option>
+                  <option value="updated_oldest">Updated oldest first</option>
+                  <option value="updated_newest">Updated newest first</option>
+                </FilterSelect>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -214,6 +262,7 @@ export default function SearchView() {
                     ? "border-emerald-500 ring-1 ring-emerald-400/35 shadow-[0_0_0_1px_rgba(16,185,129,0.25)] hover:ring-emerald-400/60"
                     : "border-indigo-500 ring-1 ring-indigo-400/35 shadow-[0_0_0_1px_rgba(99,102,241,0.25)] hover:ring-indigo-400/60"
                 }`}
+                whileTap={{ scale: 0.985 }}
               >
                 <div className="flex items-start gap-3">
                   <div
@@ -237,7 +286,7 @@ export default function SearchView() {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 mb-1">
+                    <div className="mb-1 flex flex-wrap items-center gap-1.5">
                       <FolderOpen size={11} className="text-slate-500 dark:text-slate-400" />
                           <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
                         Group: {item.group?.name ?? "Unknown group"}

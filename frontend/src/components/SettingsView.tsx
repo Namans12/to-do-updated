@@ -342,7 +342,7 @@ export default function SettingsView() {
   };
 
   return (
-    <div className="animate-fade-in space-y-8">
+    <div className="animate-fade-in space-y-6 sm:space-y-8">
       <div>
         <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
           <Settings size={24} className="text-slate-400" />
@@ -353,7 +353,7 @@ export default function SettingsView() {
         </p>
       </div>
 
-      <section className="grid gap-4 xl:grid-cols-2">
+      <section className="grid gap-4 lg:grid-cols-2">
         <Panel
           title="App Preferences"
           description="Small defaults that shape day-to-day task editing and navigation."
@@ -613,7 +613,7 @@ export default function SettingsView() {
             description="Create offline restore points before bigger edits or experiments."
             icon={<DatabaseBackup size={16} className="text-emerald-500" />}
           >
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-sm font-medium">Create a snapshot</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">
@@ -635,7 +635,7 @@ export default function SettingsView() {
                     key={backup.id}
                     className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
                   >
-                    <div className="flex items-start justify-between gap-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="text-sm font-medium">{backup.label}</div>
                         <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -755,7 +755,7 @@ export default function SettingsView() {
                   key={template.id}
                   className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
                 >
-                  <div className="flex items-start justify-between gap-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <div className="text-sm font-medium">{template.name}</div>
                       {template.description && (
@@ -797,7 +797,7 @@ export default function SettingsView() {
           description="A quick snapshot of what the app is currently holding."
           icon={<ShieldCheck size={16} className="text-amber-500" />}
         >
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {Object.entries(stats).map(([label, value]) => (
               <div
                 key={label}
@@ -825,13 +825,13 @@ export default function SettingsView() {
             description="Create, update, complete, connect, or back up something and it will show up here."
           />
         ) : (
-          <div className="space-y-2">
+        <div className="space-y-2">
             {activity.map((entry) => (
               <div
                 key={entry.id}
                 className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
               >
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-sm font-medium">{entry.summary}</div>
                     <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -863,7 +863,7 @@ function Panel({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/50 p-5 shadow-sm">
+    <section className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/50 p-4 sm:p-5 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="rounded-2xl bg-slate-100 dark:bg-slate-800 p-3">{icon}</div>
         <div>

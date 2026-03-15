@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type PointerEvent as ReactPointerEvent } from "react";
 import { useApp } from "../context/AppContext";
 import { todosApi, connectionsApi } from "../api/client";
 import type { Connection, Todo, ConnectionKind, GraphLayoutMode } from "../types";
@@ -375,6 +375,8 @@ export default function GraphView() {
   const [draftTodoParentId, setDraftTodoParentId] = useState("");
   const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>(settings.graphDefaultLayout);
   const [nearBoundary, setNearBoundary] = useState({ right: false, bottom: false });
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTargetRef = useRef<string | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({
     w: BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W,
@@ -1171,9 +1173,20 @@ export default function GraphView() {
 
   /* ── Drag: move node ────────────────────────────── */
 
-  const onNodeDown = (e: React.MouseEvent, id: string) => {
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressTargetRef.current = null;
+  }, []);
+
+  const onNodeDown = (e: ReactPointerEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
+    if ("pointerId" in e) {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    }
     const p = positions[id];
     if (!p) return;
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -1187,6 +1200,21 @@ export default function GraphView() {
       y: contentY - p.y,
     });
   };
+
+  const onNodeCardPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>, id: string) => {
+      if (e.pointerType !== "touch" && e.pointerType !== "pen") return;
+      clearLongPress();
+      longPressTargetRef.current = id;
+      longPressTimerRef.current = setTimeout(() => {
+        if (draggingNode || longPressTargetRef.current !== id) return;
+        setSelectedTodoId(id);
+        setSelectedConnectionId(null);
+        clearLongPress();
+      }, 420);
+    },
+    [clearLongPress, draggingNode]
+  );
 
   /* ── Drag: connect ──────────────────────────────── */
 
@@ -1340,6 +1368,7 @@ export default function GraphView() {
   );
 
   const onPointerUp = useCallback(() => {
+    clearLongPress();
     if (draggingNode) {
       const moved = draggingNode;
       const fused = getFusedComponent(moved);
@@ -1391,6 +1420,7 @@ export default function GraphView() {
       setHoverTarget(null);
     }
   }, [
+    clearLongPress,
     draggingNode,
     connectDrag,
     positions,
@@ -1411,6 +1441,8 @@ export default function GraphView() {
       window.removeEventListener("pointercancel", onPointerUp);
     };
   }, [onPointerMove, onPointerUp]);
+
+  useEffect(() => () => clearLongPress(), [clearLongPress]);
 
   useEffect(() => {
     const syncFullscreen = () => {
@@ -1803,7 +1835,7 @@ export default function GraphView() {
   return (
     <div className="animate-fade-in" >
       {/* Header */}
-      <div className="mb-6">
+      <div className="mb-5 sm:mb-6">
         <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
           <GitBranch size={24} className="text-indigo-500" />
           GraphPlan
@@ -1811,14 +1843,16 @@ export default function GraphView() {
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           Drag between ports to connect tasks &middot; Max 2 connections per task
         </p>
-        <div className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-slate-200/80 bg-white/70 px-3 py-2 text-xs text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/60 dark:text-slate-300">
+        <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-2xl border border-slate-200/80 bg-white/70 px-3 py-2 text-xs text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/60 dark:text-slate-300">
           <Sparkles size={12} className="text-indigo-500" />
-          Current auto-layout: <span className="font-semibold text-slate-700 dark:text-slate-100">{layoutLabelMap[layoutMode]}</span>
+          <span className="truncate">
+            Current auto-layout: <span className="font-semibold text-slate-700 dark:text-slate-100">{layoutLabelMap[layoutMode]}</span>
+          </span>
         </div>
       </div>
 
       {/* Group pills */}
-      <div className="mb-5 overflow-x-auto overflow-y-hidden no-scrollbar">
+      <div className="mb-4 overflow-x-auto overflow-y-hidden no-scrollbar sm:mb-5">
         <div className="flex w-max min-w-full gap-2 pb-1">
         {groups.map((g) => (
           <button
@@ -1828,14 +1862,14 @@ export default function GraphView() {
               setSelectedConnectionId(null);
               setSelectedTodoId(null);
             }}
-            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
+            className={`inline-flex min-h-[2.75rem] items-center gap-1.5 whitespace-nowrap rounded-2xl px-3 py-2.5 text-xs font-medium transition-all duration-200 sm:px-4 sm:py-2 sm:text-sm ${
               groupId === g.id
                 ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 scale-[1.02]"
                 : "glass text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:scale-[1.02]"
             }`}
           >
-            <FolderOpen size={14} />
-            {g.name}
+            <FolderOpen size={14} className="shrink-0" />
+            <span className="max-w-[18ch] truncate">{g.name}</span>
           </button>
         ))}
         </div>
@@ -1876,7 +1910,7 @@ export default function GraphView() {
           />
           <div className="pointer-events-none absolute left-3 top-16 z-20 sm:hidden">
             <div className="rounded-full bg-slate-900/85 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-white shadow-sm dark:bg-slate-100/90 dark:text-slate-900">
-              Double-tap a task to edit
+              Long-press or double-tap to edit
             </div>
           </div>
 
@@ -1929,8 +1963,8 @@ export default function GraphView() {
             className="relative rounded-2xl overflow-auto no-scrollbar border border-slate-200 dark:border-slate-800"
             style={{
               width: "100%",
-              minHeight: isFullscreen ? 0 : 600,
-              height: isFullscreen ? "calc(100vh - 40px)" : "calc(100vh - 250px)",
+              minHeight: isFullscreen ? 0 : 520,
+              height: isFullscreen ? "calc(100vh - 40px)" : "calc(100vh - 210px)",
               background:
                 "radial-gradient(circle at 1px 1px, rgba(148,163,184,0.12) 1px, transparent 0)",
               backgroundSize: `${GRID}px ${GRID}px`,
@@ -2467,6 +2501,10 @@ export default function GraphView() {
 
                   {/* Card */}
                   <div
+                    onPointerDown={(e) => onNodeCardPointerDown(e, todo.id)}
+                    onPointerUp={clearLongPress}
+                    onPointerCancel={clearLongPress}
+                    onPointerLeave={clearLongPress}
                     onDoubleClick={() => {
                       if (!isDragging) {
                         setSelectedTodoId(todo.id);
@@ -2495,8 +2533,8 @@ export default function GraphView() {
                   >
                     {/* Drag handle + toggle */}
                     <div
-                      onMouseDown={(e) => onNodeDown(e, todo.id)}
-                      className="flex items-center gap-2 px-3 py-2.5 cursor-grab active:cursor-grabbing rounded-t-[10px] transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40"
+                      onPointerDown={(e) => onNodeDown(e, todo.id)}
+                      className="flex items-center gap-2 rounded-t-[10px] px-3 py-2.5 cursor-grab active:cursor-grabbing touch-none transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40"
                     >
                       <button
                         onMouseDown={(e) => e.stopPropagation()}

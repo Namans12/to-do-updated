@@ -32,10 +32,10 @@ export default function GraphToolbar({
   onQuickAdd,
 }: GraphToolbarProps) {
   const buttonClassName =
-    "h-10 w-10 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150 sm:h-8 sm:w-8 sm:rounded-lg";
+    "flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white/80 shadow-md backdrop-blur-sm transition-all duration-150 hover:bg-white hover:shadow-lg dark:border-slate-700 dark:bg-slate-900/80 dark:hover:bg-slate-800 sm:h-9 sm:w-9 touch-manipulation";
 
   return (
-    <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
+    <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-2 sm:flex-row sm:items-center">
       {onQuickAdd && (
         <button
           onClick={onQuickAdd}
@@ -64,7 +64,7 @@ export default function GraphToolbar({
         title={isCutMode ? "Exit cut mode" : "Cut edges"}
         aria-label={isCutMode ? "Exit cut mode" : "Enter cut mode"}
         aria-pressed={isCutMode}
-        className={`w-8 h-8 rounded-lg backdrop-blur-sm border flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-150 ${
+        className={`flex h-10 w-10 items-center justify-center rounded-xl border shadow-md backdrop-blur-sm transition-all duration-150 hover:shadow-lg sm:h-9 sm:w-9 touch-manipulation ${
           isCutMode
             ? "bg-rose-500 text-white border-rose-400"
             : "bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800"

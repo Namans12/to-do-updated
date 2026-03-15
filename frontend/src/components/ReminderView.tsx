@@ -146,7 +146,7 @@ export default function ReminderView() {
   }, [visibleTodos]);
 
   return (
-    <div className="animate-fade-in space-y-8">
+    <div className="animate-fade-in space-y-6 sm:space-y-8">
       <div>
         <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
           <AlarmClock size={24} className="text-slate-400" />
@@ -155,7 +155,7 @@ export default function ReminderView() {
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           Overdue, due today, upcoming, and unplanned tasks in one place.
         </p>
-        <div className="mt-4 inline-flex rounded-2xl border border-slate-200 bg-white/70 p-1 text-sm shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+        <div className="mt-4 grid w-full max-w-md grid-cols-2 rounded-2xl border border-slate-200 bg-white/70 p-1 text-sm shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
           <button
             type="button"
             onClick={() => setMode("agenda")}
@@ -184,7 +184,7 @@ export default function ReminderView() {
           const items = buckets[section.key];
           return (
             <section key={section.key} className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h3 className={`text-sm font-semibold uppercase tracking-[0.18em] ${section.accent}`}>
                     {section.title}
@@ -217,7 +217,7 @@ export default function ReminderView() {
                           }`}
                         />
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">
                               {todo.title}
                             </span>
@@ -260,10 +260,10 @@ export default function ReminderView() {
           description="Add reminders, planning levels, or parent tasks and they’ll stack into a simple roadmap here."
         />
       ) : (
-        <div className="space-y-5">
+        <div className="space-y-4 sm:space-y-5">
           {roadmapSections.map(([label, items]) => (
             <section key={label} className="rounded-3xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-indigo-500">
                     {label}
