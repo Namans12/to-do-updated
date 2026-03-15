@@ -118,7 +118,7 @@ export default function ConnectionView() {
           onAction={() => setModalOpen(true)}
         />
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-4 md:space-y-6">
           <AnimatePresence>
             {connections.map((conn) => (
               <ConnectionCard
