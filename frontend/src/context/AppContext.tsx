@@ -7,7 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import type { Group, Todo, Connection, View } from "../types";
+import type { AppSettings, Group, Todo, Connection, View } from "../types";
 import { groupsApi, todosApi, connectionsApi } from "../api/client";
 import toast from "react-hot-toast";
 
@@ -29,6 +29,7 @@ interface AppState {
     highPriority: boolean;
     groupName: string;
   } | null;
+  settings: AppSettings;
 }
 
 interface AppContextType extends AppState {
@@ -44,10 +45,19 @@ interface AppContextType extends AppState {
   ensureAllTodosLoaded: () => Promise<Todo[]>;
   setSidebarOpen: (open: boolean) => void;
   stopReminderAlarm: () => Promise<void>;
+  updateSettings: (settings: Partial<AppSettings>) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
 const REMINDER_ACK_KEY = "nodes-todo-reminder-ack";
+const APP_SETTINGS_KEY = "nodes-todo-settings";
+
+const DEFAULT_SETTINGS: AppSettings = {
+  defaultReminderTime: "10:00",
+  showShortcutHintsOnStart: true,
+  showDebugStats: true,
+  showGraphBoundaryHint: true,
+};
 
 function readReminderAcks(): Record<string, string> {
   try {
@@ -61,6 +71,20 @@ function readReminderAcks(): Record<string, string> {
 
 function writeReminderAcks(value: Record<string, string>) {
   localStorage.setItem(REMINDER_ACK_KEY, JSON.stringify(value));
+}
+
+function readSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(APP_SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<AppSettings>) };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function writeSettings(value: AppSettings) {
+  localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(value));
 }
 
 function buildAllTodosSnapshot(
@@ -97,6 +121,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     loading: true,
     sidebarOpen: true,
     activeReminderAlarm: null,
+    settings: readSettings(),
   });
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
@@ -273,13 +298,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     acks[alarmToStop.todoId] = alarmToStop.reminderAt;
     writeReminderAcks(acks);
     try {
-      // Alarm acknowledged: clear reminder date/time from the todo.
-      await todosApi.update(alarmToStop.todoId, { reminder_at: null });
+      await todosApi.acknowledgeReminder(alarmToStop.todoId);
       await refreshTodos();
     } catch {
       // Keep UX smooth if clearing reminder fails.
     }
   }, [state.activeReminderAlarm, refreshTodos]);
+
+  const updateSettings = useCallback((settingsUpdate: Partial<AppSettings>) => {
+    setState((s) => {
+      const nextSettings = { ...s.settings, ...settingsUpdate };
+      writeSettings(nextSettings);
+      return { ...s, settings: nextSettings };
+    });
+  }, []);
 
   const checkDueReminders = useCallback(async () => {
     try {
@@ -473,6 +505,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ensureAllTodosLoaded,
         setSidebarOpen,
         stopReminderAlarm,
+        updateSettings,
       }}
     >
       {children}

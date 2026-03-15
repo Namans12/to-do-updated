@@ -21,6 +21,7 @@ import toast from "react-hot-toast";
 import EmptyState from "./EmptyState";
 import { getActionErrorMessage } from "../utils/errors";
 import type { ConnectionKind } from "../types";
+import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
 
 export default function ConnectionView() {
   const { refreshTodos, refreshConnections, connections, groups, loading: appLoading } = useApp();
@@ -219,10 +220,8 @@ function ConnectionCard({
       : connection.items.map((item) => item.todo_id);
 
   // Find the first incomplete task (the "next" one)
-  const nextTaskIndex = reorderList.findIndex((todoId) => {
-    const item = itemByTodoId.get(todoId);
-    return item ? !item.is_completed : false;
-  });
+  const nextTask = getConnectionNextItem(connection);
+  const nextTaskIndex = reorderList.findIndex((todoId) => todoId === nextTask?.todo_id);
 
   const persistReorder = async (todoIds: string[]) => {
     try {
@@ -345,9 +344,9 @@ function ConnectionCard({
                 onChange={(e) => onEditKindChange(e.target.value as ConnectionKind)}
                 className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs"
               >
-                {Object.entries(kindLabel).map(([value, label]) => (
+                {Object.entries(connectionKindMeta).map(([value, meta]) => (
                   <option key={value} value={value}>
-                    {label}
+                    {meta.label}
                   </option>
                 ))}
               </select>
@@ -371,9 +370,14 @@ function ConnectionCard({
             </h3>
           )}
           {!isEditing && (
-            <span className="mt-1 inline-flex rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
-              {kindLabel[connection.kind]}
-            </span>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="inline-flex rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                {connectionKindMeta[connection.kind].label}
+              </span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                {connectionKindMeta[connection.kind].description}
+              </span>
+            </div>
           )}
         </div>
 
@@ -418,13 +422,20 @@ function ConnectionCard({
           <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
             {progress.completed}/{progress.total} steps
           </span>
-          <span
-            className={`text-[11px] font-bold ${
-              is_fully_complete ? "text-emerald-500" : "text-indigo-500"
-            }`}
-          >
-            {progress.percentage}%
-          </span>
+          <div className="text-right">
+            <span
+              className={`block text-[11px] font-bold ${
+                is_fully_complete ? "text-emerald-500" : "text-indigo-500"
+              }`}
+            >
+              {progress.percentage}%
+            </span>
+            {!is_fully_complete && (
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                {progress.available_count} ready · {progress.blocked_count} blocked
+              </span>
+            )}
+          </div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
           <motion.div
@@ -537,8 +548,11 @@ function ConnectionCard({
                               ? "text-amber-700 dark:text-amber-300"
                               : "text-slate-700 dark:text-slate-300"
                           }`}
-                        >
+                            >
                           {item.title}
+                        </span>
+                        <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                          {getConnectionSequenceLabel(connection, index, item)}
                         </span>
                         {isNext && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-500/10 text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
@@ -557,7 +571,11 @@ function ConnectionCard({
                       <div className="flex items-center gap-1 mt-1 opacity-60">
                         <FolderOpen size={10} className="text-slate-400 dark:text-slate-500" />
                         <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                          Step {index + 1} of {reorderList.length}
+                          {connection.kind === "branch"
+                            ? index === 0
+                              ? "Root task"
+                              : `Branch ${index} of ${Math.max(reorderList.length - 1, 1)}`
+                            : `Step ${index + 1} of ${reorderList.length}`}
                         </span>
                       </div>
                     </div>
@@ -571,9 +589,3 @@ function ConnectionCard({
     </motion.div>
   );
 }
-  const kindLabel: Record<ConnectionKind, string> = {
-    sequence: "Sequence",
-    dependency: "Dependency",
-    branch: "Branch",
-    related: "Related",
-  };

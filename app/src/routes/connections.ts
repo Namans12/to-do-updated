@@ -3,6 +3,7 @@ import { eq, and, asc, sql, isNull, inArray, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
 import { connections, connectionItems, todos } from "../db/schema.js";
+import { logActivity } from "../lib/activity.js";
 
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
@@ -37,6 +38,38 @@ function buildConnectionResponse(
   const total = items.length;
   const completed = items.filter((i) => i.is_completed === 1).length;
   const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const incompleteItems = items.filter((item) => item.is_completed !== 1);
+  let blockedCount = 0;
+  let availableCount = incompleteItems.length;
+  let nextAvailableItemId: string | null = incompleteItems[0]?.todo_id ?? null;
+
+  if (connection.kind === "dependency") {
+    const firstIncompleteIndex = items.findIndex((item) => item.is_completed !== 1);
+    if (firstIncompleteIndex === -1) {
+      availableCount = 0;
+      blockedCount = 0;
+      nextAvailableItemId = null;
+    } else {
+      availableCount = 1;
+      blockedCount = items
+        .slice(firstIncompleteIndex + 1)
+        .filter((item) => item.is_completed !== 1).length;
+      nextAvailableItemId = items[firstIncompleteIndex]!.todo_id;
+    }
+  } else if (connection.kind === "branch") {
+    const root = items[0] ?? null;
+    const branchItems = items.slice(1);
+    const rootIncomplete = !!root && root.is_completed !== 1;
+    if (rootIncomplete) {
+      availableCount = 1;
+      blockedCount = branchItems.filter((item) => item.is_completed !== 1).length;
+      nextAvailableItemId = root.todo_id;
+    } else {
+      availableCount = incompleteItems.length;
+      blockedCount = 0;
+      nextAvailableItemId = incompleteItems[0]?.todo_id ?? null;
+    }
+  }
 
   return {
     id: connection.id,
@@ -56,6 +89,9 @@ function buildConnectionResponse(
       total,
       completed,
       percentage,
+      blocked_count: blockedCount,
+      available_count: availableCount,
+      next_available_item_id: nextAvailableItemId,
     },
     is_fully_complete: total > 0 && completed === total,
     created_at: connection.created_at,
@@ -198,6 +234,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      if (normalizedKind === "branch" && todoIds.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
 
       const now = new Date().toISOString();
       const connectionId = uuidv4();
@@ -253,6 +295,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "created",
+        summary: `Created ${normalizedKind} connection${trimmedName ? ` "${trimmedName}"` : ""}`,
+        payload: {
+          todo_ids: todoIds,
+          kind: normalizedKind,
+        },
+      });
 
       return c.json({ data: response }, 201);
     } catch (error: any) {
@@ -372,6 +424,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      const existingItems = getConnectionItems(drizzleDb, id);
+      if (normalizedKind === "branch" && existingItems.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
 
       drizzleDb
         .update(connections)
@@ -388,6 +447,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, id);
       const response = buildConnectionResponse(updated, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: id,
+        action: "updated",
+        summary: `Updated connection${updated.name ? ` "${updated.name}"` : ""}`,
+        payload: {
+          kind: normalizedKind,
+          name: updatedName,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -525,6 +594,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      const mergedKind = fromConnection.kind;
+      if (mergedKind === "branch" && mergedTodoIds.length > 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
       const dedup = new Set(mergedTodoIds);
       if (dedup.size !== mergedTodoIds.length) {
         return c.json({ error: "Merged chain produced duplicate todos" }, 400);
@@ -567,6 +643,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         .get()!;
       const updatedItems = getConnectionItems(drizzleDb, fromConnectionId);
       const response = buildConnectionResponse(updated, updatedItems);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: fromConnectionId,
+        action: "merged",
+        summary: `Merged two connections into ${updated.name ?? "a shared chain"}`,
+        payload: {
+          todo_ids: mergedTodoIds,
+          merged_connection_id: toConnectionId,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -706,6 +792,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
               .where(eq(connections.id, newConnectionId))
               .get()
           : null;
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "cut",
+        summary: `Cut a connection into ${leftConn ? "left" : "single"} and ${rightConn ? "right" : "single"} parts`,
+        payload: {
+          from_todo_id: fromTodoId,
+          to_todo_id: toTodoId,
+          left_count: left.length,
+          right_count: right.length,
+        },
+      });
 
       return c.json({
         data: {
@@ -812,6 +910,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      if (connection.kind === "branch" && nextPosition >= 3) {
+        return c.json(
+          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          400
+        );
+      }
 
       // Insert the new connection item
       drizzleDb
@@ -827,6 +931,16 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       // Return the updated connection
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "item_added",
+        summary: `Added "${todo.title}" to a connection`,
+        payload: {
+          todo_id: todoId,
+          connection_id: connectionId,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -922,6 +1036,15 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(connection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "reordered",
+        summary: `Reordered tasks inside a connection`,
+        payload: {
+          todo_ids: todoIds,
+        },
+      });
 
       return c.json({ data: response });
     } catch (error: any) {
@@ -993,6 +1116,14 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         });
         transaction();
 
+        logActivity(drizzleDb, {
+          entity_type: "connection",
+          entity_id: connectionId,
+          action: "deleted",
+          summary: `Deleted a connection after removing "${todoId}"`,
+          payload: { todo_id: todoId },
+        });
+
         return c.json({
           data: { message: "Connection deleted (minimum size not met)" },
         });
@@ -1018,6 +1149,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       const items = getConnectionItems(drizzleDb, connectionId);
       const response = buildConnectionResponse(updatedConnection, items);
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: connectionId,
+        action: "item_removed",
+        summary: `Removed a task from a connection`,
+        payload: { todo_id: todoId },
+      });
 
       return c.json({ data: response });
     } catch {
@@ -1055,6 +1193,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           .run();
       });
       transaction();
+      logActivity(drizzleDb, {
+        entity_type: "connection",
+        entity_id: id,
+        action: "deleted",
+        summary: `Deleted connection${connection.name ? ` "${connection.name}"` : ""}`,
+      });
 
       return c.json({
         data: { message: "Connection deleted successfully" },

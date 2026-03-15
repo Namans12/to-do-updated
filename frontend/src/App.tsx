@@ -7,6 +7,7 @@ import SearchView from "./components/SearchView";
 import GraphView from "./components/GraphView";
 import ReminderView from "./components/ReminderView";
 import ReminderAlarmModal from "./components/ReminderAlarmModal";
+import SettingsView from "./components/SettingsView";
 import { Keyboard, Menu } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -20,8 +21,17 @@ export default function App() {
     stopReminderAlarm,
     setCurrentView,
     selectedGroupId,
+    settings,
   } = useApp();
   const [showShortcuts, setShowShortcuts] = useState(false);
+
+  useEffect(() => {
+    if (!settings.showShortcutHintsOnStart) return;
+    const seenKey = "nodes-todo-shortcuts-seen";
+    if (localStorage.getItem(seenKey)) return;
+    setShowShortcuts(true);
+    localStorage.setItem(seenKey, "true");
+  }, [settings.showShortcutHintsOnStart]);
 
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null) => {
@@ -95,6 +105,11 @@ export default function App() {
         case "R":
           event.preventDefault();
           setCurrentView("planner");
+          return;
+        case "s":
+        case "S":
+          event.preventDefault();
+          setCurrentView("settings");
           return;
         case "f":
         case "F":
@@ -199,7 +214,11 @@ export default function App() {
         >
           <div
             className={`mx-auto px-4 sm:px-6 lg:px-8 ${
-              currentView === "graph" ? "max-w-6xl py-4 h-full" : "max-w-3xl py-8"
+              currentView === "graph"
+                ? "max-w-6xl py-4 h-full"
+                : currentView === "search"
+                ? "max-w-7xl py-8"
+                : "max-w-3xl py-8"
             }`}
           >
             {currentView === "todos" && <TodoList />}
@@ -208,6 +227,7 @@ export default function App() {
             {currentView === "search" && <SearchView />}
             {currentView === "graph" && <GraphView />}
             {currentView === "planner" && <ReminderView />}
+            {currentView === "settings" && <SettingsView />}
           </div>
         </div>
       </main>
@@ -249,6 +269,7 @@ export default function App() {
                 ["C", "Open Connections"],
                 ["G", "Open GraphPlan"],
                 ["R", "Open Agenda"],
+                ["S", "Open Settings"],
                 ["F", "Toggle GraphPlan fullscreen"],
                 ["?", "Open or close this shortcut list"],
               ].map(([key, description]) => (

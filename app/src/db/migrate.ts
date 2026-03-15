@@ -25,9 +25,14 @@ export function runMigrations(dbPath?: string): void {
       description TEXT,
       high_priority INTEGER NOT NULL DEFAULT 0,
       reminder_at TEXT,
+      recurrence_rule TEXT,
+      recurrence_enabled INTEGER NOT NULL DEFAULT 0,
+      next_occurrence_at TEXT,
       is_completed INTEGER NOT NULL DEFAULT 0,
       completed_at TEXT,
       position INTEGER NOT NULL DEFAULT 0,
+      parent_todo_id TEXT,
+      planning_level INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -46,6 +51,16 @@ export function runMigrations(dbPath?: string): void {
       todo_id TEXT NOT NULL REFERENCES todos(id),
       position INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload_json TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Backward-compatible migration for existing databases.
@@ -61,8 +76,23 @@ export function runMigrations(dbPath?: string): void {
   if (!todoColumns.some((col) => col.name === "reminder_at")) {
     sqlite.exec("ALTER TABLE todos ADD COLUMN reminder_at TEXT");
   }
+  if (!todoColumns.some((col) => col.name === "recurrence_rule")) {
+    sqlite.exec("ALTER TABLE todos ADD COLUMN recurrence_rule TEXT");
+  }
+  if (!todoColumns.some((col) => col.name === "recurrence_enabled")) {
+    sqlite.exec("ALTER TABLE todos ADD COLUMN recurrence_enabled INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!todoColumns.some((col) => col.name === "next_occurrence_at")) {
+    sqlite.exec("ALTER TABLE todos ADD COLUMN next_occurrence_at TEXT");
+  }
   if (!todoColumns.some((col) => col.name === "completed_at")) {
     sqlite.exec("ALTER TABLE todos ADD COLUMN completed_at TEXT");
+  }
+  if (!todoColumns.some((col) => col.name === "parent_todo_id")) {
+    sqlite.exec("ALTER TABLE todos ADD COLUMN parent_todo_id TEXT");
+  }
+  if (!todoColumns.some((col) => col.name === "planning_level")) {
+    sqlite.exec("ALTER TABLE todos ADD COLUMN planning_level INTEGER NOT NULL DEFAULT 0");
   }
   const connectionColumns = sqlite.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
   if (!connectionColumns.some((col) => col.name === "kind")) {

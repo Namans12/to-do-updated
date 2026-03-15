@@ -112,6 +112,27 @@ describe("Todos CRUD API", () => {
       expect(body.data.reminder_at).toBeDefined();
     });
 
+    it("should create a recurring reminder task with planning metadata", async () => {
+      const reminderAt = new Date(Date.now() + 60_000).toISOString();
+      const res = await ctx.app.request(`/api/groups/${testGroupId}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Recurring",
+          reminder_at: reminderAt,
+          recurrence_rule: "daily",
+          planning_level: 2,
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(201);
+      expect(body.data.recurrence_rule).toBe("daily");
+      expect(body.data.recurrence_enabled).toBe(1);
+      expect(body.data.next_occurrence_at).toBe(body.data.reminder_at);
+      expect(body.data.planning_level).toBe(2);
+    });
+
     it("should auto-set position to end of group list", async () => {
       const { body: body1 } = await createTodo(testGroupId, "First");
       const { body: body2 } = await createTodo(testGroupId, "Second");
@@ -407,6 +428,30 @@ describe("Todos CRUD API", () => {
       expect(body.data.reminder_at).toBeDefined();
     });
 
+    it("should update recurrence and parent task", async () => {
+      const { body: parent } = await createTodo(testGroupId, "parent");
+      const { body: child } = await createTodo(testGroupId, "child");
+      const reminderAt = new Date(Date.now() + 120_000).toISOString();
+
+      const res = await ctx.app.request(`/api/todos/${child.data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reminder_at: reminderAt,
+          recurrence_rule: "weekly",
+          planning_level: 3,
+          parent_todo_id: parent.data.id,
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.data.recurrence_rule).toBe("weekly");
+      expect(body.data.recurrence_enabled).toBe(1);
+      expect(body.data.parent_todo_id).toBe(parent.data.id);
+      expect(body.data.planning_level).toBe(3);
+    });
+
     it("should update updated_at timestamp", async () => {
       const { body: created } = await createTodo(testGroupId, "timestamped");
       const todoId = created.data.id;
@@ -564,6 +609,32 @@ describe("Todos CRUD API", () => {
       expect(res.status).toBe(404);
       const body = await res.json();
       expect(body.error).toContain("not found");
+    });
+  });
+
+  describe("POST /api/todos/:id/reminder/ack", () => {
+    it("should advance a recurring reminder to the next occurrence", async () => {
+      const reminderAt = new Date(Date.now() + 60_000).toISOString();
+      const createRes = await ctx.app.request(`/api/groups/${testGroupId}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Recurring",
+          reminder_at: reminderAt,
+          recurrence_rule: "daily",
+        }),
+      });
+      const created = await createRes.json();
+
+      const res = await ctx.app.request(`/api/todos/${created.data.id}/reminder/ack`, {
+        method: "POST",
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.data.reminder_at).not.toBe(reminderAt);
+      expect(body.data.recurrence_enabled).toBe(1);
+      expect(new Date(body.data.reminder_at).getTime()).toBeGreaterThan(new Date(reminderAt).getTime());
     });
   });
 

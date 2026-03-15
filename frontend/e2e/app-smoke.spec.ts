@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test("main app flow covers shortcuts, reminders, and connection meaning", async ({ page }) => {
   const unique = Date.now();
   const groupName = `E2E Group ${unique}`;
+  const secondGroupName = `Second Group ${unique}`;
   const firstTodo = `Plan launch ${unique}`;
   const secondTodo = `Ship checklist ${unique}`;
   const reminderDate = new Date(Date.now() + 86_400_000);
@@ -13,9 +14,15 @@ test("main app flow covers shortcuts, reminders, and connection meaning", async 
 
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Create group" }).click().catch(() => undefined);
-  await page.getByPlaceholder("Group name...").fill(groupName);
-  await page.keyboard.press("Enter");
+  const shortcutDialog = page.getByRole("heading", { name: "Keyboard Shortcuts" });
+  if (await shortcutDialog.isVisible().catch(() => false)) {
+    await page.keyboard.press("Escape");
+    await expect(shortcutDialog).not.toBeVisible();
+  }
+  await page.request.post("/api/groups", { data: { name: groupName } });
+  await page.request.post("/api/groups", { data: { name: secondGroupName } });
+  await page.reload();
+  await page.getByText(groupName, { exact: true }).click();
   await expect(page.getByRole("heading", { name: groupName, exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: /Add a to-do/i }).click();
@@ -44,13 +51,17 @@ test("main app flow covers shortcuts, reminders, and connection meaning", async 
 
   await page.getByRole("button", { name: "Connections" }).click();
   await page.getByRole("button", { name: /New Connection/i }).click();
-  await page.getByRole("button", { name: groupName }).click();
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await modal.getByRole("button", { name: groupName }).click();
+  await modal.getByRole("button", { name: secondGroupName }).click();
+  await expect(page.getByText("No more tasks in this group.")).toBeVisible();
+  await modal.getByRole("button", { name: groupName }).click();
   await page.getByRole("button", { name: /Sequence/i }).click();
   await page.getByRole("button", { name: /Dependency/i }).click();
   await page.getByRole("button", { name: new RegExp(firstTodo) }).click();
   await page.getByRole("button", { name: new RegExp(secondTodo) }).click();
   await page.getByRole("button", { name: /Create Connection/i }).click();
 
-  await expect(page.getByText("Dependency")).toBeVisible();
+  await expect(page.getByText("Dependency").first()).toBeVisible();
   await expect(page.getByText(firstTodo)).toBeVisible();
 });

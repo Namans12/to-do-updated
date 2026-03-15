@@ -100,6 +100,9 @@ describe("Node Connections API", () => {
         total: 2,
         completed: 0,
         percentage: 0,
+        blocked_count: 0,
+        available_count: 2,
+        next_available_item_id: todo1.id,
       });
       expect(body.data.is_fully_complete).toBe(false);
       expect(body.data.created_at).toBeTruthy();
@@ -1094,6 +1097,51 @@ describe("Node Connections API", () => {
 
       // 2/3 = 0.666... → Math.round = 67
       expect(body.data.progress.percentage).toBe(67);
+    });
+
+    it("should report blocked and available counts for dependency connections", async () => {
+      const todo1 = await createTodo(testGroupId, "blocker");
+      const todo2 = await createTodo(testGroupId, "middle");
+      const todo3 = await createTodo(testGroupId, "final");
+
+      const { body: createBody } = await createConnection(
+        [todo1.id, todo2.id, todo3.id],
+        "Dependency Chain",
+        "dependency"
+      );
+      const connectionId = createBody.data.id;
+
+      let res = await ctx.app.request(`/api/connections/${connectionId}`);
+      let body = await res.json();
+      expect(body.data.progress.available_count).toBe(1);
+      expect(body.data.progress.blocked_count).toBe(2);
+      expect(body.data.progress.next_available_item_id).toBe(todo1.id);
+
+      await completeTodo(todo1.id);
+
+      res = await ctx.app.request(`/api/connections/${connectionId}`);
+      body = await res.json();
+      expect(body.data.progress.available_count).toBe(1);
+      expect(body.data.progress.blocked_count).toBe(1);
+      expect(body.data.progress.next_available_item_id).toBe(todo2.id);
+    });
+  });
+
+  describe("Branch rules", () => {
+    it("should reject branch connections with more than 3 items", async () => {
+      const todo1 = await createTodo(testGroupId, "root");
+      const todo2 = await createTodo(testGroupId, "branch a");
+      const todo3 = await createTodo(testGroupId, "branch b");
+      const todo4 = await createTodo(testGroupId, "branch c");
+
+      const { res, body } = await createConnection(
+        [todo1.id, todo2.id, todo3.id, todo4.id],
+        "Too Wide",
+        "branch"
+      );
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("at most 3 items");
     });
   });
 

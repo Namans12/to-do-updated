@@ -37,6 +37,8 @@ export default function GraphToolbar({
       <button
         onClick={onTogglePanel}
         title={showPanel ? "Hide controls" : "Show controls"}
+        aria-label={showPanel ? "Hide graph controls" : "Show graph controls"}
+        aria-pressed={showPanel}
         className={buttonClassName}
       >
         {showPanel ? (
@@ -48,6 +50,8 @@ export default function GraphToolbar({
       <button
         onClick={onToggleCutMode}
         title={isCutMode ? "Exit cut mode" : "Cut edges"}
+        aria-label={isCutMode ? "Exit cut mode" : "Enter cut mode"}
+        aria-pressed={isCutMode}
         className={`w-8 h-8 rounded-lg backdrop-blur-sm border flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-150 ${
           isCutMode
             ? "bg-rose-500 text-white border-rose-400"
@@ -59,6 +63,7 @@ export default function GraphToolbar({
       <button
         onClick={onToggleFullscreen}
         title={isFullscreen ? "Exit fullscreen" : "Open fullscreen"}
+        aria-label={isFullscreen ? "Exit graph fullscreen" : "Open graph fullscreen"}
         className={buttonClassName}
       >
         {isFullscreen ? (
@@ -70,9 +75,11 @@ export default function GraphToolbar({
       {isFullscreen && (
         <>
           <button onClick={onZoomOut} title="Zoom out" className={buttonClassName}>
+            <span className="sr-only">Zoom out</span>
             <Minus size={14} className="text-slate-600 dark:text-slate-300" />
           </button>
           <button onClick={onZoomIn} title="Zoom in" className={buttonClassName}>
+            <span className="sr-only">Zoom in</span>
             <Plus size={14} className="text-slate-600 dark:text-slate-300" />
           </button>
         </>

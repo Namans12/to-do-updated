@@ -1,4 +1,5 @@
 export type ConnectionKind = "sequence" | "dependency" | "branch" | "related";
+export type RecurrenceRule = "daily" | "weekly" | "monthly";
 
 export interface Group {
   id: string;
@@ -15,9 +16,14 @@ export interface Todo {
   description: string | null;
   high_priority: number;
   reminder_at: string | null;
+  recurrence_rule: RecurrenceRule | null;
+  recurrence_enabled: number;
+  next_occurrence_at: string | null;
   is_completed: number;
   completed_at: string | null;
   position: number;
+  parent_todo_id: string | null;
+  planning_level: number;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -56,6 +62,9 @@ export interface ConnectionProgress {
   total: number;
   completed: number;
   percentage: number;
+  blocked_count: number;
+  available_count: number;
+  next_available_item_id: string | null;
 }
 
 export interface Connection {
@@ -68,4 +77,42 @@ export interface Connection {
   created_at: string;
 }
 
-export type View = "todos" | "trash" | "connections" | "search" | "graph" | "planner";
+export interface ActivityLog {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  summary: string;
+  payload_json: string | null;
+  payload: unknown;
+  created_at: string;
+}
+
+export interface BackupSnapshot {
+  id: string;
+  label: string;
+  created_at: string;
+  counts: {
+    groups: number;
+    todos: number;
+    connections: number;
+    connection_items: number;
+    activity_logs: number;
+  };
+}
+
+export interface AppSettings {
+  defaultReminderTime: string;
+  showShortcutHintsOnStart: boolean;
+  showDebugStats: boolean;
+  showGraphBoundaryHint: boolean;
+}
+
+export type View =
+  | "todos"
+  | "trash"
+  | "connections"
+  | "search"
+  | "graph"
+  | "planner"
+  | "settings";

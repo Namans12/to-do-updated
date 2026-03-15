@@ -1,17 +1,18 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { todosApi, connectionsApi } from "../api/client";
-import type { Todo } from "../types";
+import type { Connection, Todo } from "../types";
 import {
   GitBranch,
   FolderOpen,
   Check,
   Zap,
-  GripVertical,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import GraphToolbar from "./graph/GraphToolbar";
 import GraphBoundaryOverlay from "./graph/GraphBoundaryOverlay";
+import GraphLegend from "./graph/GraphLegend";
+import { connectionKindMeta, getConnectionEdgePairs } from "../utils/connectionKinds";
 
 /* ─── Types ────────────────────────────────────────── */
 
@@ -31,6 +32,12 @@ interface DragState {
 
 type PortSide = "left" | "right" | "top" | "bottom";
 type AdjPair = { a: string; b: string; axis: "x" | "y"; };
+type GraphEdge = {
+  key: string;
+  conn: Connection;
+  fromId: string;
+  toId: string;
+};
 
 /* ─── Constants ────────────────────────────────────── */
 
@@ -173,7 +180,7 @@ const getClosestAnyPortsAt = (
 /* ─── Component ────────────────────────────────────── */
 
 export default function GraphView() {
-  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId } =
+  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId, settings } =
     useApp();
   const [groupId, setGroupId] = useState<string | null>(selectedGroupId);
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -294,25 +301,93 @@ export default function GraphView() {
         /* fall through */
       }
     }
-    const cols = Math.max(3, Math.ceil(Math.sqrt(todos.length)));
     const fresh: Record<string, NodePosition> = {};
-    todos.forEach((t, i) => {
-      fresh[t.id] = {
-        x: snapGrid(
-          60 + (i % cols) * (NODE_W + 40),
-          canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
-          LEFT_TOP_BOUNDARY
-        ),
-        y: snapGrid(
-          60 + Math.floor(i / cols) * (NODE_H + 60),
-          canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
-          LEFT_TOP_BOUNDARY
-        ),
+    const todoById = new Map(todos.map((todo) => [todo.id, todo] as const));
+    const relevantConnections = connections.filter((conn) =>
+      conn.items.some((item) => todoById.has(item.todo_id))
+    );
+    const placed = new Set<string>();
+    let laneY = 80;
+
+    const place = (todoId: string, x: number, y: number) => {
+      if (placed.has(todoId)) return;
+      fresh[todoId] = {
+        x: snapGrid(x, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+        y: snapGrid(y, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
       };
+      placed.add(todoId);
+    };
+
+    for (const conn of relevantConnections) {
+      const items = conn.items.filter((item) => todoById.has(item.todo_id));
+      if (items.length === 0) continue;
+
+      if (conn.kind === "branch") {
+        const root = items[0];
+        if (!root) continue;
+        const rootLevel = todoById.get(root.todo_id)?.planning_level ?? 0;
+        const baseX = 140 + rootLevel * 240;
+        const baseY = laneY + 70;
+        place(root.todo_id, baseX, baseY);
+        items.slice(1).forEach((item, index) => {
+          place(item.todo_id, baseX + 240, baseY + (index === 0 ? -110 : 110));
+        });
+        laneY += 280;
+        continue;
+      }
+
+      if (conn.kind === "dependency") {
+        const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+        const baseX = 140 + baseLevel * 240;
+        items.forEach((item, index) => {
+          place(item.todo_id, baseX, laneY + index * 140);
+        });
+        laneY += Math.max(220, items.length * 140);
+        continue;
+      }
+
+      if (conn.kind === "related") {
+        const centerLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+        const centerX = 180 + centerLevel * 240;
+        const centerY = laneY + 110;
+        items.forEach((item, index) => {
+          const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
+          place(
+            item.todo_id,
+            centerX + Math.cos(angle) * 180,
+            centerY + Math.sin(angle) * 120
+          );
+        });
+        laneY += 280;
+        continue;
+      }
+
+      const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+      const baseX = 120 + baseLevel * 240;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX + index * 220, laneY);
+      });
+      laneY += 180;
+    }
+
+    const leftovers = todos.filter((todo) => !placed.has(todo.id));
+    const groupedByLevel = new Map<number, Todo[]>();
+    leftovers.forEach((todo) => {
+      const bucket = groupedByLevel.get(todo.planning_level) ?? [];
+      bucket.push(todo);
+      groupedByLevel.set(todo.planning_level, bucket);
     });
+
+    for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
+      levelTodos.forEach((todo, index) => {
+        place(todo.id, 80 + level * 240 + (index % 3) * 220, laneY + Math.floor(index / 3) * 140);
+      });
+      laneY += Math.max(180, Math.ceil(levelTodos.length / 3) * 140 + 40);
+    }
+
     setPositions(fresh);
     localStorage.setItem(key, JSON.stringify(fresh));
-  }, [todos, groupId, canvasSize.w, canvasSize.h]);
+  }, [todos, groupId, canvasSize.w, canvasSize.h, connections]);
 
   const savePositions = useCallback(
     (pos: Record<string, NodePosition>) => {
@@ -328,34 +403,38 @@ export default function GraphView() {
     return connections.filter((c) => c.items.some((i) => ids.has(i.todo_id)));
   }, [connections, todos]);
 
+  const groupEdges = useMemo<GraphEdge[]>(() => {
+    return groupConnections.flatMap((conn) =>
+      getConnectionEdgePairs(conn)
+        .filter((pair) => positions[pair.from] && positions[pair.to])
+        .map((pair) => ({
+          key: `${conn.id}:${pair.from}:${pair.to}`,
+          conn,
+          fromId: pair.from,
+          toId: pair.to,
+        }))
+    );
+  }, [groupConnections, positions]);
+
   const connectedAdjacents = useMemo(() => {
     const pairs = new Map<string, AdjPair>();
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const aId = conn.items[i]!.todo_id;
-        const bId = conn.items[i + 1]!.todo_id;
-        const aPos = positions[aId];
-        const bPos = positions[bId];
-        if (!aPos || !bPos) continue;
-
-        const bestTouch = getClosestOppositePortsAt(positions, aId, bId, SNAP_PX);
-
-        if (!bestTouch) continue;
-        const key = canonicalPairKey(aId, bId);
-        if (pairs.has(key)) continue;
-        pairs.set(key, {
-          a: aId < bId ? aId : bId,
-          b: aId < bId ? bId : aId,
-          axis:
-            bestTouch.fromSide === "left" || bestTouch.fromSide === "right"
-              ? "x"
-              : "y",
-        });
-      }
+    for (const edge of groupEdges) {
+      const bestTouch = getClosestOppositePortsAt(positions, edge.fromId, edge.toId, SNAP_PX);
+      if (!bestTouch) continue;
+      const key = canonicalPairKey(edge.fromId, edge.toId);
+      if (pairs.has(key)) continue;
+      pairs.set(key, {
+        a: edge.fromId < edge.toId ? edge.fromId : edge.toId,
+        b: edge.fromId < edge.toId ? edge.toId : edge.fromId,
+        axis:
+          bestTouch.fromSide === "left" || bestTouch.fromSide === "right"
+            ? "x"
+            : "y",
+      });
     }
 
     return pairs;
-  }, [groupConnections, positions]);
+  }, [groupEdges, positions]);
 
   const fusedGraph = useMemo(() => {
     const graph = new Map<string, Set<string>>();
@@ -591,10 +670,9 @@ export default function GraphView() {
       constraintLevel: number; // 0 = unconstrained, higher = more constrained
     }> = [];
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const fromId = conn.items[i]!.todo_id;
-        const toId = conn.items[i + 1]!.todo_id;
+    for (const edge of groupEdges) {
+        const fromId = edge.fromId;
+        const toId = edge.toId;
 
         // rank edges by best possible distance
         let bestDist = Number.MAX_SAFE_INTEGER;
@@ -617,13 +695,12 @@ export default function GraphView() {
         const constraintLevel = (4 - availableFrom) + (4 - availableTo);
 
         edgeKeys.push({
-          edgeKey: `${conn.id}:${fromId}:${toId}`,
+          edgeKey: edge.key,
           fromId,
           toId,
           rankDist: bestDist,
           constraintLevel,
         });
-      }
     }
 
     // Sort by constraint level (most constrained first), then by distance
@@ -810,7 +887,7 @@ export default function GraphView() {
     }
 
     return map;
-  }, [groupConnections, positions, todos]);
+  }, [groupEdges, positions, todos]);
 
   const portFillByKey = useMemo(() => {
     const map = new Map<string, string>();
@@ -1064,6 +1141,7 @@ export default function GraphView() {
         const nextY = snapGrid(clampedY, maxNodeY, LEFT_TOP_BOUNDARY);
         const deltaX = nextX - prevPos.x;
         const deltaY = nextY - prevPos.y;
+        if (deltaX === 0 && deltaY === 0) return prev;
 
         const updated = { ...prev };
         for (const id of fused) {
@@ -1082,7 +1160,9 @@ export default function GraphView() {
     }
       if (connectDrag) {
         setConnectDrag((prev) =>
-          prev ? { ...prev, currentX: e.clientX, currentY: e.clientY } : null
+          prev && (prev.currentX !== e.clientX || prev.currentY !== e.clientY)
+            ? { ...prev, currentX: e.clientX, currentY: e.clientY }
+            : prev
         );
         const els = document.elementsFromPoint(e.clientX, e.clientY);
         const target = els.find((el) => el.getAttribute("data-todo-id"));
@@ -1338,11 +1418,15 @@ export default function GraphView() {
     // If a todo appears in multiple chains, the first chain's index wins.
     const order: Record<string, number> = {};
 
+    for (const edge of groupEdges) {
+      counts[edge.fromId] = (counts[edge.fromId] ?? 0) + 1;
+      counts[edge.toId] = (counts[edge.toId] ?? 0) + 1;
+    }
+
     for (const conn of groupConnections) {
       conn.items.forEach((item, idx) => {
-        counts[item.todo_id] = (counts[item.todo_id] ?? 0) + 1;
         if (!(item.todo_id in order)) {
-          order[item.todo_id] = idx + 1; // 1-based position within this chain
+          order[item.todo_id] = idx + 1;
         }
       });
     }
@@ -1367,7 +1451,7 @@ export default function GraphView() {
     }
 
     return { connectionCount: counts, connectionOrder: order, completionOrder: completeOrder };
-  }, [groupConnections]);
+  }, [groupConnections, groupEdges]);
 
   const connectionEdgeOffsets = useMemo(() => {
     const offsetMap = new Map<string, number>();
@@ -1375,47 +1459,36 @@ export default function GraphView() {
 
     const keyFor = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const a = conn.items[i]!.todo_id;
-        const b = conn.items[i + 1]!.todo_id;
-        const key = keyFor(a, b);
+    for (const edge of groupEdges) {
+        const key = keyFor(edge.fromId, edge.toId);
         totalMap.set(key, (totalMap.get(key) ?? 0) + 1);
-      }
     }
 
     const seen = new Map<string, number>();
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const a = conn.items[i]!.todo_id;
-        const b = conn.items[i + 1]!.todo_id;
-        const key = keyFor(a, b);
+    for (const edge of groupEdges) {
+        const key = keyFor(edge.fromId, edge.toId);
         const total = totalMap.get(key) ?? 1;
         const idx = (seen.get(key) ?? 0);
         seen.set(key, idx + 1);
 
         if (total === 1) {
-          offsetMap.set(`${conn.id}:${a}:${b}`, 0);
+          offsetMap.set(edge.key, 0);
         } else {
           const spacing = 16;
           const centered = idx - (total - 1) / 2;
-          offsetMap.set(`${conn.id}:${a}:${b}`, centered * spacing);
+          offsetMap.set(edge.key, centered * spacing);
         }
-      }
     }
 
     return offsetMap;
-  }, [groupConnections]);
+  }, [groupEdges]);
 
   const noOverlapOffsets = useMemo(() => {
     const buckets = new Map<string, string[]>();
     const offsets = new Map<string, number>();
 
-    for (const conn of groupConnections) {
-      for (let i = 0; i < conn.items.length - 1; i++) {
-        const fromId = conn.items[i]!.todo_id;
-        const toId = conn.items[i + 1]!.todo_id;
-        const edgeKey = `${conn.id}:${fromId}:${toId}`;
+    for (const edge of groupEdges) {
+        const edgeKey = edge.key;
         const ports = edgePortMap.get(edgeKey);
         if (!ports) continue;
 
@@ -1439,7 +1512,6 @@ export default function GraphView() {
 
         if (!buckets.has(key)) buckets.set(key, []);
         buckets.get(key)!.push(edgeKey);
-      }
     }
 
     for (const [, keys] of buckets.entries()) {
@@ -1453,7 +1525,7 @@ export default function GraphView() {
     }
 
     return offsets;
-  }, [groupConnections, edgePortMap]);
+  }, [groupEdges, edgePortMap]);
 
   const canvasOffset = () => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -1548,12 +1620,14 @@ export default function GraphView() {
               position: "relative",
             }}
           >
-          <GraphBoundaryOverlay
-            canvasWidth={canvasSize.w * zoomScale}
-            canvasHeight={canvasSize.h * zoomScale}
-            draggingNode={draggingNode}
-            nearBoundary={nearBoundary}
-          />
+          {settings.showGraphBoundaryHint && (
+            <GraphBoundaryOverlay
+              canvasWidth={canvasSize.w * zoomScale}
+              canvasHeight={canvasSize.h * zoomScale}
+              draggingNode={draggingNode}
+              nearBoundary={nearBoundary}
+            />
+          )}
           <div
             style={{
               width: canvasSize.w,
@@ -1606,12 +1680,13 @@ export default function GraphView() {
             </defs>
 
             {/* Only edge paths here (shadow + main line) */}
-            {groupConnections.map((conn) =>
-              conn.items.map((item, idx) => {
-                if (idx >= conn.items.length - 1) return null;
-                const next = conn.items[idx + 1]!;
-                const edgeKey = `${conn.id}:${item.todo_id}:${next.todo_id}`;
-                const adjKey = canonicalPairKey(item.todo_id, next.todo_id);
+            {groupEdges.map((edge) => {
+                const conn = edge.conn;
+                const item = conn.items.find((candidate) => candidate.todo_id === edge.fromId);
+                const next = conn.items.find((candidate) => candidate.todo_id === edge.toId);
+                if (!item || !next) return null;
+                const edgeKey = edge.key;
+                const adjKey = canonicalPairKey(edge.fromId, edge.toId);
                 if (connectedAdjacents.has(adjKey)) return null; // Skip adjacent nodes here
                 
                 const ports = edgePortMap.get(edgeKey);
@@ -1621,7 +1696,8 @@ export default function GraphView() {
                 const nextDone = next.is_completed === 1;
                 const bothDone = itemDone && nextDone;
                 const oneDone = itemDone !== nextDone;
-                const edgeSolid = bothDone ? "rgb(16,185,129)" : "rgb(99,102,241)";
+                const edgeMeta = connectionKindMeta[conn.kind];
+                const edgeSolid = bothDone ? "rgb(16,185,129)" : edgeMeta.graphStroke;
                 const offset =
                   (connectionEdgeOffsets.get(edgeKey) ?? 0) +
                   (noOverlapOffsets.get(edgeKey) ?? 0);
@@ -1674,7 +1750,7 @@ export default function GraphView() {
                         strokeWidth={5}
                         strokeOpacity={0.14}
                         strokeLinecap="round"
-                        className="stroke-indigo-500"
+                        stroke={edgeMeta.graphGlow}
                       />
                       {/* Main line */}
                       <path
@@ -1687,17 +1763,17 @@ export default function GraphView() {
                             ? "url(#line-done)"
                             : oneDone
                             ? `url(#${partialGradId})`
-                            : "url(#line-grad)"
+                            : edgeSolid
                         }
                         strokeWidth={edgeStrokeWidth}
                         strokeOpacity={1}
                         strokeLinecap="round"
+                        strokeDasharray={!bothDone && !oneDone ? edgeMeta.dashArray : undefined}
                       />
                     </g>
                   </g>
                 );
-              })
-            )}
+              })}
           </svg>
 
           {/* Interactive SVG layer — on top for cuts, junctions, particles (zIndex 5) */}
@@ -1735,19 +1811,20 @@ export default function GraphView() {
             </defs>
 
             {/* Junction dots + cut areas + arrows + particles */}
-            {groupConnections.map((conn) =>
-              conn.items.map((item, idx) => {
-                if (idx >= conn.items.length - 1) return null;
-                const next = conn.items[idx + 1]!;
-                const edgeKey = `${conn.id}:${item.todo_id}:${next.todo_id}`;
+            {groupEdges.map((edge) => {
+                const conn = edge.conn;
+                const item = conn.items.find((candidate) => candidate.todo_id === edge.fromId);
+                const next = conn.items.find((candidate) => candidate.todo_id === edge.toId);
+                if (!item || !next) return null;
+                const edgeKey = edge.key;
                 const isCuttable = conn.items.length >= 2;
                 const isHoverCut = isCutMode && isCuttable && hoverEdgeKey === edgeKey;
-                const adjKey = canonicalPairKey(item.todo_id, next.todo_id);
+                const adjKey = canonicalPairKey(edge.fromId, edge.toId);
                 if (connectedAdjacents.has(adjKey)) {
                   const touch = getClosestOppositePortsAt(
                     positions,
-                    item.todo_id,
-                    next.todo_id
+                    edge.fromId,
+                    edge.toId
                   );
                   if (!touch) return null;
                   const cx = (touch.from.x + touch.to.x) / 2;
@@ -1778,7 +1855,7 @@ export default function GraphView() {
                         style={{ pointerEvents: "all", cursor: CUT_CURSOR }}
                         onMouseEnter={() => setHoverEdgeKey(edgeKey)}
                         onMouseLeave={() => setHoverEdgeKey((prev) => (prev === edgeKey ? null : prev))}
-                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                        onClick={() => cutEdge(conn.id, edge.fromId, edge.toId)}
                       />
                       <circle
                         cx={cx}
@@ -1804,6 +1881,7 @@ export default function GraphView() {
                 }
                 const ports = edgePortMap.get(edgeKey);
                 if (!ports) return null;
+                const edgeMeta = connectionKindMeta[conn.kind];
 
                 const itemDone = item.is_completed === 1;
                 const nextDone = next.is_completed === 1;
@@ -1901,7 +1979,7 @@ export default function GraphView() {
                         style={{ pointerEvents: "stroke", cursor: CUT_CURSOR }}
                         onMouseEnter={() => setHoverEdgeKey(edgeKey)}
                         onMouseLeave={() => setHoverEdgeKey((prev) => (prev === edgeKey ? null : prev))}
-                        onClick={() => cutEdge(conn.id, item.todo_id, next.todo_id)}
+                        onClick={() => cutEdge(conn.id, edge.fromId, edge.toId)}
                       />
                     )}
                     {/* Midpoint arrow */}
@@ -1912,13 +1990,13 @@ export default function GraphView() {
                           ? "rgb(239,68,68)"
                           : bothDone
                           ? "rgb(16,185,129)"
-                          : "rgb(99,102,241)"
+                          : edgeMeta.graphStroke
                       }
                       fillOpacity={isHoverCut ? 0.85 : 0.7}
                     />
                     {/* Animated particle */}
                     {!conn.is_fully_complete && !isCutMode && (
-                      <circle r="3.5" fill="rgb(99,102,241)" filter="url(#glow)">
+                      <circle r="3.5" fill={edgeMeta.graphStroke} filter="url(#glow)">
                         <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
                         <animateMotion dur="2.5s" repeatCount="indefinite" path={path} />
                         <animate attributeName="r" values="3;4.5;3" dur="2.5s" repeatCount="indefinite" />
@@ -1926,8 +2004,7 @@ export default function GraphView() {
                     )}
                   </g>
                 );
-              })
-            )}
+              })}
 
             {/* Active drag line */}
             {connectDrag &&
@@ -2002,8 +2079,7 @@ export default function GraphView() {
                 sharedAdjacentPorts.hidden.has(`${todo.id}:${side}`);
 
               const isNext = groupConnections.some((c) => {
-                const ni = c.items.findIndex((i) => !i.is_completed);
-                return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+                return c.progress.next_available_item_id === todo.id;
               });
 
               const isConnected = conns > 0;
@@ -2192,8 +2268,7 @@ export default function GraphView() {
 
                 const isCompleted = todo.is_completed === 1;
                 const isNext = groupConnections.some((c) => {
-                  const ni = c.items.findIndex((i) => !i.is_completed);
-                  return ni >= 0 && c.items[ni]!.todo_id === todo.id;
+                  return c.progress.next_available_item_id === todo.id;
                 });
                 if (isCompleted) return null;
                 const badgeNumber = isCompleted
@@ -2228,28 +2303,7 @@ export default function GraphView() {
 
           {/* ── Legend panel (overlay, doesn't scroll) ── */}
           {showPanel && (
-            <div
-              className={`absolute right-4 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 px-4 py-3 text-[10px] space-y-1.5 z-30 shadow-lg ${
-                isFullscreen ? "bottom-14" : "bottom-6"
-              }`}
-            >
-              <div className="font-semibold text-[11px] text-slate-600 dark:text-slate-300 mb-1.5">
-                Controls
-              </div>
-              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-                <GripVertical size={10} /> Drag card to reposition
-              </div>
-              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-                <div className="w-3 h-3 rounded-full border-2 border-indigo-400 bg-indigo-400/20" />
-                Drag port to connect (max 2)
-              </div>
-              <div className="flex items-center gap-2 text-indigo-500">
-                <svg width="20" height="8">
-                  <path d="M0 4 Q5 0 10 4 T20 4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                </svg>
-                Connection path
-              </div>
-            </div>
+            <GraphLegend isFullscreen={isFullscreen} />
           )}
         </div>
       )}

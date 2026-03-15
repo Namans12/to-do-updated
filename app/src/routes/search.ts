@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { eq, and, isNull, or, like } from "drizzle-orm";
+import { eq, and, isNull, or, like, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { groups, todos } from "../db/schema.js";
+import { connectionItems, connections, groups, todos } from "../db/schema.js";
 
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
@@ -30,6 +30,11 @@ export function createSearchRouter(dbOverride?: DbOverride) {
     const query = c.req.query("q");
     const completedParam = c.req.query("completed");
     const groupIdParam = c.req.query("group_id");
+    const highPriorityParam = c.req.query("high_priority");
+    const hasReminderParam = c.req.query("has_reminder");
+    const connectionKindParam = c.req.query("connection_kind");
+    const planningLevelParam = c.req.query("planning_level");
+    const sortParam = c.req.query("sort");
 
     // Validate required query parameter
     if (!query || query.trim() === "") {
@@ -81,6 +86,30 @@ export function createSearchRouter(dbOverride?: DbOverride) {
       whereConditions = and(whereConditions, eq(todos.group_id, groupIdParam));
     }
 
+    if (highPriorityParam === "true") {
+      whereConditions = and(whereConditions, eq(todos.high_priority, 1));
+    } else if (highPriorityParam === "false") {
+      whereConditions = and(whereConditions, eq(todos.high_priority, 0));
+    }
+
+    if (hasReminderParam === "true") {
+      whereConditions = and(whereConditions, sql`${todos.reminder_at} IS NOT NULL`);
+    } else if (hasReminderParam === "false") {
+      whereConditions = and(whereConditions, sql`${todos.reminder_at} IS NULL`);
+    }
+
+    if (planningLevelParam !== undefined) {
+      const parsedPlanningLevel = Number(planningLevelParam);
+      if (!Number.isInteger(parsedPlanningLevel) || parsedPlanningLevel < 0 || parsedPlanningLevel > 5) {
+        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
+      }
+      whereConditions = and(whereConditions, eq(todos.planning_level, parsedPlanningLevel));
+    }
+
+    if (connectionKindParam) {
+      whereConditions = and(whereConditions, eq(connections.kind, connectionKindParam));
+    }
+
     // Execute the search query with join to get group name
     const results = drizzleDb
       .select({
@@ -92,11 +121,18 @@ export function createSearchRouter(dbOverride?: DbOverride) {
         position: todos.position,
         group_id: todos.group_id,
         group_name: groups.name,
+        reminder_at: todos.reminder_at,
+        recurrence_rule: todos.recurrence_rule,
+        planning_level: todos.planning_level,
+        parent_todo_id: todos.parent_todo_id,
+        connection_kind: connections.kind,
         created_at: todos.created_at,
         updated_at: todos.updated_at,
       })
       .from(todos)
       .innerJoin(groups, eq(todos.group_id, groups.id))
+      .leftJoin(connectionItems, eq(connectionItems.todo_id, todos.id))
+      .leftJoin(connections, eq(connectionItems.connection_id, connections.id))
       .where(whereConditions)
       .all();
 
@@ -105,14 +141,22 @@ export function createSearchRouter(dbOverride?: DbOverride) {
     const searchTermLower = searchTerm.toLowerCase();
 
     const sortedResults = results.sort((a, b) => {
+      if (sortParam === "created_oldest") {
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      }
+      if (sortParam === "created_newest") {
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      }
+      if (sortParam === "updated_oldest") {
+        return new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
+      }
+
       const aTitleMatch = a.title.toLowerCase().includes(searchTermLower);
       const bTitleMatch = b.title.toLowerCase().includes(searchTermLower);
 
-      // Title matches come before description-only matches
       if (aTitleMatch && !bTitleMatch) return -1;
       if (!aTitleMatch && bTitleMatch) return 1;
 
-      // Within the same category, sort by updated_at descending
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
 
@@ -127,6 +171,11 @@ export function createSearchRouter(dbOverride?: DbOverride) {
           high_priority: r.high_priority,
           is_completed: r.is_completed,
           position: r.position,
+          reminder_at: r.reminder_at,
+          recurrence_rule: r.recurrence_rule,
+          planning_level: r.planning_level,
+          parent_todo_id: r.parent_todo_id,
+          connection_kind: r.connection_kind,
           group: {
             id: r.group_id,
             name: r.group_name,

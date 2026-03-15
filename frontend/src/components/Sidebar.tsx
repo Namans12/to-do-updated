@@ -17,6 +17,7 @@ import {
   Check,
   GitBranch,
   GripVertical,
+  Settings,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
@@ -85,6 +86,7 @@ export default function Sidebar() {
     { id: "graph" as const, icon: GitBranch, label: "GraphPlan" },
     { id: "planner" as const, icon: AlarmClock, label: "Agenda" },
     { id: "search" as const, icon: Search, label: "Search" },
+    { id: "settings" as const, icon: Settings, label: "Settings" },
   ];
 
   return (
@@ -247,6 +249,8 @@ export default function Sidebar() {
                         ? "active"
                         : ""
                     }`}
+                    role="button"
+                    aria-current={selectedGroupId === group.id && currentView === "todos" ? "page" : undefined}
                     onClick={() => {
                       selectGroup(group.id);
                     }}
@@ -328,6 +332,7 @@ export default function Sidebar() {
             onClick={() => {
               setCurrentView(item.id);
             }}
+            aria-current={currentView === item.id ? "page" : undefined}
             className={`sidebar-item w-full ${
               currentView === item.id ? "active" : ""
             }`}

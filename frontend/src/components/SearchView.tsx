@@ -1,18 +1,25 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 import { searchApi } from "../api/client";
 import type { SearchResult } from "../api/client";
 import { useApp } from "../context/AppContext";
-import { Search, X, FolderOpen, AlertCircle } from "lucide-react";
+import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, Layers3, ChevronDown } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import EmptyState from "./EmptyState";
 
 export default function SearchView() {
-  const { jumpToTodo } = useApp();
+  const { jumpToTodo, groups } = useApp();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [completed, setCompleted] = useState<"all" | "true" | "false">("all");
+  const [groupId, setGroupId] = useState("");
+  const [highPriority, setHighPriority] = useState<"all" | "true" | "false">("all");
+  const [hasReminder, setHasReminder] = useState<"all" | "true" | "false">("all");
+  const [connectionKind, setConnectionKind] = useState<"all" | "sequence" | "dependency" | "branch" | "related">("all");
+  const [planningLevel, setPlanningLevel] = useState<"all" | "0" | "1" | "2" | "3" | "4" | "5">("all");
+  const [sort, setSort] = useState<"relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest">("relevance");
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -33,7 +40,15 @@ export default function SearchView() {
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       try {
-        const data = await searchApi.search(query.trim());
+        const data = await searchApi.search(query.trim(), {
+          completed,
+          groupId: groupId || undefined,
+          highPriority,
+          hasReminder,
+          connectionKind,
+          planningLevel: planningLevel === "all" ? "all" : Number(planningLevel),
+          sort,
+        });
         setResults(data);
         setSearched(true);
         setErrorMessage(null);
@@ -51,7 +66,7 @@ export default function SearchView() {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query]);
+  }, [query, completed, groupId, highPriority, hasReminder, connectionKind, planningLevel, sort]);
 
   return (
     <div className="animate-fade-in">
@@ -75,15 +90,70 @@ export default function SearchView() {
             placeholder="Search to-dos..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            aria-label="Search tasks"
           />
           {query && (
             <button
               onClick={() => setQuery("")}
+              aria-label="Clear search"
               className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
             >
               <X size={14} className="text-slate-400" />
             </button>
           )}
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <FilterSelect label="Status" value={completed} onChange={setCompleted}>
+            <option value="all">All status</option>
+            <option value="false">Active only</option>
+            <option value="true">Completed only</option>
+          </FilterSelect>
+          <FilterSelect label="Group" value={groupId} onChange={setGroupId}>
+            <option value="">All groups</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect label="Priority" value={highPriority} onChange={setHighPriority}>
+            <option value="all">All priority</option>
+            <option value="true">High priority</option>
+            <option value="false">Normal priority</option>
+          </FilterSelect>
+          <FilterSelect label="Reminder" value={hasReminder} onChange={setHasReminder}>
+            <option value="all">All reminders</option>
+            <option value="true">Has reminder</option>
+            <option value="false">No reminder</option>
+          </FilterSelect>
+          <FilterSelect label="Connection" value={connectionKind} onChange={setConnectionKind}>
+            <option value="all">All connection kinds</option>
+            <option value="sequence">Sequence</option>
+            <option value="dependency">Dependency</option>
+            <option value="branch">Branch</option>
+            <option value="related">Related</option>
+          </FilterSelect>
+          <FilterSelect label="Level" value={planningLevel} onChange={setPlanningLevel}>
+            <option value="all">All levels</option>
+            {[0, 1, 2, 3, 4, 5].map((level) => (
+              <option key={level} value={String(level)}>
+                Level {level}
+              </option>
+            ))}
+          </FilterSelect>
+        </div>
+
+        <div className="mt-4 flex justify-center">
+          <div className="w-full max-w-md">
+          <FilterSelect label="Sort" value={sort} onChange={setSort}>
+            <option value="relevance">Best match</option>
+            <option value="created_oldest">Created oldest first</option>
+            <option value="created_newest">Created newest first</option>
+            <option value="updated_oldest">Updated oldest first</option>
+            <option value="updated_newest">Updated newest first</option>
+          </FilterSelect>
+          </div>
         </div>
       </div>
 
@@ -169,7 +239,7 @@ export default function SearchView() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 mb-1">
                       <FolderOpen size={11} className="text-slate-500 dark:text-slate-400" />
-                      <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                          <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
                         Group: {item.group?.name ?? "Unknown group"}
                       </span>
                     </div>
@@ -187,6 +257,24 @@ export default function SearchView() {
                         Note: {item.description}
                       </p>
                     )}
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
+                      {item.reminder_at && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-700 dark:text-amber-300">
+                          <Bell size={10} />
+                          Reminder
+                        </span>
+                      )}
+                      {item.connection_kind && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-0.5 font-semibold text-indigo-600 dark:text-indigo-300">
+                          <GitBranch size={10} />
+                          {item.connection_kind}
+                        </span>
+                      )}
+                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-semibold text-slate-500 dark:text-slate-300">
+                        <Layers3 size={10} />
+                        Level {item.planning_level}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </motion.div>
@@ -195,5 +283,38 @@ export default function SearchView() {
         </div>
       )}
     </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  children,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: any) => void;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+        {label}
+      </span>
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full appearance-none rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 pr-11 text-[13px] leading-5 min-h-[3.5rem]"
+        >
+          {children}
+        </select>
+        <ChevronDown
+          size={18}
+          className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
+        />
+      </div>
+    </label>
   );
 }

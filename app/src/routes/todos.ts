@@ -3,6 +3,8 @@ import { eq, and, asc, sql, isNull, ne, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
 import { groups, todos } from "../db/schema.js";
+import { buildRecurrenceState, computeNextOccurrence, normalizeRecurrenceRule } from "../lib/recurrence.js";
+import { logActivity } from "../lib/activity.js";
 
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
@@ -22,6 +24,14 @@ function parseReminderAt(value: unknown): string | null | undefined {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return undefined;
   return parsed.toISOString();
+}
+
+function parsePlanningLevel(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 5) {
+    return undefined;
+  }
+  return value;
 }
 
 /**
@@ -44,7 +54,15 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Group ID is required" }, 400);
       }
       const body = await c.req.json();
-      const { title, description, high_priority, reminder_at } = body;
+      const {
+        title,
+        description,
+        high_priority,
+        reminder_at,
+        recurrence_rule,
+        planning_level,
+        parent_todo_id,
+      } = body;
 
       const { db: drizzleDb, sqlite } = db();
 
@@ -90,6 +108,33 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
       if (parsedReminderAt && new Date(parsedReminderAt).getTime() <= Date.now()) {
         return c.json({ error: "reminder_at must be in the future" }, 400);
       }
+      const parsedRecurrenceRule = normalizeRecurrenceRule(recurrence_rule);
+      if (recurrence_rule !== undefined && parsedRecurrenceRule === undefined) {
+        return c.json({ error: "recurrence_rule must be daily, weekly, monthly, or null" }, 400);
+      }
+      if (parsedRecurrenceRule && !parsedReminderAt) {
+        return c.json({ error: "recurrence_rule requires reminder_at to be set" }, 400);
+      }
+      const parsedPlanningLevel = parsePlanningLevel(planning_level);
+      if (planning_level !== undefined && parsedPlanningLevel === undefined) {
+        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
+      }
+      let normalizedParentTodoId: string | null = null;
+      if (parent_todo_id !== undefined && parent_todo_id !== null && parent_todo_id !== "") {
+        if (typeof parent_todo_id !== "string") {
+          return c.json({ error: "parent_todo_id must be a string or null" }, 400);
+        }
+        const parentTodo = drizzleDb
+          .select()
+          .from(todos)
+          .where(and(eq(todos.id, parent_todo_id), isNull(todos.deleted_at)))
+          .get();
+        if (!parentTodo || parentTodo.group_id !== groupId) {
+          return c.json({ error: "parent_todo_id must reference an active todo in the same group" }, 400);
+        }
+        normalizedParentTodoId = parentTodo.id;
+      }
+      const recurrenceState = buildRecurrenceState(parsedReminderAt ?? null, parsedRecurrenceRule ?? null);
 
       // Check for duplicate title in the same group (case-insensitive, excluding deleted)
       const duplicate = drizzleDb
@@ -115,9 +160,14 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         description: trimmedDescription,
         high_priority: priorityValue,
         reminder_at: parsedReminderAt ?? null,
+        recurrence_rule: recurrenceState.recurrence_rule,
+        recurrence_enabled: recurrenceState.recurrence_enabled,
+        next_occurrence_at: recurrenceState.next_occurrence_at,
         is_completed: 0,
         completed_at: null,
         position: 0,
+        parent_todo_id: normalizedParentTodoId,
+        planning_level: parsedPlanningLevel ?? 0,
         deleted_at: null,
         created_at: now,
         updated_at: now,
@@ -136,6 +186,18 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         drizzleDb.insert(todos).values(newTodo).run();
       });
       transaction();
+      logActivity(drizzleDb, {
+        entity_type: "todo",
+        entity_id: newTodo.id,
+        action: "created",
+        summary: `Created task "${newTodo.title}"`,
+        payload: {
+          group_id: groupId,
+          high_priority: newTodo.high_priority,
+          recurrence_rule: newTodo.recurrence_rule,
+          planning_level: newTodo.planning_level,
+        },
+      });
 
       return c.json({ data: newTodo }, 201);
     } catch (error: any) {
@@ -372,6 +434,57 @@ export function createTodosRouter(dbOverride?: DbOverride) {
     }
   });
 
+  router.post("/:id/reminder/ack", async (c) => {
+    try {
+      const id = c.req.param("id");
+      const { db: drizzleDb } = db();
+      const todo = drizzleDb
+        .select()
+        .from(todos)
+        .where(eq(todos.id, id))
+        .get();
+
+      if (!todo) {
+        return c.json({ error: "Todo not found" }, 404);
+      }
+
+      if (!todo.reminder_at) {
+        return c.json({ error: "Todo does not have an active reminder" }, 400);
+      }
+
+      const recurrenceRule = normalizeRecurrenceRule(todo.recurrence_rule);
+      const nextReminderAt =
+        todo.recurrence_enabled === 1 && recurrenceRule
+          ? computeNextOccurrence(todo.reminder_at, recurrenceRule)
+          : null;
+      const updates = {
+        reminder_at: nextReminderAt,
+        next_occurrence_at: nextReminderAt,
+        recurrence_enabled: nextReminderAt ? 1 : 0,
+        updated_at: new Date().toISOString(),
+      };
+
+      drizzleDb.update(todos).set(updates).where(eq(todos.id, id)).run();
+      const updated = drizzleDb.select().from(todos).where(eq(todos.id, id)).get();
+      logActivity(drizzleDb, {
+        entity_type: "todo",
+        entity_id: id,
+        action: "reminder_acknowledged",
+        summary: nextReminderAt
+          ? `Acknowledged reminder and scheduled the next ${recurrenceRule} reminder`
+          : `Acknowledged reminder for "${todo.title}"`,
+        payload: {
+          recurrence_rule: recurrenceRule,
+          next_occurrence_at: nextReminderAt,
+        },
+      });
+
+      return c.json({ data: updated });
+    } catch {
+      return c.json({ error: "Internal server error" }, 500);
+    }
+  });
+
   // PATCH /api/todos/:id — Update title/description
   router.patch("/:id/complete", async (c) => {
     try {
@@ -408,6 +521,15 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         .from(todos)
         .where(eq(todos.id, id))
         .get();
+      logActivity(drizzleDb, {
+        entity_type: "todo",
+        entity_id: id,
+        action: newStatus === 1 ? "completed" : "reopened",
+        summary:
+          newStatus === 1
+            ? `Completed task "${updated?.title ?? todo.title}"`
+            : `Reopened task "${updated?.title ?? todo.title}"`,
+      });
 
       return c.json({ data: updated });
     } catch {
@@ -420,7 +542,15 @@ export function createTodosRouter(dbOverride?: DbOverride) {
     try {
       const id = c.req.param("id");
       const body = await c.req.json();
-      const { title, description, high_priority, reminder_at } = body;
+      const {
+        title,
+        description,
+        high_priority,
+        reminder_at,
+        recurrence_rule,
+        planning_level,
+        parent_todo_id,
+      } = body;
 
       const { db: drizzleDb } = db();
 
@@ -484,6 +614,54 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         }
         updates.reminder_at = parsedReminderAt;
       }
+      const parsedRecurrenceRule = normalizeRecurrenceRule(recurrence_rule);
+      if (recurrence_rule !== undefined && parsedRecurrenceRule === undefined) {
+        return c.json({ error: "recurrence_rule must be daily, weekly, monthly, or null" }, 400);
+      }
+      const effectiveReminderAt =
+        updates.reminder_at !== undefined ? (updates.reminder_at as string | null) : todo.reminder_at;
+      const effectiveRecurrenceRule =
+        recurrence_rule !== undefined ? (parsedRecurrenceRule ?? null) : (todo.recurrence_rule as string | null);
+      if (effectiveRecurrenceRule && !effectiveReminderAt) {
+        return c.json({ error: "recurrence_rule requires reminder_at to be set" }, 400);
+      }
+      if (recurrence_rule !== undefined || reminder_at !== undefined) {
+        Object.assign(
+          updates,
+          buildRecurrenceState(
+            effectiveReminderAt ?? null,
+            (effectiveRecurrenceRule as Parameters<typeof buildRecurrenceState>[1]) ?? null
+          )
+        );
+      }
+
+      const parsedPlanningLevel = parsePlanningLevel(planning_level);
+      if (planning_level !== undefined && parsedPlanningLevel === undefined) {
+        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
+      }
+      if (parsedPlanningLevel !== undefined) {
+        updates.planning_level = parsedPlanningLevel;
+      }
+
+      if (parent_todo_id !== undefined) {
+        if (parent_todo_id === null || parent_todo_id === "") {
+          updates.parent_todo_id = null;
+        } else if (typeof parent_todo_id !== "string") {
+          return c.json({ error: "parent_todo_id must be a string or null" }, 400);
+        } else if (parent_todo_id === id) {
+          return c.json({ error: "A task cannot be its own parent" }, 400);
+        } else {
+          const parentTodo = drizzleDb
+            .select()
+            .from(todos)
+            .where(and(eq(todos.id, parent_todo_id), isNull(todos.deleted_at)))
+            .get();
+          if (!parentTodo || parentTodo.group_id !== todo.group_id) {
+            return c.json({ error: "parent_todo_id must reference an active todo in the same group" }, 400);
+          }
+          updates.parent_todo_id = parentTodo.id;
+        }
+      }
 
       if (normalizedTitle !== null) {
         const duplicate = drizzleDb
@@ -514,6 +692,20 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         .from(todos)
         .where(eq(todos.id, id))
         .get();
+      logActivity(drizzleDb, {
+        entity_type: "todo",
+        entity_id: id,
+        action: "updated",
+        summary: `Updated task "${updated?.title ?? todo.title}"`,
+        payload: {
+          title: updated?.title,
+          high_priority: updated?.high_priority,
+          reminder_at: updated?.reminder_at,
+          recurrence_rule: updated?.recurrence_rule,
+          planning_level: updated?.planning_level,
+          parent_todo_id: updated?.parent_todo_id,
+        },
+      });
 
       return c.json({ data: updated });
     } catch (error: any) {
@@ -557,6 +749,12 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         .from(todos)
         .where(eq(todos.id, id))
         .get();
+      logActivity(drizzleDb, {
+        entity_type: "todo",
+        entity_id: id,
+        action: "deleted",
+        summary: `Moved task "${updated?.title ?? todo.title}" to trash`,
+      });
 
       return c.json({ data: updated });
     } catch {

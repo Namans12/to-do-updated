@@ -5,6 +5,7 @@ import type { Connection } from "../types";
 import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
+import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
 
 interface ConnectionInlineProps {
   connection: Connection;
@@ -16,10 +17,8 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
   const [expanded, setExpanded] = useState(false);
   const { progress, is_fully_complete } = connection;
 
-  const nextTaskIndex = connection.items.findIndex(
-    (item) => !item.is_completed
-  );
-  const nextTask = nextTaskIndex >= 0 ? connection.items[nextTaskIndex] : null;
+  const nextTask = getConnectionNextItem(connection);
+  const nextTaskIndex = connection.items.findIndex((item) => item.todo_id === nextTask?.todo_id);
   const hasHighlightedTodo = !!(
     highlightTodoId && connection.items.some((item) => item.todo_id === highlightTodoId)
   );
@@ -113,11 +112,16 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                 {connection.name || "Connection"}
               </span>
               <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
-                {kindLabel[connection.kind]}
+                {connectionKindMeta[connection.kind].label}
               </span>
               <span className="text-[10px] text-slate-400 dark:text-slate-500">
                 {progress.completed}/{progress.total}
               </span>
+              {!is_fully_complete && (
+                <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                  {progress.available_count} ready · {progress.blocked_count} blocked
+                </span>
+              )}
             </div>
 
             {/* Current / Next task preview */}
@@ -275,6 +279,9 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                           >
                             {item.title}
                           </span>
+                          <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                            {getConnectionSequenceLabel(connection, index, item)}
+                          </span>
                           {isNext && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400">
                               <Zap size={8} />
@@ -290,7 +297,11 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                           </button>
                         </div>
                         <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                          Step {index + 1} of {connection.items.length}
+                          {connection.kind === "branch"
+                            ? index === 0
+                              ? "Root task"
+                              : `Branch ${index} of ${Math.max(connection.items.length - 1, 1)}`
+                            : `Step ${index + 1} of ${connection.items.length}`}
                         </span>
                       </div>
                     </div>
@@ -304,9 +315,3 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
     </motion.div>
   );
 }
-  const kindLabel = {
-    sequence: "Sequence",
-    dependency: "Dependency",
-    branch: "Branch",
-    related: "Related",
-  } as const;

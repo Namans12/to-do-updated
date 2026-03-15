@@ -1,4 +1,13 @@
-import type { Group, Todo, TrashPayload, Connection, ConnectionKind } from "../types";
+import type {
+  ActivityLog,
+  BackupSnapshot,
+  Connection,
+  ConnectionKind,
+  Group,
+  RecurrenceRule,
+  Todo,
+  TrashPayload,
+} from "../types";
 
 const BASE = "/api";
 
@@ -67,7 +76,13 @@ export const todosApi = {
     groupId: string,
     title: string,
     description?: string,
-    options?: { high_priority?: boolean; reminder_at?: string | null }
+    options?: {
+      high_priority?: boolean;
+      reminder_at?: string | null;
+      recurrence_rule?: RecurrenceRule | null;
+      planning_level?: number;
+      parent_todo_id?: string | null;
+    }
   ) =>
     request<Todo>(`/groups/${groupId}/todos`, {
       method: "POST",
@@ -76,6 +91,9 @@ export const todosApi = {
         description,
         high_priority: options?.high_priority,
         reminder_at: options?.reminder_at,
+        recurrence_rule: options?.recurrence_rule,
+        planning_level: options?.planning_level,
+        parent_todo_id: options?.parent_todo_id,
       }),
     }),
   update: (
@@ -85,12 +103,17 @@ export const todosApi = {
       description?: string | null;
       high_priority?: boolean;
       reminder_at?: string | null;
+      recurrence_rule?: RecurrenceRule | null;
+      planning_level?: number;
+      parent_todo_id?: string | null;
     }
   ) =>
     request<Todo>(`/todos/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
+  acknowledgeReminder: (id: string) =>
+    request<Todo>(`/todos/${id}/reminder/ack`, { method: "POST" }),
   toggleComplete: (id: string) =>
     request<Todo>(`/todos/${id}/complete`, { method: "PATCH" }),
   delete: (id: string) =>
@@ -182,10 +205,36 @@ export const connectionsApi = {
 
 // ── Search ──────────────────────────────────────────────
 export const searchApi = {
-  search: async (q: string, completed?: boolean, groupId?: string) => {
+  search: async (
+    q: string,
+    filters?: {
+      completed?: "all" | "true" | "false";
+      groupId?: string;
+      highPriority?: "all" | "true" | "false";
+      hasReminder?: "all" | "true" | "false";
+      connectionKind?: ConnectionKind | "all";
+      planningLevel?: number | "all";
+      sort?: "relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest";
+    }
+  ) => {
     const params = new URLSearchParams({ q });
-    if (completed !== undefined) params.set("completed", String(completed));
-    if (groupId) params.set("group_id", groupId);
+    if (filters?.completed && filters.completed !== "all") params.set("completed", filters.completed);
+    if (filters?.groupId) params.set("group_id", filters.groupId);
+    if (filters?.highPriority && filters.highPriority !== "all") {
+      params.set("high_priority", filters.highPriority);
+    }
+    if (filters?.hasReminder && filters.hasReminder !== "all") {
+      params.set("has_reminder", filters.hasReminder);
+    }
+    if (filters?.connectionKind && filters.connectionKind !== "all") {
+      params.set("connection_kind", filters.connectionKind);
+    }
+    if (filters?.planningLevel !== undefined && filters.planningLevel !== "all") {
+      params.set("planning_level", String(filters.planningLevel));
+    }
+    if (filters?.sort && filters.sort !== "relevance") {
+      params.set("sort", filters.sort);
+    }
     const data = await request<{ query: string; count: number; results: SearchResult[] }>(`/search?${params}`);
     return data.results;
   },
@@ -198,7 +247,33 @@ export interface SearchResult {
   high_priority: number;
   is_completed: number;
   position: number;
+  reminder_at: string | null;
+  recurrence_rule: RecurrenceRule | null;
+  planning_level: number;
+  parent_todo_id: string | null;
+  connection_kind: ConnectionKind | null;
   group: { id: string; name: string };
   created_at: string;
   updated_at: string;
 }
+
+export const activityApi = {
+  list: (limit = 50) => request<ActivityLog[]>(`/activity?limit=${limit}`),
+};
+
+export const backupsApi = {
+  list: () => request<BackupSnapshot[]>("/backups"),
+  create: (label?: string) =>
+    request<BackupSnapshot>("/backups", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
+  restore: (id: string) =>
+    request<BackupSnapshot>(`/backups/${id}/restore`, {
+      method: "POST",
+    }),
+  delete: (id: string) =>
+    request<void>(`/backups/${id}`, {
+      method: "DELETE",
+    }),
+};

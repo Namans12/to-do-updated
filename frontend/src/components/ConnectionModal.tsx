@@ -131,6 +131,26 @@ export default function ConnectionModal({
     });
   };
 
+  const handleGroupSelect = (groupId: string) => {
+    setSelectedGroupId((currentGroupId) => {
+      if (currentGroupId === groupId) {
+        if (selectedTodos.length === 0) {
+          return null;
+        }
+        return currentGroupId;
+      }
+
+      if (selectedTodos.length > 0) {
+        setSelectedTodos([]);
+        toast("Selection cleared after switching groups.", {
+          icon: "↺",
+        });
+      }
+
+      return groupId;
+    });
+  };
+
   const getGroupName = (groupId: string) => {
     return groups.find((g) => g.id === groupId)?.name ?? "Unknown";
   };
@@ -289,17 +309,14 @@ export default function ConnectionModal({
               {/* Group selector tabs */}
               <div className="flex flex-wrap gap-1.5 mb-3">
                 {groups.map((g) => {
-                  const isLocked = selectedGroupId !== null && selectedGroupId !== g.id;
                   return (
                     <button
                       key={g.id}
-                      disabled={isLocked}
-                      onClick={() => !isLocked && setSelectedGroupId(selectedGroupId === g.id && selectedTodos.length === 0 ? null : g.id)}
+                      type="button"
+                      onClick={() => handleGroupSelect(g.id)}
                       className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                         selectedGroupId === g.id
                           ? "bg-indigo-500 text-white"
-                          : isLocked
-                          ? "bg-slate-100 dark:bg-slate-800 text-slate-300 dark:text-slate-600 cursor-not-allowed"
                           : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
                       }`}
                     >
