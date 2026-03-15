@@ -22,6 +22,22 @@ test("main app flow covers shortcuts, reminders, and connection meaning", async 
   await page.request.post("/api/groups", { data: { name: groupName } });
   await page.request.post("/api/groups", { data: { name: secondGroupName } });
   await page.reload();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await page.getByRole("switch", { name: /Enable keyboard shortcuts/i }).click();
+  await page.keyboard.press("g");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await page.getByRole("switch", { name: /Enable keyboard shortcuts/i }).click();
+  await page.getByLabel("GraphPlan shortcut").focus();
+  await page.keyboard.press("ControlOrMeta+H");
+  await page.getByRole("heading", { name: "Settings", exact: true }).click();
+  await page.keyboard.press("g");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+H");
+  await expect(page.getByText("GraphPlan", { exact: true }).first()).toBeVisible();
+  await page.keyboard.press("t");
+
   await page.getByText(groupName, { exact: true }).click();
   await expect(page.getByRole("heading", { name: groupName, exact: true })).toBeVisible();
 

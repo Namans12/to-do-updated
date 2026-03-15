@@ -435,6 +435,11 @@ function ConnectionCard({
                 {progress.available_count} ready · {progress.blocked_count} blocked
               </span>
             )}
+            {!is_fully_complete && progress.critical_path_length ? (
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                Critical path {progress.critical_path_length}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
@@ -578,6 +583,11 @@ function ConnectionCard({
                             : `Step ${index + 1} of ${reorderList.length}`}
                         </span>
                       </div>
+                      {connection.kind === "dependency" && progress.blocked_titles?.length ? (
+                        <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-300">
+                          Blocked chain: {progress.blocked_titles.join(" -> ")}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>

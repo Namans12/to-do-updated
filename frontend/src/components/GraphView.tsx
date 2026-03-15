@@ -1,17 +1,20 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { todosApi, connectionsApi } from "../api/client";
-import type { Connection, Todo } from "../types";
+import type { Connection, Todo, ConnectionKind, GraphLayoutMode } from "../types";
 import {
   GitBranch,
   FolderOpen,
   Check,
   Zap,
+  Sparkles,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import GraphToolbar from "./graph/GraphToolbar";
 import GraphBoundaryOverlay from "./graph/GraphBoundaryOverlay";
 import GraphLegend from "./graph/GraphLegend";
+import GraphConnectionInspector from "./graph/GraphConnectionInspector";
+import GraphTodoInspector from "./graph/GraphTodoInspector";
 import { connectionKindMeta, getConnectionEdgePairs } from "../utils/connectionKinds";
 
 /* ─── Types ────────────────────────────────────────── */
@@ -51,6 +54,7 @@ const NORMAL_VIEW_EXTRA_H = 240;
 const MAX_CANVAS_W = 4200;   // hard right boundary — dragging past this is blocked
 const MAX_CANVAS_H = 3000;   // hard bottom boundary
 const SNAP_PX = 12;
+const PORT_CONNECT_THRESHOLD = 4;
 const PORT_SIDES: PortSide[] = ["left", "right", "top", "bottom"];
 const OVERLAP_EPS = 0.1;
 const LEFT_TOP_BOUNDARY = 20;
@@ -66,6 +70,14 @@ const snapGrid = (v: number, max: number, min = 0) =>
 
 const canonicalPairKey = (a: string, b: string) =>
   a < b ? `${a}|${b}` : `${b}|${a}`;
+
+const layoutLabelMap: Record<GraphLayoutMode, string> = {
+  smart: "Smart",
+  horizontal: "Horizontal",
+  vertical: "Vertical",
+  radial: "Radial",
+  planning: "Planning",
+};
 
 const oppositeSide = (side: PortSide): PortSide => {
   switch (side) {
@@ -177,6 +189,162 @@ const getClosestAnyPortsAt = (
   return best;
 };
 
+function buildAutoLayout(
+  todos: Todo[],
+  connections: Connection[],
+  canvasSize: { w: number; h: number },
+  layoutMode: GraphLayoutMode
+) {
+  const fresh: Record<string, NodePosition> = {};
+  const todoById = new Map(todos.map((todo) => [todo.id, todo] as const));
+  const relevantConnections = connections.filter((conn) =>
+    conn.items.some((item) => todoById.has(item.todo_id))
+  );
+  const placed = new Set<string>();
+  let laneY = 80;
+
+  const place = (todoId: string, x: number, y: number) => {
+    if (placed.has(todoId)) return;
+    let nextX = snapGrid(x, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
+    let nextY = snapGrid(y, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
+    let guard = 0;
+    while (
+      Object.values(fresh).some(
+        (pos) => Math.abs(pos.x - nextX) < NODE_W && Math.abs(pos.y - nextY) < NODE_H
+      ) &&
+      guard < 20
+    ) {
+      nextX = snapGrid(
+        nextX + 80,
+        canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
+        LEFT_TOP_BOUNDARY
+      );
+      if (guard % 3 === 2) {
+        nextY = snapGrid(
+          nextY + 100,
+          canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
+          LEFT_TOP_BOUNDARY
+        );
+      }
+      guard += 1;
+    }
+    fresh[todoId] = { x: nextX, y: nextY };
+    placed.add(todoId);
+  };
+
+  for (const conn of relevantConnections) {
+    const items = conn.items.filter((item) => todoById.has(item.todo_id));
+    if (items.length === 0) continue;
+
+    if (layoutMode === "horizontal") {
+      const baseX = 120;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX + index * 220, laneY);
+      });
+      laneY += 180;
+      continue;
+    }
+
+    if (layoutMode === "vertical") {
+      const baseX = 180;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX, laneY + index * 140);
+      });
+      laneY += Math.max(220, items.length * 140);
+      continue;
+    }
+
+    if (layoutMode === "radial") {
+      const centerX = 360 + (laneY % 2 === 0 ? 0 : 220);
+      const centerY = laneY + 110;
+      items.forEach((item, index) => {
+        const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
+        place(
+          item.todo_id,
+          centerX + Math.cos(angle) * 180,
+          centerY + Math.sin(angle) * 120
+        );
+      });
+      laneY += 300;
+      continue;
+    }
+
+    if (layoutMode === "planning") {
+      items.forEach((item, index) => {
+        const level = todoById.get(item.todo_id)?.planning_level ?? 0;
+        place(item.todo_id, 90 + level * 240, laneY + index * 120);
+      });
+      laneY += Math.max(220, items.length * 120);
+      continue;
+    }
+
+    if (conn.kind === "branch") {
+      const root = items[0];
+      if (!root) continue;
+      const rootLevel = todoById.get(root.todo_id)?.planning_level ?? 0;
+      const baseX = 140 + rootLevel * 240;
+      const baseY = laneY + 70;
+      place(root.todo_id, baseX, baseY);
+      const branchOffsets = items.length <= 2 ? [0] : [-140, 140];
+      items.slice(1).forEach((item, index) => {
+        place(item.todo_id, baseX + 280, baseY + (branchOffsets[index] ?? index * 120));
+      });
+      laneY += 280;
+      continue;
+    }
+
+    if (conn.kind === "dependency") {
+      const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+      const baseX = 140 + baseLevel * 240;
+      items.forEach((item, index) => {
+        place(item.todo_id, baseX + (index % 2 === 0 ? 0 : 120), laneY + index * 120);
+      });
+      laneY += Math.max(220, items.length * 140);
+      continue;
+    }
+
+    if (conn.kind === "related") {
+      const centerLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+      const centerX = 180 + centerLevel * 240;
+      const centerY = laneY + 110;
+      items.forEach((item, index) => {
+        const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
+        place(
+          item.todo_id,
+          centerX + Math.cos(angle) * 180,
+          centerY + Math.sin(angle) * 120
+        );
+      });
+      laneY += 280;
+      continue;
+    }
+
+    const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
+    const baseX = 120 + baseLevel * 240;
+    items.forEach((item, index) => {
+      place(item.todo_id, baseX + index * 220, laneY);
+    });
+    laneY += 180;
+  }
+
+  const leftovers = todos.filter((todo) => !placed.has(todo.id));
+  const groupedByLevel = new Map<number, Todo[]>();
+  leftovers.forEach((todo) => {
+    const bucket = groupedByLevel.get(todo.planning_level) ?? [];
+    bucket.push(todo);
+    groupedByLevel.set(todo.planning_level, bucket);
+  });
+
+  for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
+    levelTodos.forEach((todo, index) => {
+      place(todo.id, 80 + level * 240 + (index % 3) * 220, laneY + Math.floor(index / 3) * 140);
+    });
+    laneY += Math.max(180, Math.ceil(levelTodos.length / 3) * 140 + 40);
+  }
+
+  return fresh;
+}
+
 /* ─── Component ────────────────────────────────────── */
 
 export default function GraphView() {
@@ -195,6 +363,17 @@ export default function GraphView() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCutMode, setIsCutMode] = useState(false);
   const [hoverEdgeKey, setHoverEdgeKey] = useState<string | null>(null);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
+  const [draftConnectionName, setDraftConnectionName] = useState("");
+  const [draftConnectionKind, setDraftConnectionKind] = useState<ConnectionKind>("sequence");
+  const [draftTodoTitle, setDraftTodoTitle] = useState("");
+  const [draftTodoDescription, setDraftTodoDescription] = useState("");
+  const [draftTodoHighPriority, setDraftTodoHighPriority] = useState(false);
+  const [draftTodoPlanningLevel, setDraftTodoPlanningLevel] = useState(0);
+  const [draftTodoRecurrenceRule, setDraftTodoRecurrenceRule] = useState<"" | "daily" | "weekly" | "monthly">("");
+  const [draftTodoParentId, setDraftTodoParentId] = useState("");
+  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>(settings.graphDefaultLayout);
   const [nearBoundary, setNearBoundary] = useState({ right: false, bottom: false });
   const [zoomScale, setZoomScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({
@@ -222,6 +401,9 @@ export default function GraphView() {
   useEffect(() => {
     if (!isCutMode) setHoverEdgeKey(null);
   }, [isCutMode]);
+  useEffect(() => {
+    setLayoutMode(settings.graphDefaultLayout);
+  }, [settings.graphDefaultLayout]);
   useEffect(() => {
     if (!draggingNode) setNearBoundary({ right: false, bottom: false });
   }, [draggingNode]);
@@ -301,93 +483,10 @@ export default function GraphView() {
         /* fall through */
       }
     }
-    const fresh: Record<string, NodePosition> = {};
-    const todoById = new Map(todos.map((todo) => [todo.id, todo] as const));
-    const relevantConnections = connections.filter((conn) =>
-      conn.items.some((item) => todoById.has(item.todo_id))
-    );
-    const placed = new Set<string>();
-    let laneY = 80;
-
-    const place = (todoId: string, x: number, y: number) => {
-      if (placed.has(todoId)) return;
-      fresh[todoId] = {
-        x: snapGrid(x, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
-        y: snapGrid(y, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
-      };
-      placed.add(todoId);
-    };
-
-    for (const conn of relevantConnections) {
-      const items = conn.items.filter((item) => todoById.has(item.todo_id));
-      if (items.length === 0) continue;
-
-      if (conn.kind === "branch") {
-        const root = items[0];
-        if (!root) continue;
-        const rootLevel = todoById.get(root.todo_id)?.planning_level ?? 0;
-        const baseX = 140 + rootLevel * 240;
-        const baseY = laneY + 70;
-        place(root.todo_id, baseX, baseY);
-        items.slice(1).forEach((item, index) => {
-          place(item.todo_id, baseX + 240, baseY + (index === 0 ? -110 : 110));
-        });
-        laneY += 280;
-        continue;
-      }
-
-      if (conn.kind === "dependency") {
-        const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-        const baseX = 140 + baseLevel * 240;
-        items.forEach((item, index) => {
-          place(item.todo_id, baseX, laneY + index * 140);
-        });
-        laneY += Math.max(220, items.length * 140);
-        continue;
-      }
-
-      if (conn.kind === "related") {
-        const centerLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-        const centerX = 180 + centerLevel * 240;
-        const centerY = laneY + 110;
-        items.forEach((item, index) => {
-          const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
-          place(
-            item.todo_id,
-            centerX + Math.cos(angle) * 180,
-            centerY + Math.sin(angle) * 120
-          );
-        });
-        laneY += 280;
-        continue;
-      }
-
-      const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-      const baseX = 120 + baseLevel * 240;
-      items.forEach((item, index) => {
-        place(item.todo_id, baseX + index * 220, laneY);
-      });
-      laneY += 180;
-    }
-
-    const leftovers = todos.filter((todo) => !placed.has(todo.id));
-    const groupedByLevel = new Map<number, Todo[]>();
-    leftovers.forEach((todo) => {
-      const bucket = groupedByLevel.get(todo.planning_level) ?? [];
-      bucket.push(todo);
-      groupedByLevel.set(todo.planning_level, bucket);
-    });
-
-    for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
-      levelTodos.forEach((todo, index) => {
-        place(todo.id, 80 + level * 240 + (index % 3) * 220, laneY + Math.floor(index / 3) * 140);
-      });
-      laneY += Math.max(180, Math.ceil(levelTodos.length / 3) * 140 + 40);
-    }
-
+    const fresh = buildAutoLayout(todos, connections, canvasSize, layoutMode);
     setPositions(fresh);
     localStorage.setItem(key, JSON.stringify(fresh));
-  }, [todos, groupId, canvasSize.w, canvasSize.h, connections]);
+  }, [todos, groupId, canvasSize.w, canvasSize.h, connections, layoutMode]);
 
   const savePositions = useCallback(
     (pos: Record<string, NodePosition>) => {
@@ -402,6 +501,36 @@ export default function GraphView() {
     const ids = new Set(todos.map((t) => t.id));
     return connections.filter((c) => c.items.some((i) => ids.has(i.todo_id)));
   }, [connections, todos]);
+  const selectedConnection =
+    groupConnections.find((conn) => conn.id === selectedConnectionId) ?? null;
+  const selectedTodo = todos.find((todo) => todo.id === selectedTodoId) ?? null;
+
+  useEffect(() => {
+    if (!selectedConnection) {
+      setDraftConnectionName("");
+      setDraftConnectionKind("sequence");
+      return;
+    }
+    setDraftConnectionName(selectedConnection.name ?? "");
+    setDraftConnectionKind(selectedConnection.kind);
+  }, [selectedConnection]);
+  useEffect(() => {
+    if (!selectedTodo) {
+      setDraftTodoTitle("");
+      setDraftTodoDescription("");
+      setDraftTodoHighPriority(false);
+      setDraftTodoPlanningLevel(0);
+      setDraftTodoRecurrenceRule("");
+      setDraftTodoParentId("");
+      return;
+    }
+    setDraftTodoTitle(selectedTodo.title);
+    setDraftTodoDescription(selectedTodo.description ?? "");
+    setDraftTodoHighPriority(selectedTodo.high_priority === 1);
+    setDraftTodoPlanningLevel(selectedTodo.planning_level ?? 0);
+    setDraftTodoRecurrenceRule((selectedTodo.recurrence_rule as "" | "daily" | "weekly" | "monthly" | null) ?? "");
+    setDraftTodoParentId(selectedTodo.parent_todo_id ?? "");
+  }, [selectedTodo]);
 
   const groupEdges = useMemo<GraphEdge[]>(() => {
     return groupConnections.flatMap((conn) =>
@@ -1113,10 +1242,39 @@ export default function GraphView() {
     return start + (raw - start) * 0.28;
   };
 
-  /* ── Global mouse handlers ──────────────────────── */
+  const findPortOverlapTarget = useCallback(
+    (pointerClientX: number, pointerClientY: number, sourceTodoId: string) => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
+      const scrollTop = canvasRef.current?.scrollTop ?? 0;
+      const pointerX = (pointerClientX - (rect?.left ?? 0) + scrollLeft) / zoomScale;
+      const pointerY = (pointerClientY - (rect?.top ?? 0) + scrollTop) / zoomScale;
 
-  const onMouseMove = useCallback(
-    (e: MouseEvent) => {
+      let bestTodoId: string | null = null;
+      let bestDist = Number.POSITIVE_INFINITY;
+
+      for (const todo of todos) {
+        if (todo.id === sourceTodoId) continue;
+        for (const side of PORT_SIDES) {
+          const port = getPortAt(positions, todo.id, side);
+          if (!port) continue;
+          const dist = Math.hypot(port.x - pointerX, port.y - pointerY);
+          if (dist <= PORT_CONNECT_THRESHOLD && dist < bestDist) {
+            bestDist = dist;
+            bestTodoId = todo.id;
+          }
+        }
+      }
+
+      return bestTodoId;
+    },
+    [positions, todos, zoomScale]
+  );
+
+  /* ── Global pointer handlers ────────────────────── */
+
+  const onPointerMove = useCallback(
+    (e: PointerEvent) => {
     if (draggingNode) {
       const rect = canvasRef.current?.getBoundingClientRect();
       const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
@@ -1164,16 +1322,16 @@ export default function GraphView() {
             ? { ...prev, currentX: e.clientX, currentY: e.clientY }
             : prev
         );
-        const els = document.elementsFromPoint(e.clientX, e.clientY);
-        const target = els.find((el) => el.getAttribute("data-todo-id"));
-        const tId = target?.getAttribute("data-todo-id") ?? null;
-        setHoverTarget(tId && tId !== connectDrag.fromTodoId ? tId : null);
+        setHoverTarget(
+          findPortOverlapTarget(e.clientX, e.clientY, connectDrag.fromTodoId)
+        );
       }
     },
     [
       draggingNode,
       dragOffset,
       connectDrag,
+      findPortOverlapTarget,
       getFusedComponent,
       getDragBounds,
       movingOverlapArea,
@@ -1181,15 +1339,15 @@ export default function GraphView() {
     ]
   );
 
-  const onMouseUp = useCallback(() => {
+  const onPointerUp = useCallback(() => {
     if (draggingNode) {
       const moved = draggingNode;
       const fused = getFusedComponent(moved);
       const fusedSet = new Set(fused);
 
-      // Check if any port of the dragged node (or its fused group) overlaps
-      // any port of another node. Use SNAP_PX * 2 as the overlap threshold.
-      const CONNECT_THRESHOLD = SNAP_PX * 2;
+      // Check if any port of the dragged node (or its fused group) truly overlaps
+      // another node port. Nearby is not enough.
+      const CONNECT_THRESHOLD = PORT_CONNECT_THRESHOLD;
       let portTouchFrom: string | null = null;
       let portTouchTo: string | null = null;
       let portTouchBestDist = Number.POSITIVE_INFINITY;
@@ -1219,8 +1377,15 @@ export default function GraphView() {
       }
     }
     if (connectDrag) {
-      if (hoverTarget) {
-        createConnection(connectDrag.fromTodoId, hoverTarget);
+      const releaseTarget =
+        hoverTarget ??
+        findPortOverlapTarget(
+          connectDrag.currentX,
+          connectDrag.currentY,
+          connectDrag.fromTodoId
+        );
+      if (releaseTarget) {
+        createConnection(connectDrag.fromTodoId, releaseTarget);
       }
       setConnectDrag(null);
       setHoverTarget(null);
@@ -1231,18 +1396,21 @@ export default function GraphView() {
     positions,
     savePositions,
     hoverTarget,
+    findPortOverlapTarget,
     getFusedComponent,
     todos,
   ]);
 
   useEffect(() => {
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
     };
-  }, [onMouseMove, onMouseUp]);
+  }, [onPointerMove, onPointerUp]);
 
   useEffect(() => {
     const syncFullscreen = () => {
@@ -1352,6 +1520,9 @@ export default function GraphView() {
   const cutEdge = async (connectionId: string, fromId: string, toId: string) => {
     try {
       await connectionsApi.cut(connectionId, fromId, toId);
+      if (selectedConnectionId === connectionId) {
+        setSelectedConnectionId(null);
+      }
       await refreshConnections();
       toast.success("Connection cut");
     } catch (e: unknown) {
@@ -1371,8 +1542,103 @@ export default function GraphView() {
       }
       await refreshConnections();
       await refreshTodos();
-    } catch {
-      toast.error("Failed to toggle");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to toggle");
+    }
+  };
+
+  const applyLayout = useCallback(
+    (mode: GraphLayoutMode) => {
+      const nextPositions = buildAutoLayout(todos, connections, canvasSize, mode);
+      setLayoutMode(mode);
+      setPositions(nextPositions);
+      if (groupId) {
+        localStorage.setItem(`graph-positions-${groupId}`, JSON.stringify(nextPositions));
+      }
+      toast.success(`${layoutLabelMap[mode]} layout applied`);
+    },
+    [todos, connections, canvasSize, groupId]
+  );
+
+  const handleSaveSelectedConnection = async () => {
+    if (!selectedConnection) return;
+    try {
+      await connectionsApi.update(selectedConnection.id, {
+        name: draftConnectionName.trim() || null,
+        kind: draftConnectionKind,
+      });
+      await refreshConnections();
+      toast.success("Connection updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update connection");
+    }
+  };
+
+  const handleDeleteSelectedConnection = async () => {
+    if (!selectedConnection) return;
+    try {
+      await connectionsApi.delete(selectedConnection.id);
+      setSelectedConnectionId(null);
+      await refreshConnections();
+      toast.success("Connection deleted");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete connection");
+    }
+  };
+
+  const handleSaveSelectedTodo = async () => {
+    if (!selectedTodo) return;
+    try {
+      const updated = await todosApi.update(selectedTodo.id, {
+        title: draftTodoTitle.trim() || selectedTodo.title,
+        description: draftTodoDescription.trim() || null,
+        high_priority: draftTodoHighPriority,
+        planning_level: draftTodoPlanningLevel,
+        recurrence_rule: draftTodoRecurrenceRule || null,
+        parent_todo_id: draftTodoParentId || null,
+      });
+      setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      await refreshTodos();
+      toast.success("Task updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update task");
+    }
+  };
+
+  const handleDeleteSelectedTodo = async () => {
+    if (!selectedTodo) return;
+    try {
+      await todosApi.delete(selectedTodo.id);
+      setSelectedTodoId(null);
+      setTodos((prev) => prev.filter((item) => item.id !== selectedTodo.id));
+      await refreshTodos();
+      await refreshConnections();
+      toast.success("Task moved to trash");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete task");
+    }
+  };
+
+  const handleQuickAddTodo = async () => {
+    if (!groupId) return;
+    try {
+      const created = await todosApi.create(groupId, "New graph task");
+      setTodos((prev) => [...prev, created]);
+      await refreshTodos();
+      setSelectedTodoId(null);
+      setSelectedConnectionId(null);
+      const nextPos = {
+        x: snapGrid(120 + (todos.length % 4) * 220, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+        y: snapGrid(100 + Math.floor(todos.length / 4) * 120, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+      };
+      setPositions((prev) => {
+        const next = { ...prev, [created.id]: nextPos };
+        savePositions(next);
+        return next;
+      });
+      toast.success("Task added to GraphPlan");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create task");
     }
   };
 
@@ -1545,14 +1811,23 @@ export default function GraphView() {
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           Drag between ports to connect tasks &middot; Max 2 connections per task
         </p>
+        <div className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-slate-200/80 bg-white/70 px-3 py-2 text-xs text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/60 dark:text-slate-300">
+          <Sparkles size={12} className="text-indigo-500" />
+          Current auto-layout: <span className="font-semibold text-slate-700 dark:text-slate-100">{layoutLabelMap[layoutMode]}</span>
+        </div>
       </div>
 
       {/* Group pills */}
-      <div className="flex flex-wrap gap-2 mb-5">
+      <div className="mb-5 overflow-x-auto overflow-y-hidden no-scrollbar">
+        <div className="flex w-max min-w-full gap-2 pb-1">
         {groups.map((g) => (
           <button
             key={g.id}
-            onClick={() => setGroupId(g.id)}
+            onClick={() => {
+              setGroupId(g.id);
+              setSelectedConnectionId(null);
+              setSelectedTodoId(null);
+            }}
             className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
               groupId === g.id
                 ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 scale-[1.02]"
@@ -1563,6 +1838,7 @@ export default function GraphView() {
             {g.name}
           </button>
         ))}
+        </div>
       </div>
 
       {/* States */}
@@ -1596,12 +1872,60 @@ export default function GraphView() {
             onZoomIn={() =>
               setZoomScale((z) => Math.min(MAX_ZOOM, Number((z + ZOOM_STEP).toFixed(2))))
             }
+            onQuickAdd={() => void handleQuickAddTodo()}
           />
+          <div className="pointer-events-none absolute left-3 top-16 z-20 sm:hidden">
+            <div className="rounded-full bg-slate-900/85 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-white shadow-sm dark:bg-slate-100/90 dark:text-slate-900">
+              Double-tap a task to edit
+            </div>
+          </div>
+
+          {selectedConnection && !isCutMode && (
+            <GraphConnectionInspector
+              connection={selectedConnection}
+              draftName={draftConnectionName}
+              draftKind={draftConnectionKind}
+              layoutMode={layoutMode}
+              onDraftNameChange={setDraftConnectionName}
+              onDraftKindChange={setDraftConnectionKind}
+              onSave={() => void handleSaveSelectedConnection()}
+              onDelete={() => void handleDeleteSelectedConnection()}
+              onClose={() => setSelectedConnectionId(null)}
+              onApplyLayout={applyLayout}
+            />
+          )}
+          {selectedTodo && !isCutMode && (
+            <GraphTodoInspector
+              todo={selectedTodo}
+              draftTitle={draftTodoTitle}
+              draftDescription={draftTodoDescription}
+              draftHighPriority={draftTodoHighPriority}
+              draftPlanningLevel={draftTodoPlanningLevel}
+              draftRecurrenceRule={draftTodoRecurrenceRule}
+              parentOptions={todos.filter((item) => item.id !== selectedTodo.id)}
+              draftParentTodoId={draftTodoParentId}
+              onDraftTitleChange={setDraftTodoTitle}
+              onDraftDescriptionChange={setDraftTodoDescription}
+              onDraftHighPriorityChange={setDraftTodoHighPriority}
+              onDraftPlanningLevelChange={setDraftTodoPlanningLevel}
+              onDraftRecurrenceRuleChange={setDraftTodoRecurrenceRule}
+              onDraftParentTodoIdChange={setDraftTodoParentId}
+              onSave={() => void handleSaveSelectedTodo()}
+              onDelete={() => void handleDeleteSelectedTodo()}
+              onClose={() => setSelectedTodoId(null)}
+            />
+          )}
 
           {/* Scrollable canvas */}
           <div
             ref={canvasRef}
             onScroll={clampScrollAtMaxZoomOut}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setSelectedConnectionId(null);
+                setSelectedTodoId(null);
+              }
+            }}
             className="relative rounded-2xl overflow-auto no-scrollbar border border-slate-200 dark:border-slate-800"
             style={{
               width: "100%",
@@ -1783,7 +2107,7 @@ export default function GraphView() {
             height={canvasSize.h}
             style={{
               zIndex: 5,
-              pointerEvents: isCutMode ? "auto" : "none",
+              pointerEvents: "none",
               cursor: isCutMode ? CUT_CURSOR : "default",
             }}
           >
@@ -1834,6 +2158,14 @@ export default function GraphView() {
                     // Render junction dot
                     return (
                       <g key={`${conn.id}-${item.id}-adj`}>
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={14}
+                          fill="transparent"
+                          style={{ pointerEvents: "all", cursor: "pointer" }}
+                          onClick={() => setSelectedConnectionId(conn.id)}
+                        />
                         <circle
                           cx={cx} cy={cy} r={9}
                           fill={bothItemsDone ? "rgba(16,185,129,0.15)" : "rgba(99,102,241,0.15)"}
@@ -1982,6 +2314,17 @@ export default function GraphView() {
                         onClick={() => cutEdge(conn.id, edge.fromId, edge.toId)}
                       />
                     )}
+                    {!isCutMode && (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={16}
+                        strokeLinecap="round"
+                        style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                        onClick={() => setSelectedConnectionId(conn.id)}
+                      />
+                    )}
                     {/* Midpoint arrow */}
                     <polygon
                       points={`${tip.x},${tip.y} ${left.x},${left.y} ${right.x},${right.y}`}
@@ -2124,6 +2467,12 @@ export default function GraphView() {
 
                   {/* Card */}
                   <div
+                    onDoubleClick={() => {
+                      if (!isDragging) {
+                        setSelectedTodoId(todo.id);
+                        setSelectedConnectionId(null);
+                      }
+                    }}
                     className={`relative h-full rounded-xl border-2 transition-all duration-200 ${
                       todo.high_priority === 1 ? "priority-warning" : ""
                     } ${

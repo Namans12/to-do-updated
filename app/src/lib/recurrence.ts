@@ -35,10 +35,10 @@ export function computeNextOccurrence(
 }
 
 export function buildRecurrenceState(
-  reminderAt: string | null | undefined,
+  occurrenceAt: string | null | undefined,
   recurrenceRule: RecurrenceRule | null | undefined
 ) {
-  if (!reminderAt || !recurrenceRule) {
+  if (!occurrenceAt || !recurrenceRule) {
     return {
       recurrence_rule: null,
       recurrence_enabled: 0,
@@ -49,6 +49,6 @@ export function buildRecurrenceState(
   return {
     recurrence_rule: recurrenceRule,
     recurrence_enabled: 1,
-    next_occurrence_at: reminderAt,
+    next_occurrence_at: occurrenceAt,
   };
 }

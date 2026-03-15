@@ -96,7 +96,7 @@ describe("Node Connections API", () => {
       expect(body.data.items[0].created_at).toBeTruthy();
       expect(body.data.items[1].todo_id).toBe(todo2.id);
       expect(body.data.items[1].position).toBe(1);
-      expect(body.data.progress).toEqual({
+      expect(body.data.progress).toMatchObject({
         total: 2,
         completed: 0,
         percentage: 0,

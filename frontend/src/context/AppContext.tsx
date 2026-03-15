@@ -30,6 +30,7 @@ interface AppState {
     groupName: string;
   } | null;
   settings: AppSettings;
+  shortcutHelpOpen: boolean;
 }
 
 interface AppContextType extends AppState {
@@ -46,17 +47,33 @@ interface AppContextType extends AppState {
   setSidebarOpen: (open: boolean) => void;
   stopReminderAlarm: () => Promise<void>;
   updateSettings: (settings: Partial<AppSettings>) => void;
+  setShortcutHelpOpen: (open: boolean) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
 const REMINDER_ACK_KEY = "nodes-todo-reminder-ack";
 const APP_SETTINGS_KEY = "nodes-todo-settings";
+const DEFAULT_SHORTCUT_BINDINGS: AppSettings["shortcutBindings"] = {
+  search: "/",
+  newTask: "n",
+  todos: "t",
+  connections: "c",
+  graph: "g",
+  planner: "r",
+  settings: "s",
+  fullscreenGraph: "f",
+  help: "?",
+};
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultReminderTime: "10:00",
+  enableKeyboardShortcuts: true,
   showShortcutHintsOnStart: true,
   showDebugStats: true,
   showGraphBoundaryHint: true,
+  syncDeviceName: "My device",
+  graphDefaultLayout: "smart",
+  shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
 };
 
 function readReminderAcks(): Record<string, string> {
@@ -77,7 +94,15 @@ function readSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(APP_SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<AppSettings>) };
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      shortcutBindings: {
+        ...DEFAULT_SHORTCUT_BINDINGS,
+        ...(parsed.shortcutBindings ?? {}),
+      },
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -122,6 +147,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     sidebarOpen: true,
     activeReminderAlarm: null,
     settings: readSettings(),
+    shortcutHelpOpen: false,
   });
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
@@ -307,10 +333,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const updateSettings = useCallback((settingsUpdate: Partial<AppSettings>) => {
     setState((s) => {
-      const nextSettings = { ...s.settings, ...settingsUpdate };
+      const nextSettings = {
+        ...s.settings,
+        ...settingsUpdate,
+        shortcutBindings: {
+          ...s.settings.shortcutBindings,
+          ...(settingsUpdate.shortcutBindings ?? {}),
+        },
+      };
       writeSettings(nextSettings);
       return { ...s, settings: nextSettings };
     });
+  }, []);
+
+  const setShortcutHelpOpen = useCallback((open: boolean) => {
+    setState((s) => ({ ...s, shortcutHelpOpen: open }));
   }, []);
 
   const checkDueReminders = useCallback(async () => {
@@ -506,6 +543,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setSidebarOpen,
         stopReminderAlarm,
         updateSettings,
+        setShortcutHelpOpen,
       }}
     >
       {children}

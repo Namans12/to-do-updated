@@ -118,9 +118,16 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
                 {progress.completed}/{progress.total}
               </span>
               {!is_fully_complete && (
-                <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                  {progress.available_count} ready · {progress.blocked_count} blocked
-                </span>
+                <>
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                    {progress.available_count} ready · {progress.blocked_count} blocked
+                  </span>
+                  {progress.critical_path_length ? (
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                      Path {progress.critical_path_length}
+                    </span>
+                  ) : null}
+                </>
               )}
             </div>
 
@@ -200,6 +207,11 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
             className="overflow-hidden"
           >
             <div className="px-4 pb-3 pt-1 border-t border-slate-100 dark:border-slate-800">
+              {connection.kind === "dependency" && progress.blocked_titles?.length ? (
+                <div className="mb-3 rounded-2xl bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                  Blocked chain: {progress.blocked_titles.join(" -> ")}
+                </div>
+              ) : null}
               <div className="pl-1 pt-2">
                 {connection.items.map((item, index) => {
                   const isNext = index === nextTaskIndex;

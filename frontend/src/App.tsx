@@ -9,7 +9,20 @@ import ReminderView from "./components/ReminderView";
 import ReminderAlarmModal from "./components/ReminderAlarmModal";
 import SettingsView from "./components/SettingsView";
 import { Keyboard, Menu } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo } from "react";
+import { formatShortcutBinding, shortcutMatchesEvent } from "./utils/shortcuts";
+
+const SHORTCUT_ACTIONS = [
+  ["search", "Open Search"],
+  ["newTask", "Create a new task in the current group"],
+  ["todos", "Open group tasks"],
+  ["connections", "Open Connections"],
+  ["graph", "Open GraphPlan"],
+  ["planner", "Open Agenda"],
+  ["settings", "Open Settings"],
+  ["fullscreenGraph", "Toggle GraphPlan fullscreen"],
+  ["help", "Open or close this shortcut list"],
+] as const;
 
 export default function App() {
   const {
@@ -22,16 +35,27 @@ export default function App() {
     setCurrentView,
     selectedGroupId,
     settings,
+    shortcutHelpOpen,
+    setShortcutHelpOpen,
   } = useApp();
-  const [showShortcuts, setShowShortcuts] = useState(false);
 
   useEffect(() => {
     if (!settings.showShortcutHintsOnStart) return;
     const seenKey = "nodes-todo-shortcuts-seen";
     if (localStorage.getItem(seenKey)) return;
-    setShowShortcuts(true);
+    setShortcutHelpOpen(true);
     localStorage.setItem(seenKey, "true");
-  }, [settings.showShortcutHintsOnStart]);
+  }, [setShortcutHelpOpen, settings.showShortcutHintsOnStart]);
+
+  const shortcutEntries = useMemo(
+    () =>
+      SHORTCUT_ACTIONS.map(([action, description]) => ({
+        action,
+        description,
+        key: settings.shortcutBindings[action],
+      })),
+    [settings.shortcutBindings]
+  );
 
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null) => {
@@ -65,71 +89,85 @@ export default function App() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey || event.altKey) && event.key !== "?") return;
-
-      if (event.key === "Escape" && showShortcuts) {
-        setShowShortcuts(false);
+      if (event.key === "Escape" && shortcutHelpOpen) {
+        setShortcutHelpOpen(false);
         return;
       }
 
       if (isTypingTarget(event.target) && event.key !== "Escape") return;
+      if (!settings.enableKeyboardShortcuts) return;
 
-      switch (event.key) {
-        case "/":
+      const bindings = settings.shortcutBindings;
+
+      if (shortcutMatchesEvent(bindings.search, event)) {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.newTask, event)) {
+        if (currentView === "todos" && selectedGroupId) {
           event.preventDefault();
-          focusSearch();
-          return;
-        case "n":
-        case "N":
-          if (currentView === "todos" && selectedGroupId) {
-            event.preventDefault();
-            triggerNewTodo();
-          }
-          return;
-        case "g":
-        case "G":
+          triggerNewTodo();
+        }
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.graph, event)) {
+        event.preventDefault();
+        setCurrentView("graph");
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.todos, event)) {
+        event.preventDefault();
+        setCurrentView("todos");
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.connections, event)) {
+        event.preventDefault();
+        setCurrentView("connections");
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.planner, event)) {
+        event.preventDefault();
+        setCurrentView("planner");
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.settings, event)) {
+        event.preventDefault();
+        setCurrentView("settings");
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.fullscreenGraph, event)) {
+        if (currentView === "graph") {
           event.preventDefault();
-          setCurrentView("graph");
-          return;
-        case "t":
-        case "T":
-          event.preventDefault();
-          setCurrentView("todos");
-          return;
-        case "c":
-        case "C":
-          event.preventDefault();
-          setCurrentView("connections");
-          return;
-        case "r":
-        case "R":
-          event.preventDefault();
-          setCurrentView("planner");
-          return;
-        case "s":
-        case "S":
-          event.preventDefault();
-          setCurrentView("settings");
-          return;
-        case "f":
-        case "F":
-          if (currentView === "graph") {
-            event.preventDefault();
-            toggleGraphFullscreen();
-          }
-          return;
-        case "?":
-          event.preventDefault();
-          setShowShortcuts((value) => !value);
-          return;
-        default:
-          return;
+          toggleGraphFullscreen();
+        }
+        return;
+      }
+
+      if (shortcutMatchesEvent(bindings.help, event)) {
+        event.preventDefault();
+        setShortcutHelpOpen(!shortcutHelpOpen);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [currentView, selectedGroupId, setCurrentView, showShortcuts]);
+  }, [
+    currentView,
+    selectedGroupId,
+    setCurrentView,
+    setShortcutHelpOpen,
+    settings.enableKeyboardShortcuts,
+    settings.shortcutBindings,
+    shortcutHelpOpen,
+  ]);
 
   if (loading) {
     return (
@@ -197,7 +235,7 @@ export default function App() {
             <Menu size={20} />
           </button>
           <button
-            onClick={() => setShowShortcuts(true)}
+            onClick={() => setShortcutHelpOpen(true)}
             className="ml-auto p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             title="Keyboard shortcuts"
           >
@@ -218,6 +256,8 @@ export default function App() {
                 ? "max-w-6xl py-4 h-full"
                 : currentView === "search"
                 ? "max-w-7xl py-8"
+                : currentView === "settings" || currentView === "planner" || currentView === "connections"
+                ? "max-w-5xl py-8"
                 : "max-w-3xl py-8"
             }`}
           >
@@ -241,10 +281,10 @@ export default function App() {
         onStop={stopReminderAlarm}
       />
 
-      {showShortcuts && (
+      {shortcutHelpOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
-          onClick={() => setShowShortcuts(false)}
+          onClick={() => setShortcutHelpOpen(false)}
         >
           <div
             className="w-full max-w-lg rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-2xl"
@@ -262,24 +302,14 @@ export default function App() {
               </div>
             </div>
             <div className="mt-5 space-y-2">
-              {[
-                ["/", "Open Search"],
-                ["N", "Create a new task in the current group"],
-                ["T", "Open group tasks"],
-                ["C", "Open Connections"],
-                ["G", "Open GraphPlan"],
-                ["R", "Open Agenda"],
-                ["S", "Open Settings"],
-                ["F", "Toggle GraphPlan fullscreen"],
-                ["?", "Open or close this shortcut list"],
-              ].map(([key, description]) => (
+              {shortcutEntries.map(({ action, key, description }) => (
                 <div
-                  key={key}
+                  key={action}
                   className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/70 px-4 py-3"
                 >
                   <span className="text-sm text-slate-600 dark:text-slate-300">{description}</span>
                   <kbd className="rounded-lg bg-white dark:bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-500 dark:text-slate-300 shadow-sm">
-                    {key}
+                    {formatShortcutBinding(key)}
                   </kbd>
                 </div>
               ))}

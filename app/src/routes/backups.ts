@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { activityLogs, connectionItems, connections, groups, todos } from "../db/schema.js";
 import { logActivity } from "../lib/activity.js";
@@ -25,6 +26,21 @@ interface BackupFilePayload {
     connection_items: typeof connectionItems.$inferSelect[];
     activity_logs: typeof activityLogs.$inferSelect[];
   };
+}
+
+function attachParentTitle(
+  todo: typeof todos.$inferSelect | null,
+  lookup: Map<string, typeof todos.$inferSelect>
+) {
+  if (!todo) return null;
+  return {
+    ...todo,
+    parent_todo_title: todo.parent_todo_id ? lookup.get(todo.parent_todo_id)?.title ?? null : null,
+  };
+}
+
+function findTodoInBackup(payload: BackupFilePayload, todoId: string) {
+  return payload.snapshot.todos.find((todo) => todo.id === todoId) ?? null;
 }
 
 function backupsDir() {
@@ -181,6 +197,72 @@ export function createBackupsRouter(dbOverride?: DbOverride) {
         counts: payload.counts,
       },
     });
+  });
+
+  router.get("/:id/todos/:todoId", (c) => {
+    const backupId = c.req.param("id");
+    const todoId = c.req.param("todoId");
+    const fullPath = backupPath(backupId);
+    if (!fs.existsSync(fullPath)) {
+      return c.json({ error: "Backup not found" }, 404);
+    }
+
+    const payload = JSON.parse(fs.readFileSync(fullPath, "utf8")) as BackupFilePayload;
+    const todo = findTodoInBackup(payload, todoId);
+    if (!todo) {
+      return c.json({ error: "Task not found in backup" }, 404);
+    }
+
+    const currentRows = db().db.select().from(todos).all();
+    const currentLookup = new Map(currentRows.map((row) => [row.id, row]));
+    const backupLookup = new Map(payload.snapshot.todos.map((row) => [row.id, row]));
+    const current = currentLookup.get(todoId) ?? null;
+    return c.json({
+      data: {
+        backup: attachParentTitle(todo, backupLookup),
+        current: attachParentTitle(current, currentLookup),
+      },
+    });
+  });
+
+  router.post("/:id/todos/:todoId/restore", (c) => {
+    const backupId = c.req.param("id");
+    const todoId = c.req.param("todoId");
+    const fullPath = backupPath(backupId);
+    if (!fs.existsSync(fullPath)) {
+      return c.json({ error: "Backup not found" }, 404);
+    }
+
+    const payload = JSON.parse(fs.readFileSync(fullPath, "utf8")) as BackupFilePayload;
+    const todo = findTodoInBackup(payload, todoId);
+    if (!todo) {
+      return c.json({ error: "Task not found in backup" }, 404);
+    }
+
+    const { db: drizzleDb } = db();
+    const current = drizzleDb.select().from(todos).where(eq(todos.id, todoId)).get();
+
+    if (current) {
+      drizzleDb.update(todos).set(todo).where(eq(todos.id, todoId)).run();
+    } else {
+      drizzleDb.insert(todos).values(todo).run();
+    }
+
+    const restored = drizzleDb.select().from(todos).where(eq(todos.id, todoId)).get();
+    logActivity(drizzleDb, {
+      entity_type: "todo",
+      entity_id: todoId,
+      action: "restored_from_backup",
+      summary: `Restored task "${todo.title}" from backup`,
+      payload: {
+        backup_id: backupId,
+        replaced_existing: !!current,
+        before: attachParentTitle(current ?? null, new Map(drizzleDb.select().from(todos).all().map((row) => [row.id, row]))),
+        after: attachParentTitle(restored ?? null, new Map(drizzleDb.select().from(todos).all().map((row) => [row.id, row]))),
+      },
+    });
+
+    return c.json({ data: restored });
   });
 
   router.delete("/:id", (c) => {

@@ -1,27 +1,72 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { activityApi, backupsApi } from "../api/client";
+import { useEffect, useMemo, useState, type InputHTMLAttributes, type ReactNode } from "react";
+import { activityApi, backupsApi, syncApi, templatesApi } from "../api/client";
 import { useApp } from "../context/AppContext";
-import type { ActivityLog, BackupSnapshot } from "../types";
-import { Activity, Bell, DatabaseBackup, Settings, ShieldCheck } from "lucide-react";
+import type {
+  ActivityLog,
+  AppSettings,
+  BackupSnapshot,
+  GraphLayoutMode,
+  ShortcutAction,
+  SyncPackage,
+  TemplateSummary,
+} from "../types";
+import {
+  Activity,
+  Bell,
+  DatabaseBackup,
+  Keyboard,
+  Settings,
+  ShieldCheck,
+  Smartphone,
+  Stamp,
+} from "lucide-react";
 import toast from "react-hot-toast";
 import EmptyState from "./EmptyState";
+import {
+  formatShortcutBinding,
+  getEventShortcutBinding,
+  normalizeShortcutBinding,
+} from "../utils/shortcuts";
+
+const SHORTCUT_FIELDS: Array<{ action: ShortcutAction; label: string; description: string }> = [
+  { action: "search", label: "Search", description: "Open Search and focus the search box." },
+  { action: "newTask", label: "New task", description: "Create a new task in the active group." },
+  { action: "todos", label: "Todos", description: "Jump to the group task view." },
+  { action: "connections", label: "Connections", description: "Open the connection view." },
+  { action: "graph", label: "GraphPlan", description: "Open GraphPlan." },
+  { action: "planner", label: "Agenda", description: "Open the agenda/roadmap view." },
+  { action: "settings", label: "Settings", description: "Open Settings." },
+  {
+    action: "fullscreenGraph",
+    label: "Graph fullscreen",
+    description: "Toggle GraphPlan fullscreen while GraphPlan is open.",
+  },
+  { action: "help", label: "Shortcut helper", description: "Open or close the shortcut helper." },
+];
 
 export default function SettingsView() {
   const {
     settings,
     updateSettings,
     groups,
+    selectedGroupId,
     allTodos,
     connections,
     ensureAllTodosLoaded,
     refreshConnections,
     refreshGroups,
     refreshTodos,
+    setShortcutHelpOpen,
   } = useApp();
   const [activity, setActivity] = useState<ActivityLog[]>([]);
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
   const [loadingBackups, setLoadingBackups] = useState(false);
   const [creatingBackup, setCreatingBackup] = useState(false);
+  const [syncPackage, setSyncPackage] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [templates, setTemplates] = useState<TemplateSummary[]>([]);
+  const [templateName, setTemplateName] = useState("");
+  const [templateDescription, setTemplateDescription] = useState("");
 
   useEffect(() => {
     void ensureAllTodosLoaded();
@@ -31,12 +76,14 @@ export default function SettingsView() {
   const loadAuxiliaryData = async () => {
     setLoadingBackups(true);
     try {
-      const [activityEntries, backupEntries] = await Promise.all([
+      const [activityEntries, backupEntries, templateEntries] = await Promise.all([
         activityApi.list(25),
         backupsApi.list(),
+        templatesApi.list(),
       ]);
       setActivity(activityEntries);
       setBackups(backupEntries);
+      setTemplates(templateEntries);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to load settings data");
     } finally {
@@ -57,6 +104,22 @@ export default function SettingsView() {
       connections: connections.length,
     };
   }, [allTodos, connections.length, groups.length]);
+
+  const shortcutDuplicates = useMemo(() => {
+    const duplicateMap = new Map<string, ShortcutAction[]>();
+    for (const field of SHORTCUT_FIELDS) {
+      const key = settings.shortcutBindings[field.action];
+      if (!key) continue;
+      const current = duplicateMap.get(key) ?? [];
+      current.push(field.action);
+      duplicateMap.set(key, current);
+    }
+    return new Set(
+      Array.from(duplicateMap.entries())
+        .filter(([, actions]) => actions.length > 1)
+        .map(([key]) => key)
+    );
+  }, [settings.shortcutBindings]);
 
   const handleBackupCreate = async () => {
     setCreatingBackup(true);
@@ -97,6 +160,125 @@ export default function SettingsView() {
     }
   };
 
+  const handleSyncExport = async () => {
+    setSyncBusy(true);
+    try {
+      const payload = await syncApi.exportPackage(settings.syncDeviceName);
+      setSyncPackage(JSON.stringify(payload, null, 2));
+      toast.success("Sync package exported");
+      const refreshedActivity = await activityApi.list(25);
+      setActivity(refreshedActivity);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to export sync package");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const handleSyncImport = async () => {
+    setSyncBusy(true);
+    try {
+      const parsed = JSON.parse(syncPackage) as SyncPackage;
+      await syncApi.importPackage(parsed);
+      await Promise.all([refreshGroups(), refreshConnections(), refreshTodos()]);
+      await ensureAllTodosLoaded();
+      await loadAuxiliaryData();
+      toast.success("Sync package imported");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to import sync package");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const handleTemplateCreate = async () => {
+    if (!selectedGroupId) {
+      toast.error("Select a group first, then create the template from that group.");
+      return;
+    }
+    try {
+      const created = await templatesApi.create({
+        source_group_id: selectedGroupId,
+        name: templateName.trim() || undefined,
+        description: templateDescription.trim() || null,
+      });
+      setTemplates((prev) => [created, ...prev]);
+      setTemplateName("");
+      setTemplateDescription("");
+      toast.success("Template created");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create template");
+    }
+  };
+
+  const handleTemplateApply = async (templateId: string) => {
+    if (!selectedGroupId) {
+      toast.error("Select the target group in the sidebar before applying a template.");
+      return;
+    }
+    try {
+      await templatesApi.apply(templateId, selectedGroupId);
+      await Promise.all([refreshTodos(), refreshConnections()]);
+      await ensureAllTodosLoaded();
+      toast.success("Template applied");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to apply template");
+    }
+  };
+
+  const handleTemplateDelete = async (templateId: string) => {
+    try {
+      await templatesApi.delete(templateId);
+      setTemplates((prev) => prev.filter((template) => template.id !== templateId));
+      toast.success("Template deleted");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete template");
+    }
+  };
+
+  const handleShortcutChange = (action: ShortcutAction, rawValue: string) => {
+    const normalized = normalizeShortcutBinding(rawValue);
+    if (!normalized) {
+      toast.error("Press a key or key combo like Ctrl+K.");
+      return;
+    }
+
+    const collision = Object.entries(settings.shortcutBindings).find(
+      ([otherAction, binding]) => otherAction !== action && binding === normalized
+    );
+    if (collision) {
+      const collisionLabel =
+        SHORTCUT_FIELDS.find((field) => field.action === collision[0])?.label ?? collision[0];
+      toast.error(`${formatShortcutBinding(normalized)} is already used by ${collisionLabel}.`);
+      return;
+    }
+
+    updateSettings({
+      shortcutBindings: {
+        ...settings.shortcutBindings,
+        [action]: normalized,
+      } as AppSettings["shortcutBindings"],
+    });
+  };
+
+  const resetShortcuts = () => {
+    updateSettings({
+      enableKeyboardShortcuts: true,
+      shortcutBindings: {
+        search: "/",
+        newTask: "n",
+        todos: "t",
+        connections: "c",
+        graph: "g",
+        planner: "r",
+        settings: "s",
+        fullscreenGraph: "f",
+        help: "?",
+      },
+    });
+    toast.success("Keyboard shortcuts reset");
+  };
+
   return (
     <div className="animate-fade-in space-y-8">
       <div>
@@ -109,14 +291,14 @@ export default function SettingsView() {
         </p>
       </div>
 
-      <section className="grid gap-4 md:grid-cols-2">
+      <section className="grid gap-4 xl:grid-cols-2">
         <Panel
           title="App Preferences"
           description="Small defaults that shape day-to-day task editing and navigation."
           icon={<Bell size={16} className="text-indigo-500" />}
         >
-          <label className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
-            <span>
+          <label className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <span className="min-w-0">
               <span className="block text-sm font-medium">Default reminder time</span>
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 Used as the suggested time when you add a reminder quickly.
@@ -126,10 +308,54 @@ export default function SettingsView() {
               type="time"
               value={settings.defaultReminderTime}
               onChange={(event) => updateSettings({ defaultReminderTime: event.target.value })}
-              className="min-h-[3.25rem] rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 text-[13px] leading-5"
+              className="min-h-[3.25rem] w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 text-[13px] leading-5 sm:w-auto"
             />
           </label>
 
+          <label className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">Device name</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Used when exporting manual sync packages for another device.
+              </span>
+            </span>
+            <input
+              value={settings.syncDeviceName}
+              onChange={(event) => updateSettings({ syncDeviceName: event.target.value })}
+              className="input-base !py-2.5 text-sm sm:max-w-[14rem]"
+              aria-label="Device name"
+            />
+          </label>
+
+          <label className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">Default GraphPlan layout</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                The first layout GraphPlan uses before you manually rearrange nodes.
+              </span>
+            </span>
+            <select
+              value={settings.graphDefaultLayout}
+              onChange={(event) =>
+                updateSettings({ graphDefaultLayout: event.target.value as GraphLayoutMode })
+              }
+              className="input-base !py-2.5 text-sm sm:max-w-[14rem]"
+              aria-label="Default graph layout"
+            >
+              <option value="smart">Smart</option>
+              <option value="horizontal">Horizontal</option>
+              <option value="vertical">Vertical</option>
+              <option value="radial">Radial</option>
+              <option value="planning">Planning</option>
+            </select>
+          </label>
+
+          <ToggleRow
+            title="Enable keyboard shortcuts"
+            description="Allow quick keyboard navigation across the app."
+            checked={settings.enableKeyboardShortcuts}
+            onChange={(checked) => updateSettings({ enableKeyboardShortcuts: checked })}
+          />
           <ToggleRow
             title="Show keyboard shortcuts on startup"
             description="Open the shortcut helper automatically the first time someone opens the app."
@@ -148,6 +374,67 @@ export default function SettingsView() {
             checked={settings.showGraphBoundaryHint}
             onChange={(checked) => updateSettings({ showGraphBoundaryHint: checked })}
           />
+        </Panel>
+
+        <Panel
+          title="Keyboard Shortcuts"
+          description="Review, open, and customize the keys used for app navigation."
+          icon={<Keyboard size={16} className="text-fuchsia-500" />}
+        >
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setShortcutHelpOpen(true)}
+              className="btn-primary !px-3 !py-2 text-xs"
+            >
+              Show Shortcut Helper
+            </button>
+            <button type="button" onClick={resetShortcuts} className="btn-ghost !px-3 !py-2 text-xs">
+              Reset Defaults
+            </button>
+            {!settings.enableKeyboardShortcuts && (
+              <span className="text-xs text-amber-500">
+                Keyboard shortcuts are currently disabled.
+              </span>
+            )}
+            {shortcutDuplicates.size > 0 && (
+              <span className="text-xs text-red-500">
+                Duplicate bindings exist. Each action should keep a unique key.
+              </span>
+            )}
+          </div>
+          <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+            Click a shortcut field, then press the exact key combo you want. Single keys still work.
+            Modifiers supported: Ctrl, Alt, Shift, and Meta.
+          </div>
+
+          <div className="space-y-2">
+            {SHORTCUT_FIELDS.map((field) => {
+              const binding = settings.shortcutBindings[field.action];
+              const hasCollision = shortcutDuplicates.has(binding);
+              return (
+                <label
+                  key={field.action}
+                  className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{field.label}</span>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      {field.description}
+                    </span>
+                  </span>
+                  <ShortcutCaptureInput
+                    value={formatShortcutBinding(binding)}
+                    onCapture={(value) => handleShortcutChange(field.action, value)}
+                    className={`input-base h-12 !py-0 text-center text-sm uppercase sm:w-28 ${
+                      hasCollision ? "border-red-400 text-red-500" : ""
+                    }`}
+                    aria-label={`${field.label} shortcut`}
+                  />
+                </label>
+              );
+            })}
+          </div>
         </Panel>
 
         <Panel
@@ -202,6 +489,114 @@ export default function SettingsView() {
           </div>
         </Panel>
       </section>
+
+      <Panel
+        title="Sync & Devices"
+        description="Manual multi-device transfer without needing an always-on server."
+        icon={<Smartphone size={16} className="text-cyan-500" />}
+      >
+        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="text-sm font-medium">Export a sync package</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              Copy the package below onto another device, then import it there.
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={handleSyncExport} className="btn-primary !px-3 !py-2 text-xs" disabled={syncBusy}>
+              {syncBusy ? "Working..." : "Export Sync Package"}
+            </button>
+            <button onClick={handleSyncImport} className="btn-ghost !px-3 !py-2 text-xs" disabled={syncBusy || !syncPackage.trim()}>
+              Import Package
+            </button>
+          </div>
+        </div>
+        <textarea
+          value={syncPackage}
+          onChange={(event) => setSyncPackage(event.target.value)}
+          rows={10}
+          className="input-base min-h-[14rem] !py-3 font-mono text-xs"
+          placeholder="Sync package JSON will appear here after export, or paste one here to import."
+          aria-label="Sync package"
+        />
+      </Panel>
+
+      <Panel
+        title="Templates"
+        description="Capture reusable project boards, dependency setups, and planning flows from the selected group."
+        icon={<Stamp size={16} className="text-violet-500" />}
+      >
+        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 space-y-3">
+          <div className="text-sm font-medium">
+            Create from current sidebar group
+          </div>
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            Current source group: {groups.find((group) => group.id === selectedGroupId)?.name ?? "None selected"}
+          </div>
+          <input
+            value={templateName}
+            onChange={(event) => setTemplateName(event.target.value)}
+            className="input-base !py-2.5 text-sm"
+            placeholder="Template name"
+            aria-label="Template name"
+          />
+          <textarea
+            value={templateDescription}
+            onChange={(event) => setTemplateDescription(event.target.value)}
+            className="input-base min-h-[5rem] !py-2.5 text-sm"
+            placeholder="What this template is for"
+            aria-label="Template description"
+          />
+          <button type="button" onClick={handleTemplateCreate} className="btn-primary !px-3 !py-2 text-xs">
+            Save Template
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          {templates.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 px-4 py-5 text-sm text-slate-400 dark:text-slate-500">
+              No templates saved yet.
+            </div>
+          ) : (
+            templates.map((template) => (
+              <div
+                key={template.id}
+                className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-medium">{template.name}</div>
+                    {template.description && (
+                      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        {template.description}
+                      </div>
+                    )}
+                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      {template.counts.todos} tasks, {template.counts.connections} connections
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleTemplateApply(template.id)}
+                      className="btn-primary !px-3 !py-2 text-xs"
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTemplateDelete(template.id)}
+                      className="btn-ghost !px-3 !py-2 text-xs text-red-500"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </Panel>
 
       {settings.showDebugStats && (
         <Panel
@@ -300,8 +695,8 @@ function ToggleRow({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3">
-      <span>
+    <label className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="min-w-0">
         <span className="block text-sm font-medium">{title}</span>
         <span className="text-xs text-slate-500 dark:text-slate-400">{description}</span>
       </span>
@@ -321,5 +716,33 @@ function ToggleRow({
         />
       </button>
     </label>
+  );
+}
+
+function ShortcutCaptureInput({
+  value,
+  onCapture,
+  className,
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> & {
+  value: string;
+  onCapture: (value: string) => void;
+}) {
+  return (
+    <input
+      {...props}
+      readOnly
+      value={value}
+      onFocus={(event) => event.currentTarget.select()}
+      onKeyDown={(event) => {
+        if (event.key === "Tab") return;
+        event.preventDefault();
+        const nextValue = getEventShortcutBinding(event);
+        if (!nextValue) return;
+        onCapture(nextValue);
+      }}
+      className={className}
+      data-ignore-shortcuts="true"
+    />
   );
 }

@@ -42,6 +42,9 @@ function buildConnectionResponse(
   let blockedCount = 0;
   let availableCount = incompleteItems.length;
   let nextAvailableItemId: string | null = incompleteItems[0]?.todo_id ?? null;
+  let blockedTitles: string[] = [];
+  let nextUnlockTitle: string | null = incompleteItems[1]?.title ?? null;
+  let criticalPathLength = incompleteItems.length;
 
   if (connection.kind === "dependency") {
     const firstIncompleteIndex = items.findIndex((item) => item.is_completed !== 1);
@@ -49,12 +52,19 @@ function buildConnectionResponse(
       availableCount = 0;
       blockedCount = 0;
       nextAvailableItemId = null;
+      blockedTitles = [];
+      nextUnlockTitle = null;
+      criticalPathLength = 0;
     } else {
       availableCount = 1;
-      blockedCount = items
+      const blockedItems = items
         .slice(firstIncompleteIndex + 1)
-        .filter((item) => item.is_completed !== 1).length;
+        .filter((item) => item.is_completed !== 1);
+      blockedCount = blockedItems.length;
       nextAvailableItemId = items[firstIncompleteIndex]!.todo_id;
+      blockedTitles = blockedItems.map((item) => item.title);
+      nextUnlockTitle = blockedItems[0]?.title ?? null;
+      criticalPathLength = items.slice(firstIncompleteIndex).filter((item) => item.is_completed !== 1).length;
     }
   } else if (connection.kind === "branch") {
     const root = items[0] ?? null;
@@ -68,6 +78,9 @@ function buildConnectionResponse(
       availableCount = incompleteItems.length;
       blockedCount = 0;
       nextAvailableItemId = incompleteItems[0]?.todo_id ?? null;
+      blockedTitles = [];
+      nextUnlockTitle = incompleteItems[0]?.title ?? null;
+      criticalPathLength = incompleteItems.length;
     }
   }
 
@@ -92,6 +105,9 @@ function buildConnectionResponse(
       blocked_count: blockedCount,
       available_count: availableCount,
       next_available_item_id: nextAvailableItemId,
+      blocked_titles: blockedTitles,
+      next_unlock_title: nextUnlockTitle,
+      critical_path_length: criticalPathLength,
     },
     is_fully_complete: total > 0 && completed === total,
     created_at: connection.created_at,

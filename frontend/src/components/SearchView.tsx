@@ -159,13 +159,13 @@ export default function SearchView() {
 
       {/* Results */}
       {loading && (
-        <div className="text-sm text-slate-400 animate-pulse-soft py-8 text-center">
+        <div className="text-sm text-slate-400 animate-pulse-soft py-8 text-center" aria-live="polite">
           Searching...
         </div>
       )}
 
       {!loading && errorMessage && (
-        <div className="flex flex-col items-center py-16 text-center">
+        <div className="flex flex-col items-center py-16 text-center" role="alert">
           <AlertCircle size={32} className="text-red-400 mb-3" />
           <p className="text-sm text-red-500 dark:text-red-400">
             {errorMessage}

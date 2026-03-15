@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { eq, and, asc, sql, isNull, ne, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/connection.js";
-import { groups, todos } from "../db/schema.js";
+import { groups, todos, connections, connectionItems } from "../db/schema.js";
 import { buildRecurrenceState, computeNextOccurrence, normalizeRecurrenceRule } from "../lib/recurrence.js";
 import { logActivity } from "../lib/activity.js";
 
@@ -32,6 +32,83 @@ function parsePlanningLevel(value: unknown): number | undefined {
     return undefined;
   }
   return value;
+}
+
+function getParentTodoTitle(
+  drizzleDb: ReturnType<typeof getDb>["db"],
+  parentTodoId: string | null | undefined
+) {
+  if (!parentTodoId) return null;
+  return drizzleDb
+    .select({ title: todos.title })
+    .from(todos)
+    .where(eq(todos.id, parentTodoId))
+    .get()?.title ?? null;
+}
+
+function snapshotTodo(
+  drizzleDb: ReturnType<typeof getDb>["db"],
+  todo: typeof todos.$inferSelect | null | undefined
+) {
+  if (!todo) return null;
+  return {
+    id: todo.id,
+    group_id: todo.group_id,
+    title: todo.title,
+    description: todo.description,
+    high_priority: todo.high_priority,
+    reminder_at: todo.reminder_at,
+    recurrence_rule: todo.recurrence_rule,
+    recurrence_enabled: todo.recurrence_enabled,
+    next_occurrence_at: todo.next_occurrence_at,
+    is_completed: todo.is_completed,
+    completed_at: todo.completed_at,
+    position: todo.position,
+    parent_todo_id: todo.parent_todo_id,
+    parent_todo_title: getParentTodoTitle(drizzleDb, todo.parent_todo_id),
+    planning_level: todo.planning_level,
+    deleted_at: todo.deleted_at,
+    created_at: todo.created_at,
+    updated_at: todo.updated_at,
+  };
+}
+
+function getBlockingDependencyTitle(
+  drizzleDb: ReturnType<typeof getDb>["db"],
+  todoId: string
+): string | null {
+  const membership = drizzleDb
+    .select({
+      connectionId: connectionItems.connection_id,
+      position: connectionItems.position,
+      title: todos.title,
+    })
+    .from(connectionItems)
+    .innerJoin(connections, eq(connectionItems.connection_id, connections.id))
+    .innerJoin(todos, eq(connectionItems.todo_id, todos.id))
+    .where(and(eq(connectionItems.todo_id, todoId), eq(connections.kind, "dependency")))
+    .get();
+
+  if (!membership) return null;
+
+  const blocker = drizzleDb
+    .select({
+      title: todos.title,
+    })
+    .from(connectionItems)
+    .innerJoin(todos, eq(connectionItems.todo_id, todos.id))
+    .where(
+      and(
+        eq(connectionItems.connection_id, membership.connectionId),
+        sql`${connectionItems.position} < ${membership.position}`,
+        eq(todos.is_completed, 0),
+        isNull(todos.deleted_at)
+      )
+    )
+    .orderBy(asc(connectionItems.position))
+    .get();
+
+  return blocker?.title ?? null;
 }
 
 /**
@@ -112,9 +189,6 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
       if (recurrence_rule !== undefined && parsedRecurrenceRule === undefined) {
         return c.json({ error: "recurrence_rule must be daily, weekly, monthly, or null" }, 400);
       }
-      if (parsedRecurrenceRule && !parsedReminderAt) {
-        return c.json({ error: "recurrence_rule requires reminder_at to be set" }, 400);
-      }
       const parsedPlanningLevel = parsePlanningLevel(planning_level);
       if (planning_level !== undefined && parsedPlanningLevel === undefined) {
         return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
@@ -134,7 +208,11 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         }
         normalizedParentTodoId = parentTodo.id;
       }
-      const recurrenceState = buildRecurrenceState(parsedReminderAt ?? null, parsedRecurrenceRule ?? null);
+      const now = new Date().toISOString();
+      const recurrenceState = buildRecurrenceState(
+        parsedRecurrenceRule ? parsedReminderAt ?? now : null,
+        parsedRecurrenceRule ?? null
+      );
 
       // Check for duplicate title in the same group (case-insensitive, excluding deleted)
       const duplicate = drizzleDb
@@ -152,7 +230,6 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         return c.json({ error: "A to-do with this title already exists in this group" }, 400);
       }
 
-      const now = new Date().toISOString();
       const newTodo = {
         id: uuidv4(),
         group_id: groupId,
@@ -192,10 +269,7 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         action: "created",
         summary: `Created task "${newTodo.title}"`,
         payload: {
-          group_id: groupId,
-          high_priority: newTodo.high_priority,
-          recurrence_rule: newTodo.recurrence_rule,
-          planning_level: newTodo.planning_level,
+          after: snapshotTodo(drizzleDb, newTodo),
         },
       });
 
@@ -506,6 +580,18 @@ export function createTodosRouter(dbOverride?: DbOverride) {
       const newStatus = todo.is_completed === 1 ? 0 : 1;
       const now = new Date().toISOString();
 
+      if (newStatus === 1) {
+        const blockerTitle = getBlockingDependencyTitle(drizzleDb, id);
+        if (blockerTitle) {
+          return c.json(
+            {
+              error: `This dependency is still blocked. Complete "${blockerTitle}" first.`,
+            },
+            400
+          );
+        }
+      }
+
       drizzleDb
         .update(todos)
         .set({
@@ -515,6 +601,40 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         })
         .where(eq(todos.id, id))
         .run();
+
+      let recurringClone: typeof todos.$inferSelect | null = null;
+      const normalizedRule = normalizeRecurrenceRule(todo.recurrence_rule);
+      if (newStatus === 1 && todo.recurrence_enabled === 1 && normalizedRule) {
+        const anchor = todo.next_occurrence_at ?? todo.reminder_at ?? now;
+        const nextOccurrenceAt = computeNextOccurrence(anchor, normalizedRule);
+        if (nextOccurrenceAt) {
+          const maxPosResult = drizzleDb
+            .select({ maxPos: sql<number>`COALESCE(MAX(${todos.position}), -1)` })
+            .from(todos)
+            .where(and(eq(todos.group_id, todo.group_id), isNull(todos.deleted_at)))
+            .get();
+          recurringClone = {
+            id: uuidv4(),
+            group_id: todo.group_id,
+            title: todo.title,
+            description: todo.description,
+            high_priority: todo.high_priority,
+            reminder_at: todo.reminder_at ? nextOccurrenceAt : null,
+            recurrence_rule: normalizedRule,
+            recurrence_enabled: 1,
+            next_occurrence_at: nextOccurrenceAt,
+            is_completed: 0,
+            completed_at: null,
+            position: (maxPosResult?.maxPos ?? -1) + 1,
+            parent_todo_id: todo.parent_todo_id,
+            planning_level: todo.planning_level,
+            deleted_at: null,
+            created_at: now,
+            updated_at: now,
+          };
+          drizzleDb.insert(todos).values(recurringClone).run();
+        }
+      }
 
       const updated = drizzleDb
         .select()
@@ -529,6 +649,11 @@ export function createTodosRouter(dbOverride?: DbOverride) {
           newStatus === 1
             ? `Completed task "${updated?.title ?? todo.title}"`
             : `Reopened task "${updated?.title ?? todo.title}"`,
+        payload: {
+          before: snapshotTodo(drizzleDb, todo),
+          after: snapshotTodo(drizzleDb, updated),
+          recurring_clone: snapshotTodo(drizzleDb, recurringClone),
+        },
       });
 
       return c.json({ data: updated });
@@ -622,14 +747,16 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         updates.reminder_at !== undefined ? (updates.reminder_at as string | null) : todo.reminder_at;
       const effectiveRecurrenceRule =
         recurrence_rule !== undefined ? (parsedRecurrenceRule ?? null) : (todo.recurrence_rule as string | null);
-      if (effectiveRecurrenceRule && !effectiveReminderAt) {
-        return c.json({ error: "recurrence_rule requires reminder_at to be set" }, 400);
-      }
       if (recurrence_rule !== undefined || reminder_at !== undefined) {
+        const recurrenceAnchor =
+          effectiveReminderAt ??
+          todo.next_occurrence_at ??
+          todo.reminder_at ??
+          now;
         Object.assign(
           updates,
           buildRecurrenceState(
-            effectiveReminderAt ?? null,
+            effectiveRecurrenceRule ? recurrenceAnchor : null,
             (effectiveRecurrenceRule as Parameters<typeof buildRecurrenceState>[1]) ?? null
           )
         );
@@ -698,12 +825,8 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         action: "updated",
         summary: `Updated task "${updated?.title ?? todo.title}"`,
         payload: {
-          title: updated?.title,
-          high_priority: updated?.high_priority,
-          reminder_at: updated?.reminder_at,
-          recurrence_rule: updated?.recurrence_rule,
-          planning_level: updated?.planning_level,
-          parent_todo_id: updated?.parent_todo_id,
+          before: snapshotTodo(drizzleDb, todo),
+          after: snapshotTodo(drizzleDb, updated),
         },
       });
 
@@ -754,6 +877,10 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         entity_id: id,
         action: "deleted",
         summary: `Moved task "${updated?.title ?? todo.title}" to trash`,
+        payload: {
+          before: snapshotTodo(drizzleDb, todo),
+          after: snapshotTodo(drizzleDb, updated),
+        },
       });
 
       return c.json({ data: updated });

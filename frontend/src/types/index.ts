@@ -1,5 +1,16 @@
 export type ConnectionKind = "sequence" | "dependency" | "branch" | "related";
 export type RecurrenceRule = "daily" | "weekly" | "monthly";
+export type GraphLayoutMode = "smart" | "horizontal" | "vertical" | "radial" | "planning";
+export type ShortcutAction =
+  | "search"
+  | "newTask"
+  | "todos"
+  | "connections"
+  | "graph"
+  | "planner"
+  | "settings"
+  | "fullscreenGraph"
+  | "help";
 
 export interface Group {
   id: string;
@@ -23,6 +34,7 @@ export interface Todo {
   completed_at: string | null;
   position: number;
   parent_todo_id: string | null;
+  parent_todo_title?: string | null;
   planning_level: number;
   deleted_at: string | null;
   created_at: string;
@@ -65,6 +77,9 @@ export interface ConnectionProgress {
   blocked_count: number;
   available_count: number;
   next_available_item_id: string | null;
+  blocked_titles?: string[];
+  next_unlock_title?: string | null;
+  critical_path_length?: number;
 }
 
 export interface Connection {
@@ -88,6 +103,23 @@ export interface ActivityLog {
   created_at: string;
 }
 
+export interface TemplateSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  source_group_id: string | null;
+  counts: {
+    todos: number;
+    connections: number;
+  };
+}
+
+export interface BackupTaskPreview {
+  backup: Todo;
+  current: Todo | null;
+}
+
 export interface BackupSnapshot {
   id: string;
   label: string;
@@ -101,11 +133,33 @@ export interface BackupSnapshot {
   };
 }
 
+export interface SyncPackage {
+  version: 1;
+  exported_at: string;
+  device_name: string | null;
+  snapshot: {
+    groups: Group[];
+    todos: Todo[];
+    connections: Connection[];
+    connection_items: Array<{
+      id: string;
+      connection_id: string;
+      todo_id: string;
+      position: number;
+    }>;
+    activity_logs: ActivityLog[];
+  };
+}
+
 export interface AppSettings {
   defaultReminderTime: string;
+  enableKeyboardShortcuts: boolean;
   showShortcutHintsOnStart: boolean;
   showDebugStats: boolean;
   showGraphBoundaryHint: boolean;
+  syncDeviceName: string;
+  graphDefaultLayout: GraphLayoutMode;
+  shortcutBindings: Record<ShortcutAction, string>;
 }
 
 export type View =

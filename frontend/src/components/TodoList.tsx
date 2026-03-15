@@ -241,7 +241,6 @@ export default function TodoList() {
     activeConnections.forEach((conn) => map.set(conn.id, conn));
     return map;
   }, [activeConnections]);
-
   const reorderList =
     reorderMode && reorderItems.length > 0 ? reorderItems : orderedActiveIds;
   const visibleReorderList = reorderMode ? reorderList : reorderList.slice(0, visibleActiveCount);
@@ -550,7 +549,7 @@ export default function TodoList() {
         {/* Connections + solo todos in placement order */}
         <div
           ref={containerRef}
-          className={`relative space-y-2 mb-4 ${reorderMode ? "cursor-grab select-none touch-none" : ""}`}
+          className={`relative mb-4 space-y-2 ${reorderMode ? "cursor-grab select-none touch-none" : ""}`}
         >
           <AnimatePresence mode="popLayout">
             {visibleReorderList.map((item) => {
@@ -598,17 +597,17 @@ export default function TodoList() {
                 key={`todo-${item.id}`}
                 layout="position"
                 transition={{ type: "spring", stiffness: 520, damping: 36 }}
-              >
-                <div
-                  className={`${reorderMode ? "relative" : ""} ${todo.high_priority === 1 ? "mt-1" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
-                  ref={(el) => {
-                    if (!el) return;
-                    itemRefs.current.set(item.id, el);
-                  }}
                 >
-                  {reorderMode && (
-                    <button
-                      type="button"
+                  <div
+                    className={`${reorderMode ? "relative" : ""} ${todo.high_priority === 1 ? "mt-1" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                    ref={(el) => {
+                      if (!el) return;
+                      itemRefs.current.set(item.id, el);
+                    }}
+                  >
+                    {reorderMode && (
+                      <button
+                        type="button"
                       onPointerDown={(e) => {
                         e.preventDefault();
                         e.currentTarget.setPointerCapture?.(e.pointerId);
@@ -616,17 +615,17 @@ export default function TodoList() {
                       }}
                       className="absolute -left-10 top-1/2 -translate-y-1/2 text-slate-400 p-1.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-grab"
                     >
-                      <GripVertical size={16} />
-                    </button>
-                  )}
-                  <TodoItem
-                    todo={todo}
-                    isHighlighted={highlightTodoId === todo.id}
-                    nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
-                    layoutId={`todo-${todo.id}`}
-                  />
-                </div>
-              </motion.div>
+                        <GripVertical size={16} />
+                      </button>
+                    )}
+                    <TodoItem
+                      todo={todo}
+                      isHighlighted={highlightTodoId === todo.id}
+                      nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
+                      layoutId={`todo-${todo.id}`}
+                    />
+                  </div>
+                </motion.div>
             );
           })}
         </AnimatePresence>

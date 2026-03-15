@@ -17,6 +17,7 @@ interface GraphToolbarProps {
   onToggleFullscreen: () => void;
   onZoomOut: () => void;
   onZoomIn: () => void;
+  onQuickAdd?: () => void;
 }
 
 export default function GraphToolbar({
@@ -28,12 +29,23 @@ export default function GraphToolbar({
   onToggleFullscreen,
   onZoomOut,
   onZoomIn,
+  onQuickAdd,
 }: GraphToolbarProps) {
   const buttonClassName =
-    "w-8 h-8 rounded-lg bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150";
+    "h-10 w-10 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-md hover:shadow-lg hover:bg-white dark:hover:bg-slate-800 transition-all duration-150 sm:h-8 sm:w-8 sm:rounded-lg";
 
   return (
     <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
+      {onQuickAdd && (
+        <button
+          onClick={onQuickAdd}
+          title="Quick add task"
+          aria-label="Quick add task"
+          className={buttonClassName}
+        >
+          <Plus size={14} className="text-slate-600 dark:text-slate-300" />
+        </button>
+      )}
       <button
         onClick={onTogglePanel}
         title={showPanel ? "Hide controls" : "Show controls"}

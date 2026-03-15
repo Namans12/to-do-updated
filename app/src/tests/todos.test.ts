@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { createTestContext } from "./helpers.js";
-import { groups, todos } from "../db/schema.js";
+import { groups, todos, connections, connectionItems } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 
@@ -18,6 +18,8 @@ describe("Todos CRUD API", () => {
 
   beforeEach(async () => {
     // Clear tables before each test for isolation
+    ctx.db.delete(connectionItems).run();
+    ctx.db.delete(connections).run();
     ctx.db.delete(todos).run();
     ctx.db.delete(groups).run();
 
@@ -47,6 +49,18 @@ describe("Todos CRUD API", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+    });
+    return { res, body: await res.json() };
+  }
+
+  async function createConnection(
+    todoIds: string[],
+    kind: "sequence" | "dependency" | "branch" | "related" = "sequence"
+  ) {
+    const res = await ctx.app.request("/api/connections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ todoIds, kind }),
     });
     return { res, body: await res.json() };
   }
@@ -131,6 +145,24 @@ describe("Todos CRUD API", () => {
       expect(body.data.recurrence_enabled).toBe(1);
       expect(body.data.next_occurrence_at).toBe(body.data.reminder_at);
       expect(body.data.planning_level).toBe(2);
+    });
+
+    it("should allow recurring tasks without a reminder timestamp", async () => {
+      const res = await ctx.app.request(`/api/groups/${testGroupId}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Weekly review",
+          recurrence_rule: "weekly",
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(201);
+      expect(body.data.recurrence_rule).toBe("weekly");
+      expect(body.data.recurrence_enabled).toBe(1);
+      expect(body.data.reminder_at).toBeNull();
+      expect(body.data.next_occurrence_at).toBeTruthy();
     });
 
     it("should auto-set position to end of group list", async () => {
@@ -609,6 +641,76 @@ describe("Todos CRUD API", () => {
       expect(res.status).toBe(404);
       const body = await res.json();
       expect(body.error).toContain("not found");
+    });
+
+    it("should block completion when a dependency predecessor is incomplete", async () => {
+      const { body: first } = await createTodo(testGroupId, "first dependency");
+      const { body: second } = await createTodo(testGroupId, "second dependency");
+
+      const connectionRes = await createConnection(
+        [first.data.id, second.data.id],
+        "dependency"
+      );
+      expect(connectionRes.res.status).toBe(201);
+
+      const res = await ctx.app.request(`/api/todos/${second.data.id}/complete`, {
+        method: "PATCH",
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Complete");
+      expect(body.error).toContain("First dependency");
+    });
+
+    it("should allow dependency completion once prior steps are complete", async () => {
+      const { body: first } = await createTodo(testGroupId, "unlock me");
+      const { body: second } = await createTodo(testGroupId, "now me");
+
+      const connectionRes = await createConnection(
+        [first.data.id, second.data.id],
+        "dependency"
+      );
+      expect(connectionRes.res.status).toBe(201);
+
+      const firstRes = await ctx.app.request(`/api/todos/${first.data.id}/complete`, {
+        method: "PATCH",
+      });
+      expect(firstRes.status).toBe(200);
+
+      const secondRes = await ctx.app.request(`/api/todos/${second.data.id}/complete`, {
+        method: "PATCH",
+      });
+      const secondBody = await secondRes.json();
+
+      expect(secondRes.status).toBe(200);
+      expect(secondBody.data.is_completed).toBe(1);
+    });
+
+    it("should create the next recurring task instance when a recurring task is completed", async () => {
+      const createRes = await ctx.app.request(`/api/groups/${testGroupId}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Weekly review",
+          recurrence_rule: "weekly",
+        }),
+      });
+      const created = await createRes.json();
+
+      const completeRes = await ctx.app.request(`/api/todos/${created.data.id}/complete`, {
+        method: "PATCH",
+      });
+      expect(completeRes.status).toBe(200);
+
+      const listRes = await ctx.app.request(`/api/groups/${testGroupId}/todos`);
+      const listBody = await listRes.json();
+      expect(listBody.data).toHaveLength(2);
+      const reopened = listBody.data.find((todo: any) => todo.id !== created.data.id);
+      expect(reopened.title).toBe("Weekly review");
+      expect(reopened.is_completed).toBe(0);
+      expect(reopened.recurrence_rule).toBe("weekly");
+      expect(reopened.next_occurrence_at).toBeTruthy();
     });
   });
 

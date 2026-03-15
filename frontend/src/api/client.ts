@@ -5,8 +5,11 @@ import type {
   ConnectionKind,
   Group,
   RecurrenceRule,
+  SyncPackage,
+  TemplateSummary,
   Todo,
   TrashPayload,
+  BackupTaskPreview,
 } from "../types";
 
 const BASE = "/api";
@@ -259,6 +262,8 @@ export interface SearchResult {
 
 export const activityApi = {
   list: (limit = 50) => request<ActivityLog[]>(`/activity?limit=${limit}`),
+  entityHistory: (entityType: string, entityId: string, limit = 100) =>
+    request<ActivityLog[]>(`/activity/${entityType}/${entityId}?limit=${limit}`),
 };
 
 export const backupsApi = {
@@ -272,8 +277,60 @@ export const backupsApi = {
     request<BackupSnapshot>(`/backups/${id}/restore`, {
       method: "POST",
     }),
+  previewTask: (backupId: string, todoId: string) =>
+    request<BackupTaskPreview>(`/backups/${backupId}/todos/${todoId}`),
+  restoreTask: (backupId: string, todoId: string) =>
+    request<Todo>(`/backups/${backupId}/todos/${todoId}/restore`, {
+      method: "POST",
+    }),
   delete: (id: string) =>
     request<void>(`/backups/${id}`, {
       method: "DELETE",
+    }),
+};
+
+export const templatesApi = {
+  list: () => request<TemplateSummary[]>("/templates"),
+  create: (payload: { source_group_id: string; name?: string; description?: string | null }) =>
+    request<TemplateSummary>("/templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  apply: (id: string, groupId: string) =>
+    request<{
+      group_id: string;
+      template_id: string;
+      created_todo_count: number;
+      created_connection_count: number;
+    }>(`/templates/${id}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId }),
+    }),
+  delete: (id: string) =>
+    request<void>(`/templates/${id}`, {
+      method: "DELETE",
+    }),
+};
+
+export const syncApi = {
+  exportPackage: (deviceName?: string) =>
+    request<SyncPackage>(
+      `/sync/export${deviceName ? `?device_name=${encodeURIComponent(deviceName)}` : ""}`
+    ),
+  importPackage: (payload: SyncPackage) =>
+    request<{
+      version: 1;
+      exported_at: string;
+      device_name: string | null;
+      counts: {
+        groups: number;
+        todos: number;
+        connections: number;
+        connection_items: number;
+        activity_logs: number;
+      };
+    }>("/sync/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 };

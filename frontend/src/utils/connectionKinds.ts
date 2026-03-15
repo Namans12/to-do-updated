@@ -12,26 +12,26 @@ export const connectionKindMeta: Record<
 > = {
   sequence: {
     label: "Sequence",
-    description: "Step-by-step chain. Each item follows the last.",
+    description: "A step-by-step chain.",
     graphStroke: "rgb(99,102,241)",
     graphGlow: "rgba(99,102,241,0.45)",
   },
   dependency: {
     label: "Dependency",
-    description: "Only the next unlocked task is available until the blocker is done.",
+    description: "One step unlocks another.",
     graphStroke: "rgb(245,158,11)",
     graphGlow: "rgba(245,158,11,0.45)",
     dashArray: "10 6",
   },
   branch: {
     label: "Branch",
-    description: "The first task is the root. Children fan out from it after it is ready.",
+    description: "A split or fork in work.",
     graphStroke: "rgb(236,72,153)",
     graphGlow: "rgba(236,72,153,0.45)",
   },
   related: {
     label: "Related",
-    description: "Connected tasks with no blocking rules between them.",
+    description: "Connected, but not strictly ordered.",
     graphStroke: "rgb(16,185,129)",
     graphGlow: "rgba(16,185,129,0.4)",
     dashArray: "4 7",

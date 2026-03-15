@@ -3,7 +3,7 @@
 ## Core views
 
 - `Groups`: primary buckets for work.
-- `Agenda`: reminder-focused view split into overdue, today, upcoming, and no-reminder buckets.
+- `Agenda`: reminder-focused view with both bucketed agenda and roadmap timeline modes.
 - `Connections`: chain-like task groupings with explicit meaning.
 - `GraphPlan`: visual planning surface for connected tasks.
 - `Search`: cross-group task search by title and notes.
@@ -29,6 +29,8 @@
   - expand/collapse for long notes
   - auto-linked URLs
   - checklist-style lines using `- [ ]` and `- [x]`
+  - quick insert helpers for headings, links, and checklists while editing
+- Parent and subtask relationships are surfaced directly in the task list and roadmap.
 
 ## Connections
 
@@ -44,6 +46,11 @@
   - `dependency`
   - `branch`
   - `related`
+- Connection meaning:
+  - `sequence`: a step-by-step chain
+  - `branch`: a split or fork in work
+  - `dependency`: one step unlocks another
+  - `related`: connected, but not strictly ordered
 - Connection progress now reports:
   - `completed`
   - `available_count`
@@ -56,6 +63,7 @@
 - Tasks can optionally point to a parent task within the same group.
 - Reminder acknowledgement supports recurring reminders by advancing the reminder instead of clearing it.
 - Agenda and search surface reminder and planning information.
+- Roadmap mode groups tasks by reminder date and planning depth so project flow is easier to scan.
 
 ## Search and diagnostics
 
@@ -70,6 +78,22 @@
 - Settings exposes lightweight debug stats for groups, tasks, reminders, recurrence, planning levels, and connections.
 - Activity feed records important task, connection, and backup changes.
 - Local JSON backup snapshots support create, list, restore, and delete.
+- Manual sync packages support multi-device export and import without a hosted sync server.
+
+## GraphPlan
+
+- GraphPlan supports:
+  - direct edge selection
+  - in-graph connection renaming
+  - connection meaning edits
+  - delete from the graph inspector
+  - layout re-application without losing existing rules
+- Available auto-layout presets:
+  - `smart`
+  - `horizontal`
+  - `vertical`
+  - `radial`
+  - `planning`
 
 ## Keyboard shortcuts
 
