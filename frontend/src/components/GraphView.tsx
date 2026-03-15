@@ -1818,7 +1818,7 @@ export default function GraphView() {
       </div>
 
       {/* Group pills */}
-      <div className="mb-5 overflow-x-auto overflow-y-hidden no-scrollbar">
+      <div className="mb-4 overflow-x-auto overflow-y-hidden no-scrollbar sm:mb-5">
         <div className="flex w-max min-w-full gap-2 pb-1">
         {groups.map((g) => (
           <button

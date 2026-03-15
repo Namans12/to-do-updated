@@ -103,7 +103,7 @@ export default function SearchView() {
           )}
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-4 grid gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
           <FilterSelect label="Status" value={completed} onChange={setCompleted}>
             <option value="all">All status</option>
             <option value="false">Active only</option>
@@ -145,7 +145,7 @@ export default function SearchView() {
         </div>
 
         <div className="mt-4 flex justify-center">
-          <div className="w-full max-w-md">
+          <div className="w-full max-w-full sm:max-w-md">
           <FilterSelect label="Sort" value={sort} onChange={setSort}>
             <option value="relevance">Best match</option>
             <option value="created_oldest">Created oldest first</option>

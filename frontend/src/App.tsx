@@ -47,6 +47,7 @@ export default function App() {
 
   useEffect(() => {
     if (!settings.showShortcutHintsOnStart) return;
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) return;
     const seenKey = "nodes-todo-shortcuts-seen";
     if (localStorage.getItem(seenKey)) return;
     setShortcutHelpOpen(true);
@@ -284,10 +285,10 @@ export default function App() {
               currentView === "graph"
                 ? "max-w-6xl py-4 h-full"
                 : currentView === "search"
-                ? "max-w-7xl py-8"
+                ? "max-w-7xl py-5 sm:py-8"
                 : currentView === "settings" || currentView === "planner" || currentView === "connections"
-                ? "max-w-5xl py-8"
-                : "max-w-3xl py-8"
+                ? "max-w-5xl py-5 sm:py-8"
+                : "max-w-3xl py-5 sm:py-8"
             }`}
           >
             {currentView === "todos" && <TodoList />}
@@ -316,7 +317,7 @@ export default function App() {
           onClick={() => setShortcutHelpOpen(false)}
         >
           <div
-            className="w-full max-w-lg rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-2xl"
+            className="max-h-[min(90vh,42rem)] w-full max-w-lg overflow-y-auto rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-6 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center gap-3">

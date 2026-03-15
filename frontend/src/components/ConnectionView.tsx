@@ -82,7 +82,7 @@ export default function ConnectionView() {
 
   return (
     <div
-      className="animate-fade-in min-h-[calc(100vh-200px)] rounded-2xl p-6"
+      className="animate-fade-in min-h-[calc(100vh-200px)] rounded-2xl p-4 sm:p-6"
       style={{
         background:
           "radial-gradient(circle at 1px 1px, rgba(148,163,184,0.10) 1px, transparent 0)",
@@ -90,7 +90,7 @@ export default function ConnectionView() {
       }}
     >
       {/* Header */}
-      <div className="mb-8 flex items-start justify-between">
+      <div className="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
             <Share2 size={24} className="text-slate-400" />
@@ -102,7 +102,7 @@ export default function ConnectionView() {
         </div>
         <button
           onClick={() => setModalOpen(true)}
-          className="btn-primary flex items-center gap-2 !py-2.5 !px-4"
+          className="btn-primary flex w-full items-center justify-center gap-2 !py-2.5 !px-4 sm:w-auto"
         >
           <Plus size={16} />
           <span className="text-sm font-medium">New Connection</span>
