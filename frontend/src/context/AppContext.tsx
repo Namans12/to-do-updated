@@ -7,8 +7,36 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import type { Session } from "@supabase/supabase-js";
 import type { AppSettings, Group, Todo, Connection, View } from "../types";
 import { groupsApi, todosApi, connectionsApi } from "../api/client";
+import { sendMagicLink, getSyncSession, onSyncAuthStateChange, signOutSync } from "../sync/auth";
+import { isSupabaseSyncEnabled } from "../sync/config";
+import {
+  flushPendingOperations,
+  primeSyncState,
+  setSyncSession,
+  subscribeToRealtime,
+} from "../sync/repository";
+import {
+  clearStoredPasscode,
+  hashPasscode,
+  isPasscodeUnlockedForSession,
+  lockPasscodeSession,
+  markPasscodeUnlocked,
+  readStoredPasscodeHash,
+  storePasscodeHash,
+  verifyPasscode,
+} from "../utils/passcode";
+import {
+  clearStoredDeviceAuth,
+  enrollDeviceAuth,
+  isDeviceAuthConfigured,
+  isDeviceAuthSupported,
+  isDeviceAuthUnlockedForSession,
+  lockDeviceAuthSession,
+  verifyDeviceAuth,
+} from "../utils/deviceAuth";
 import toast from "react-hot-toast";
 
 interface AppState {
@@ -31,6 +59,13 @@ interface AppState {
   } | null;
   settings: AppSettings;
   shortcutHelpOpen: boolean;
+  authReady: boolean;
+  session: Session | null;
+  syncEnabled: boolean;
+  syncOnline: boolean;
+  passcodeLocked: boolean;
+  deviceAuthAvailable: boolean;
+  deviceAuthConfigured: boolean;
 }
 
 interface AppContextType extends AppState {
@@ -48,6 +83,15 @@ interface AppContextType extends AppState {
   stopReminderAlarm: () => Promise<void>;
   updateSettings: (settings: Partial<AppSettings>) => void;
   setShortcutHelpOpen: (open: boolean) => void;
+  sendMagicLinkEmail: (email: string) => Promise<void>;
+  signOutSession: () => Promise<void>;
+  unlockWithPasscode: (passcode: string) => Promise<boolean>;
+  setDevicePasscode: (passcode: string) => Promise<void>;
+  clearDevicePasscode: () => void;
+  lockApp: () => void;
+  unlockWithDeviceAuth: () => Promise<boolean>;
+  enrollLocalDeviceAuth: () => Promise<void>;
+  clearLocalDeviceAuth: () => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -71,6 +115,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   showShortcutHintsOnStart: true,
   showDebugStats: true,
   showGraphBoundaryHint: true,
+  passcodeLockEnabled: false,
+  deviceAuthEnabled: false,
   syncDeviceName: "My device",
   graphDefaultLayout: "smart",
   shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
@@ -148,6 +194,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     activeReminderAlarm: null,
     settings: readSettings(),
     shortcutHelpOpen: false,
+    authReady: !isSupabaseSyncEnabled,
+    session: null,
+    syncEnabled: isSupabaseSyncEnabled,
+    syncOnline: typeof navigator === "undefined" ? true : navigator.onLine,
+    passcodeLocked:
+      (readSettings().passcodeLockEnabled &&
+        !!readStoredPasscodeHash() &&
+        !isPasscodeUnlockedForSession()) ||
+      (readSettings().deviceAuthEnabled &&
+        isDeviceAuthConfigured() &&
+        !isDeviceAuthUnlockedForSession()),
+    deviceAuthAvailable: isDeviceAuthSupported(),
+    deviceAuthConfigured: isDeviceAuthConfigured(),
   });
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
@@ -158,6 +217,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [state]);
 
   const refreshGroups = useCallback(async () => {
+    if (isSupabaseSyncEnabled && !stateRef.current.session) {
+      setState((s) => ({
+        ...s,
+        groups: [],
+        selectedGroupId: null,
+        todos: [],
+        allTodos: [],
+      }));
+      return;
+    }
     try {
       const groups = await groupsApi.list();
       setState((s) => {
@@ -192,6 +261,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshTodos = useCallback(async () => {
+    if (isSupabaseSyncEnabled && !stateRef.current.session) {
+      setState((s) => ({ ...s, todos: [], allTodos: [] }));
+      return;
+    }
     const currentGroupId = state.selectedGroupId;
     if (!currentGroupId) {
       setState((s) => ({ ...s, todos: [] }));
@@ -220,6 +293,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [state.selectedGroupId]);
 
   const refreshConnections = useCallback(async () => {
+    if (isSupabaseSyncEnabled && !stateRef.current.session) {
+      setState((s) => ({ ...s, connections: [] }));
+      return;
+    }
     try {
       const connections = await connectionsApi.list();
       setState((s) => ({ ...s, connections }));
@@ -342,12 +419,126 @@ export function AppProvider({ children }: { children: ReactNode }) {
         },
       };
       writeSettings(nextSettings);
+      if (!nextSettings.deviceAuthEnabled) {
+        clearStoredDeviceAuth();
+      }
       return { ...s, settings: nextSettings };
     });
   }, []);
 
   const setShortcutHelpOpen = useCallback((open: boolean) => {
     setState((s) => ({ ...s, shortcutHelpOpen: open }));
+  }, []);
+
+  const sendMagicLinkEmail = useCallback(async (email: string) => {
+    await sendMagicLink(email);
+  }, []);
+
+  const signOutSession = useCallback(async () => {
+    if (!isSupabaseSyncEnabled) return;
+    await signOutSync();
+    setSyncSession(null);
+    todosCacheRef.current = {};
+    setState((s) => ({
+      ...s,
+      groups: [],
+      selectedGroupId: null,
+      todos: [],
+      allTodos: [],
+      connections: [],
+      session: null,
+    }));
+  }, []);
+
+  const unlockWithPasscode = useCallback(async (passcode: string) => {
+    const ok = await verifyPasscode(passcode);
+    if (ok) {
+      markPasscodeUnlocked();
+      setState((s) => ({ ...s, passcodeLocked: false }));
+    }
+    return ok;
+  }, []);
+
+  const setDevicePasscode = useCallback(async (passcode: string) => {
+    const hash = await hashPasscode(passcode);
+    storePasscodeHash(hash);
+    markPasscodeUnlocked();
+    setState((s) => {
+      const nextSettings = { ...s.settings, passcodeLockEnabled: true };
+      writeSettings(nextSettings);
+      return {
+        ...s,
+        settings: nextSettings,
+        passcodeLocked: false,
+      };
+    });
+  }, []);
+
+  const clearDevicePasscodeSetting = useCallback(() => {
+    clearStoredPasscode();
+    setState((s) => {
+      const nextSettings = { ...s.settings, passcodeLockEnabled: false };
+      writeSettings(nextSettings);
+      return {
+        ...s,
+        settings: nextSettings,
+        passcodeLocked: false,
+      };
+    });
+  }, []);
+
+  const lockApp = useCallback(() => {
+    lockPasscodeSession();
+    lockDeviceAuthSession();
+    setState((s) => ({
+      ...s,
+      passcodeLocked:
+        (s.settings.passcodeLockEnabled && !!readStoredPasscodeHash()) ||
+        (s.settings.deviceAuthEnabled && isDeviceAuthConfigured()),
+    }));
+  }, []);
+
+  const unlockWithDeviceAuth = useCallback(async () => {
+    try {
+      const ok = await verifyDeviceAuth();
+      if (ok) {
+        setState((s) => ({ ...s, passcodeLocked: false }));
+      }
+      return ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const enrollLocalDeviceAuth = useCallback(async () => {
+    await enrollDeviceAuth(readSettings().syncDeviceName || "Nodes Device");
+    setState((s) => {
+      const nextSettings = { ...s.settings, deviceAuthEnabled: true };
+      writeSettings(nextSettings);
+      return {
+        ...s,
+        settings: nextSettings,
+        deviceAuthConfigured: true,
+        passcodeLocked: false,
+      };
+    });
+  }, []);
+
+  const clearLocalDeviceAuth = useCallback(() => {
+    clearStoredDeviceAuth();
+    setState((s) => {
+      const nextSettings = { ...s.settings, deviceAuthEnabled: false };
+      writeSettings(nextSettings);
+      return {
+        ...s,
+        settings: nextSettings,
+        deviceAuthConfigured: false,
+        passcodeLocked:
+          s.settings.passcodeLockEnabled &&
+          !!readStoredPasscodeHash() &&
+          !isPasscodeUnlockedForSession(),
+      };
+    });
   }, []);
 
   const checkDueReminders = useCallback(async () => {
@@ -454,22 +645,82 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [state.groups, state.selectedGroupId, state.todos]);
 
-  // Initial load
   useEffect(() => {
-    const init = async () => {
-      await refreshGroups();
-      await refreshConnections();
-      setState((s) => ({ ...s, loading: false }));
+    if (!isSupabaseSyncEnabled) {
+      const init = async () => {
+        await refreshGroups();
+        await refreshConnections();
+        setState((s) => ({ ...s, loading: false }));
+      };
+      void init();
+      return;
+    }
+
+    let cancelled = false;
+    const initSync = async () => {
+      try {
+        const session = await getSyncSession();
+        if (cancelled) return;
+        setSyncSession(session);
+        await primeSyncState(session);
+        if (cancelled) return;
+        setState((s) => ({
+          ...s,
+          session,
+          authReady: true,
+        }));
+        if (session) {
+          await refreshGroups();
+          await refreshConnections();
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setState((s) => ({ ...s, authReady: true }));
+        }
+      } finally {
+        if (!cancelled) {
+          setState((s) => ({ ...s, loading: false }));
+        }
+      }
     };
-    init();
-  }, [refreshGroups, refreshConnections]);
+
+    void initSync();
+
+    const subscription = onSyncAuthStateChange(async (_event, session) => {
+      setSyncSession(session);
+      await primeSyncState(session);
+      if (cancelled) return;
+      todosCacheRef.current = {};
+      setState((s) => ({
+        ...s,
+        session,
+        authReady: true,
+        loading: false,
+        groups: [],
+        selectedGroupId: null,
+        todos: [],
+        allTodos: [],
+        connections: [],
+      }));
+      if (session) {
+        await refreshGroups();
+        await refreshConnections();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, [refreshConnections, refreshGroups]);
 
   // Refresh todos when group changes
   useEffect(() => {
-    if (state.selectedGroupId) {
+    if (state.selectedGroupId && (!isSupabaseSyncEnabled || state.session)) {
       refreshTodos();
     }
-  }, [state.selectedGroupId, refreshTodos]);
+  }, [state.selectedGroupId, state.session, refreshTodos]);
 
   useEffect(() => {
     if (!state.selectedGroupId) return;
@@ -488,6 +739,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Warm cache so switching groups feels instant after initial load.
   useEffect(() => {
     if (state.groups.length === 0) return;
+    if (isSupabaseSyncEnabled && !state.session) return;
     let cancelled = false;
     const warm = async () => {
       await Promise.all(
@@ -517,7 +769,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [state.groups]);
+  }, [state.groups, state.session]);
+
+  useEffect(() => {
+    if (!isSupabaseSyncEnabled || !state.session) return;
+    return subscribeToRealtime(() => {
+      void refreshGroups();
+      void refreshConnections();
+      if (stateRef.current.selectedGroupId) {
+        void refreshTodos();
+      }
+      void flushPendingOperations();
+    });
+  }, [state.session, refreshConnections, refreshGroups, refreshTodos]);
+
+  useEffect(() => {
+    if (!isSupabaseSyncEnabled) return;
+    const updateOnline = () => {
+      setState((s) => ({ ...s, syncOnline: navigator.onLine }));
+      if (navigator.onLine) {
+        void flushPendingOperations();
+      }
+    };
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+    };
+  }, []);
+
+  useEffect(() => {
+    setState((s) => ({
+      ...s,
+      passcodeLocked:
+        (s.settings.passcodeLockEnabled &&
+          !!readStoredPasscodeHash() &&
+          !isPasscodeUnlockedForSession()) ||
+        (s.settings.deviceAuthEnabled &&
+          isDeviceAuthConfigured() &&
+          !isDeviceAuthUnlockedForSession()),
+      deviceAuthAvailable: isDeviceAuthSupported(),
+      deviceAuthConfigured: isDeviceAuthConfigured(),
+    }));
+  }, [state.settings.passcodeLockEnabled, state.settings.deviceAuthEnabled]);
 
   useEffect(() => {
     if (state.loading) return;
@@ -544,6 +839,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         stopReminderAlarm,
         updateSettings,
         setShortcutHelpOpen,
+        sendMagicLinkEmail,
+        signOutSession,
+        unlockWithPasscode,
+        setDevicePasscode,
+        clearDevicePasscode: clearDevicePasscodeSetting,
+        lockApp,
+        unlockWithDeviceAuth,
+        enrollLocalDeviceAuth,
+        clearLocalDeviceAuth,
       }}
     >
       {children}

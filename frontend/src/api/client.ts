@@ -11,6 +11,15 @@ import type {
   TrashPayload,
   BackupTaskPreview,
 } from "../types";
+import { isSupabaseSyncEnabled } from "../sync/config";
+import {
+  syncedActivityApi,
+  syncedConnectionsApi,
+  syncedGroupsApi,
+  syncedSearchApi,
+  syncedTodosApi,
+  syncedTrashApi,
+} from "../sync/repository";
 
 const BASE = "/api";
 
@@ -47,8 +56,7 @@ async function request<T>(
   return (json?.data ?? json) as T;
 }
 
-// ── Groups ──────────────────────────────────────────────
-export const groupsApi = {
+const restGroupsApi = {
   list: () => request<Group[]>("/groups"),
   get: (id: string) => request<Group>(`/groups/${id}`),
   create: (name: string) =>
@@ -70,8 +78,7 @@ export const groupsApi = {
     }),
 };
 
-// ── Todos ───────────────────────────────────────────────
-export const todosApi = {
+const restTodosApi = {
   list: (groupId: string) =>
     request<Todo[]>(`/groups/${groupId}/todos`),
   get: (id: string) => request<Todo>(`/todos/${id}`),
@@ -147,8 +154,7 @@ export const batchApi = {
     }),
 };
 
-// ── Trash ───────────────────────────────────────────────
-export const trashApi = {
+const restTrashApi = {
   list: () => request<TrashPayload>("/trash"),
   restoreGroup: (groupId: string) =>
     request<{ message: string; restored_count: number }>(`/trash/groups/${groupId}/restore`, { method: "POST" }),
@@ -161,8 +167,7 @@ export const trashApi = {
   empty: () => request<void>("/trash", { method: "DELETE" }),
 };
 
-// ── Connections ─────────────────────────────────────────
-export const connectionsApi = {
+const restConnectionsApi = {
   list: () => request<Connection[]>("/connections"),
   get: (id: string) => request<Connection>(`/connections/${id}`),
   create: (todoIds: string[], name?: string, kind?: ConnectionKind) =>
@@ -206,8 +211,24 @@ export const connectionsApi = {
     request<void>(`/connections/${id}`, { method: "DELETE" }),
 };
 
-// ── Search ──────────────────────────────────────────────
-export const searchApi = {
+export interface SearchResult {
+  id: string;
+  title: string;
+  description: string | null;
+  high_priority: number;
+  is_completed: number;
+  position: number;
+  reminder_at: string | null;
+  recurrence_rule: RecurrenceRule | null;
+  planning_level: number;
+  parent_todo_id: string | null;
+  connection_kind: ConnectionKind | null;
+  group: { id: string; name: string };
+  created_at: string;
+  updated_at: string;
+}
+
+const restSearchApi = {
   search: async (
     q: string,
     filters?: {
@@ -243,28 +264,18 @@ export const searchApi = {
   },
 };
 
-export interface SearchResult {
-  id: string;
-  title: string;
-  description: string | null;
-  high_priority: number;
-  is_completed: number;
-  position: number;
-  reminder_at: string | null;
-  recurrence_rule: RecurrenceRule | null;
-  planning_level: number;
-  parent_todo_id: string | null;
-  connection_kind: ConnectionKind | null;
-  group: { id: string; name: string };
-  created_at: string;
-  updated_at: string;
-}
-
-export const activityApi = {
+const restActivityApi = {
   list: (limit = 50) => request<ActivityLog[]>(`/activity?limit=${limit}`),
   entityHistory: (entityType: string, entityId: string, limit = 100) =>
     request<ActivityLog[]>(`/activity/${entityType}/${entityId}?limit=${limit}`),
 };
+
+export const groupsApi = isSupabaseSyncEnabled ? syncedGroupsApi : restGroupsApi;
+export const todosApi = isSupabaseSyncEnabled ? syncedTodosApi : restTodosApi;
+export const connectionsApi = isSupabaseSyncEnabled ? syncedConnectionsApi : restConnectionsApi;
+export const searchApi = isSupabaseSyncEnabled ? syncedSearchApi : restSearchApi;
+export const trashApi = isSupabaseSyncEnabled ? syncedTrashApi : restTrashApi;
+export const activityApi = isSupabaseSyncEnabled ? syncedActivityApi : restActivityApi;
 
 export const backupsApi = {
   list: () => request<BackupSnapshot[]>("/backups"),

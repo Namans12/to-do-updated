@@ -8,6 +8,8 @@ import GraphView from "./components/GraphView";
 import ReminderView from "./components/ReminderView";
 import ReminderAlarmModal from "./components/ReminderAlarmModal";
 import SettingsView from "./components/SettingsView";
+import AuthScreen from "./components/AuthScreen";
+import PasscodeLockScreen from "./components/PasscodeLockScreen";
 import { Keyboard, Menu } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { formatShortcutBinding, shortcutMatchesEvent } from "./utils/shortcuts";
@@ -37,6 +39,10 @@ export default function App() {
     settings,
     shortcutHelpOpen,
     setShortcutHelpOpen,
+    authReady,
+    session,
+    syncEnabled,
+    passcodeLocked,
   } = useApp();
 
   useEffect(() => {
@@ -168,6 +174,29 @@ export default function App() {
     settings.shortcutBindings,
     shortcutHelpOpen,
   ]);
+
+  if (syncEnabled && !authReady) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 animate-pulse-soft">
+          <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 flex items-center justify-center">
+            <div className="w-6 h-6 rounded-lg bg-indigo-500 animate-check-bounce" />
+          </div>
+          <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
+            Connecting to live sync...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (syncEnabled && !session) {
+    return <AuthScreen />;
+  }
+
+  if (passcodeLocked) {
+    return <PasscodeLockScreen />;
+  }
 
   if (loading) {
     return (
