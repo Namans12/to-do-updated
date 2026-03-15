@@ -273,24 +273,17 @@ async function fetchRemoteSnapshot() {
   if (!supabase) throw new Error("Supabase sync is not configured.");
   const userId = await requireUserId();
 
-  const [groupsRes, todosRes, connectionsRes, itemsRes, activityRes] = await Promise.all([
+  const [groupsRes, todosRes, connectionsRes, itemsRes] = await Promise.all([
     supabase.from("groups").select("*").eq("user_id", userId).order("position", { ascending: true }),
     supabase.from("todos").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
     supabase.from("connections").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
     supabase.from("connection_items").select("*").order("position", { ascending: true }),
-    supabase
-      .from("activity_logs")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(200),
   ]);
 
   if (groupsRes.error) throw groupsRes.error;
   if (todosRes.error) throw todosRes.error;
   if (connectionsRes.error) throw connectionsRes.error;
   if (itemsRes.error) throw itemsRes.error;
-  if (activityRes.error) throw activityRes.error;
 
   const groups = (groupsRes.data as GroupRow[])
     .filter((group) => !group.deleted_at)
@@ -299,7 +292,22 @@ async function fetchRemoteSnapshot() {
   const connectionRows = connectionsRes.data as ConnectionRow[];
   const itemRows = itemsRes.data as ConnectionItemRow[];
   const connections = buildConnections(connectionRows, itemRows, todos);
-  const activity = (activityRes.data as ActivityRow[]).map(normalizeActivity);
+  let activity = (memorySnapshot?.activity ?? []).slice(0, 200);
+  try {
+    const activityRes = await supabase
+      .from("activity_logs")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (activityRes.error) {
+      console.warn("Live sync activity feed is unavailable; continuing without it.", activityRes.error);
+    } else {
+      activity = (activityRes.data as ActivityRow[]).map(normalizeActivity);
+    }
+  } catch (error) {
+    console.warn("Live sync activity fetch failed; continuing without it.", error);
+  }
 
   const snapshot: SyncCacheSnapshot = {
     groups,
@@ -372,7 +380,9 @@ async function writeRemoteActivity(
     created_at: nowIso(),
   };
   const { error } = await supabase.from("activity_logs").insert(row);
-  if (error) throw error;
+  if (error) {
+    console.warn("Live sync activity write failed; continuing without blocking the main action.", error);
+  }
 }
 
 async function queueOperation(operation: Omit<PendingOperation, "id" | "createdAt">) {
