@@ -323,6 +323,10 @@ async function maybeRefreshRemote() {
   return snapshot;
 }
 
+export async function readSyncedSnapshot() {
+  return maybeRefreshRemote();
+}
+
 function appendLocalActivity(
   snapshot: SyncCacheSnapshot,
   entry: {
@@ -1655,41 +1659,113 @@ export const syncedSearchApi = {
 };
 
 export const syncedTrashApi = {
-  list: async () => buildTrashPayload(await maybeRefreshRemote()),
+  list: async () => {
+    const snapshot = await maybeRefreshRemote();
+    if (!supabase) {
+      return buildTrashPayload(snapshot);
+    }
+    const userId = await requireUserId();
+    const { data, error } = await supabase
+      .from("groups")
+      .select("id, name, deleted_at")
+      .eq("user_id", userId)
+      .not("deleted_at", "is", null)
+      .order("deleted_at", { ascending: false });
+    if (error) throw error;
+
+    const deletedGroups = (data ?? []) as TrashGroup[];
+    const deletedGroupById = new Map(deletedGroups.map((group) => [group.id, group]));
+    const activeGroups = new Map(snapshot.groups.map((group) => [group.id, group]));
+
+    const todos = snapshot.todos
+      .filter((todo) => !!todo.deleted_at)
+      .map<TrashItem>((todo) => {
+        const deletedAt = todo.deleted_at ? new Date(todo.deleted_at) : new Date();
+        const purgeAt = new Date(deletedAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+        const daysUntilPurge = Math.max(
+          0,
+          Math.ceil((purgeAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000))
+        );
+        const deletedGroup = deletedGroupById.get(todo.group_id);
+        return {
+          ...todo,
+          group_name: activeGroups.get(todo.group_id)?.name ?? deletedGroup?.name ?? "Deleted group",
+          group_deleted: !!deletedGroup,
+          group_deleted_at: deletedGroup?.deleted_at ?? null,
+          days_until_purge: daysUntilPurge,
+        };
+      });
+
+    return { todos, groups: deletedGroups };
+  },
   restoreGroup: async (groupId: string) => {
     if (!supabase) throw new Error("Supabase sync is not configured.");
     const timestamp = nowIso();
-    await supabase.from("groups").update({ deleted_at: null, updated_at: timestamp }).eq("id", groupId);
-    await supabase.from("todos").update({ deleted_at: null, updated_at: timestamp }).eq("group_id", groupId);
+    const groupRes = await supabase
+      .from("groups")
+      .update({ deleted_at: null, updated_at: timestamp })
+      .eq("id", groupId);
+    if (groupRes.error) throw groupRes.error;
+    const todosRes = await supabase
+      .from("todos")
+      .update({ deleted_at: null, updated_at: timestamp })
+      .eq("group_id", groupId);
+    if (todosRes.error) throw todosRes.error;
     await fetchRemoteSnapshot();
     return { message: "Group restored", restored_count: 0 };
   },
   deleteGroupPermanently: async (groupId: string) => {
     if (!supabase) throw new Error("Supabase sync is not configured.");
-    await supabase.from("todos").delete().eq("group_id", groupId);
-    await supabase.from("groups").delete().eq("id", groupId);
+    const { data: groupTodos, error: groupTodosError } = await supabase
+      .from("todos")
+      .select("id")
+      .eq("group_id", groupId);
+    if (groupTodosError) throw groupTodosError;
+    for (const todo of groupTodos ?? []) {
+      await remoteRemoveTodoFromConnection(todo.id as string);
+    }
+    const todosRes = await supabase.from("todos").delete().eq("group_id", groupId);
+    if (todosRes.error) throw todosRes.error;
+    const groupsRes = await supabase.from("groups").delete().eq("id", groupId);
+    if (groupsRes.error) throw groupsRes.error;
     await fetchRemoteSnapshot();
-    return { message: "Group deleted", deleted_todo_count: 0 };
+    return { message: "Group deleted", deleted_todo_count: groupTodos?.length ?? 0 };
   },
   restore: async (id: string) => {
     if (!supabase) throw new Error("Supabase sync is not configured.");
-    await supabase.from("todos").update({ deleted_at: null, updated_at: nowIso() }).eq("id", id);
+    const { error } = await supabase
+      .from("todos")
+      .update({ deleted_at: null, updated_at: nowIso() })
+      .eq("id", id);
+    if (error) throw error;
     await fetchRemoteSnapshot();
     return (await getSnapshot()).todos.find((todo) => todo.id === id)!;
   },
   deletePermanently: async (id: string) => {
     if (!supabase) throw new Error("Supabase sync is not configured.");
     await remoteRemoveTodoFromConnection(id);
-    await supabase.from("todos").delete().eq("id", id);
+    const { error } = await supabase.from("todos").delete().eq("id", id);
+    if (error) throw error;
     await fetchRemoteSnapshot();
   },
   empty: async () => {
     if (!supabase) throw new Error("Supabase sync is not configured.");
     const snapshot = await getSnapshot();
     const deletedIds = snapshot.todos.filter((todo) => !!todo.deleted_at).map((todo) => todo.id);
-    if (deletedIds.length > 0) {
-      await supabase.from("todos").delete().in("id", deletedIds);
+    for (const todoId of deletedIds) {
+      await remoteRemoveTodoFromConnection(todoId);
     }
+    if (deletedIds.length > 0) {
+      const todosRes = await supabase.from("todos").delete().in("id", deletedIds);
+      if (todosRes.error) throw todosRes.error;
+    }
+    const userId = await requireUserId();
+    const groupsRes = await supabase
+      .from("groups")
+      .delete()
+      .eq("user_id", userId)
+      .not("deleted_at", "is", null);
+    if (groupsRes.error) throw groupsRes.error;
     await fetchRemoteSnapshot();
   },
 };

@@ -18,7 +18,7 @@ import EmptyState from "./EmptyState";
 import { getActionErrorMessage } from "../utils/errors";
 
 export default function TrashView() {
-  const { groups, refreshGroups, refreshTodos, refreshConnections } = useApp();
+  const { refreshGroups, refreshTodos, refreshConnections } = useApp();
   const [items, setItems] = useState<TrashItem[]>([]);
   const [trashedGroups, setTrashedGroups] = useState<TrashGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,7 +73,7 @@ export default function TrashView() {
 
   useEffect(() => {
     load();
-  }, [groups, load]);
+  }, [load]);
 
   const handleRestore = async (id: string) => {
     try {
