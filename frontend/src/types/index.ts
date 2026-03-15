@@ -157,6 +157,8 @@ export interface AppSettings {
   showShortcutHintsOnStart: boolean;
   showDebugStats: boolean;
   showGraphBoundaryHint: boolean;
+  passcodeLockEnabled: boolean;
+  deviceAuthEnabled: boolean;
   syncDeviceName: string;
   graphDefaultLayout: GraphLayoutMode;
   shortcutBindings: Record<ShortcutAction, string>;

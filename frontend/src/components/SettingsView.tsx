@@ -15,10 +15,12 @@ import {
   Bell,
   DatabaseBackup,
   Keyboard,
+  LockKeyhole,
   Settings,
   ShieldCheck,
   Smartphone,
   Stamp,
+  Unlock,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import EmptyState from "./EmptyState";
@@ -57,6 +59,16 @@ export default function SettingsView() {
     refreshGroups,
     refreshTodos,
     setShortcutHelpOpen,
+    syncEnabled,
+    syncOnline,
+    session,
+    lockApp,
+    setDevicePasscode,
+    clearDevicePasscode,
+    deviceAuthAvailable,
+    deviceAuthConfigured,
+    enrollLocalDeviceAuth,
+    clearLocalDeviceAuth,
   } = useApp();
   const [activity, setActivity] = useState<ActivityLog[]>([]);
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
@@ -67,6 +79,10 @@ export default function SettingsView() {
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [templateName, setTemplateName] = useState("");
   const [templateDescription, setTemplateDescription] = useState("");
+  const [passcode, setPasscode] = useState("");
+  const [confirmPasscode, setConfirmPasscode] = useState("");
+  const [verifyingPasscode, setVerifyingPasscode] = useState(false);
+  const [deviceAuthBusy, setDeviceAuthBusy] = useState(false);
 
   useEffect(() => {
     void ensureAllTodosLoaded();
@@ -279,6 +295,52 @@ export default function SettingsView() {
     toast.success("Keyboard shortcuts reset");
   };
 
+  const handleSavePasscode = async () => {
+    if (passcode.length < 4) {
+      toast.error("Passcode must be at least 4 digits.");
+      return;
+    }
+    if (passcode !== confirmPasscode) {
+      toast.error("Passcodes do not match.");
+      return;
+    }
+    setVerifyingPasscode(true);
+    try {
+      await setDevicePasscode(passcode);
+      setPasscode("");
+      setConfirmPasscode("");
+      toast.success("Device passcode enabled");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save passcode");
+    } finally {
+      setVerifyingPasscode(false);
+    }
+  };
+
+  const handleClearPasscode = () => {
+    clearDevicePasscode();
+    setPasscode("");
+    setConfirmPasscode("");
+    toast.success("Device passcode removed");
+  };
+
+  const handleEnrollDeviceAuth = async () => {
+    setDeviceAuthBusy(true);
+    try {
+      await enrollLocalDeviceAuth();
+      toast.success("Device unlock enabled");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to enable device unlock");
+    } finally {
+      setDeviceAuthBusy(false);
+    }
+  };
+
+  const handleClearDeviceAuth = () => {
+    clearLocalDeviceAuth();
+    toast.success("Device unlock removed");
+  };
+
   return (
     <div className="animate-fade-in space-y-8">
       <div>
@@ -297,6 +359,114 @@ export default function SettingsView() {
           description="Small defaults that shape day-to-day task editing and navigation."
           icon={<Bell size={16} className="text-indigo-500" />}
         >
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <LockKeyhole size={16} className="text-indigo-500" />
+                  Device passcode lock
+                </div>
+                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Keeps this device locked even if your sync session is already signed in. The passcode stays local on this device only.
+                </div>
+              </div>
+              {settings.passcodeLockEnabled && (
+                <button type="button" onClick={lockApp} className="btn-ghost !px-3 !py-2 text-xs">
+                  <Unlock size={13} />
+                  <span className="ml-1">Lock now</span>
+                </button>
+              )}
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <input
+                type="password"
+                inputMode="numeric"
+                value={passcode}
+                onChange={(event) => setPasscode(event.target.value.replace(/\D/g, "").slice(0, 12))}
+                className="input-base !py-2.5 text-sm"
+                placeholder={settings.passcodeLockEnabled ? "New passcode" : "Passcode"}
+                aria-label="Device passcode"
+              />
+              <input
+                type="password"
+                inputMode="numeric"
+                value={confirmPasscode}
+                onChange={(event) => setConfirmPasscode(event.target.value.replace(/\D/g, "").slice(0, 12))}
+                className="input-base !py-2.5 text-sm"
+                placeholder="Confirm passcode"
+                aria-label="Confirm device passcode"
+              />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSavePasscode()}
+                disabled={verifyingPasscode}
+                className="btn-primary !px-3 !py-2 text-xs"
+              >
+                {verifyingPasscode
+                  ? "Saving..."
+                  : settings.passcodeLockEnabled
+                  ? "Update Passcode"
+                  : "Enable Passcode"}
+              </button>
+              {settings.passcodeLockEnabled && (
+                <button type="button" onClick={handleClearPasscode} className="btn-ghost !px-3 !py-2 text-xs text-red-500">
+                  Remove Passcode
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Unlock size={16} className="text-emerald-500" />
+                  Device unlock
+                </div>
+                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Use Face ID, fingerprint, or the device screen lock where supported. This stays local to the device and does not sync.
+                </div>
+              </div>
+              {settings.deviceAuthEnabled && deviceAuthConfigured && (
+                <button type="button" onClick={lockApp} className="btn-ghost !px-3 !py-2 text-xs">
+                  Lock now
+                </button>
+              )}
+            </div>
+            <div className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+              {!deviceAuthAvailable
+                ? "This browser/device does not support WebAuthn device unlock."
+                : deviceAuthConfigured
+                ? "Device unlock is configured for this browser."
+                : "No device unlock credential is configured yet."}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleEnrollDeviceAuth()}
+                disabled={!deviceAuthAvailable || deviceAuthBusy}
+                className="btn-primary !px-3 !py-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deviceAuthBusy
+                  ? "Working..."
+                  : deviceAuthConfigured
+                  ? "Re-enroll Device Unlock"
+                  : "Enable Device Unlock"}
+              </button>
+              {deviceAuthConfigured && (
+                <button
+                  type="button"
+                  onClick={handleClearDeviceAuth}
+                  className="btn-ghost !px-3 !py-2 text-xs text-red-500"
+                >
+                  Remove Device Unlock
+                </button>
+              )}
+            </div>
+          </div>
+
           <label className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <span className="min-w-0">
               <span className="block text-sm font-medium">Default reminder time</span>
@@ -492,9 +662,25 @@ export default function SettingsView() {
 
       <Panel
         title="Sync & Devices"
-        description="Manual multi-device transfer without needing an always-on server."
+        description={
+          syncEnabled
+            ? "Supabase live sync is active. Manual package import/export remains as a legacy tool."
+            : "Manual multi-device transfer without needing an always-on server."
+        }
         icon={<Smartphone size={16} className="text-cyan-500" />}
       >
+        {syncEnabled && (
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 text-sm">
+            <div className="font-medium">
+              {session ? "Signed in to live sync" : "Not signed in"}
+            </div>
+            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              {syncOnline
+                ? "Realtime sync is available. Offline edits queue automatically when needed."
+                : "Offline mode is active. Cached reads stay available and writes queue locally."}
+            </div>
+          </div>
+        )}
         <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="text-sm font-medium">Export a sync package</div>
