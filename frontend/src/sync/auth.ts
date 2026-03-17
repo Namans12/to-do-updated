@@ -1,5 +1,6 @@
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
+import { syncDebugEnabled } from "./config";
 import { supabase } from "./supabase";
 
 const NATIVE_AUTH_REDIRECT_URL = "com.namans.todo://auth/callback";
@@ -11,6 +12,13 @@ const EMAIL_OTP_TYPES = new Set([
   "email_change",
   "email",
 ] as const);
+let sessionPromise: Promise<Session | null> | null = null;
+let redirectPromise: Promise<boolean> | null = null;
+
+function debugAuthLog(...args: unknown[]) {
+  if (!syncDebugEnabled) return;
+  console.info("[nodes-sync][auth]", ...args);
+}
 
 function isNativeShell() {
   return Capacitor.isNativePlatform() || isTauriDesktopShell();
@@ -58,9 +66,17 @@ export function getAuthRedirectUrl() {
 
 export async function getSyncSession() {
   if (!supabase) return null;
-  const { data, error } = await supabase.auth.getSession();
-  if (error) throw error;
-  return data.session;
+  if (sessionPromise) return sessionPromise;
+  sessionPromise = (async () => {
+    debugAuthLog("getSession:start");
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    debugAuthLog("getSession:done", { hasSession: !!data.session });
+    return data.session;
+  })().finally(() => {
+    sessionPromise = null;
+  });
+  return sessionPromise;
 }
 
 export async function sendMagicLink(email: string) {
@@ -107,28 +123,35 @@ function mapEmailOtpType(type: string | null) {
 
 export async function handleAuthRedirect(url: string) {
   if (!supabase || !isNativeShell()) return false;
-  const { code, token, tokenHash, type } = getNativeAuthParams(url);
+  if (redirectPromise) return redirectPromise;
+  redirectPromise = (async () => {
+    const { code, token, tokenHash, type } = getNativeAuthParams(url);
+    debugAuthLog("handleAuthRedirect:start", { hasCode: !!code, hasTokenHash: !!tokenHash, type });
 
-  if (code) {
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) throw error;
-    return true;
-  }
+    if (code) {
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (error) throw error;
+      return true;
+    }
 
-  const mappedType = mapEmailOtpType(type);
+    const mappedType = mapEmailOtpType(type);
 
-  if (tokenHash && mappedType) {
-    const { error } = await supabase.auth.verifyOtp({
-      token_hash: tokenHash,
-      type: mappedType,
-    });
-    if (error) throw error;
-    return true;
-  }
+    if (tokenHash && mappedType) {
+      const { error } = await supabase.auth.verifyOtp({
+        token_hash: tokenHash,
+        type: mappedType,
+      });
+      if (error) throw error;
+      return true;
+    }
 
-  if (token && mappedType) return false;
+    if (token && mappedType) return false;
 
-  return false;
+    return false;
+  })().finally(() => {
+    redirectPromise = null;
+  });
+  return redirectPromise;
 }
 
 export async function signOutSync() {

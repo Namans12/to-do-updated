@@ -20,7 +20,7 @@ import {
   signOutSync,
   signUpWithEmailPassword,
 } from "../sync/auth";
-import { isSupabaseSyncEnabled } from "../sync/config";
+import { isSupabaseSyncEnabled, syncDebugEnabled } from "../sync/config";
 import {
   flushPendingOperations,
   primeSyncState,
@@ -47,6 +47,7 @@ import {
   lockDeviceAuthSession,
   verifyDeviceAuth,
 } from "../utils/deviceAuth";
+import { getActionErrorMessage } from "../utils/errors";
 import toast from "react-hot-toast";
 
 interface AppState {
@@ -133,6 +134,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
 };
 const E2E_MODE = import.meta.env.VITE_E2E === "true";
+
+function debugSyncLog(...args: unknown[]) {
+  if (!syncDebugEnabled) return;
+  console.info("[nodes-sync][app]", ...args);
+}
 
 function readReminderAcks(): Record<string, string> {
   try {
@@ -223,6 +229,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
   const stateRef = useRef(state);
+  const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
+  const queuedBootstrapRef = useRef<{ reason: string; session?: Session | null } | null>(null);
   const appShell = Capacitor.isNativePlatform() || (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
   useEffect(() => {
@@ -268,7 +276,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         };
       });
     } catch (e) {
-      toast.error("Failed to load groups");
+      toast.error(getActionErrorMessage("load groups", e));
       console.error(e);
     }
   }, []);
@@ -300,7 +308,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         };
       });
     } catch (e) {
-      toast.error("Failed to load todos");
+      toast.error(getActionErrorMessage("load tasks", e));
       console.error(e);
     }
   }, [state.selectedGroupId]);
@@ -314,7 +322,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const connections = await connectionsApi.list();
       setState((s) => ({ ...s, connections }));
     } catch (e) {
-      toast.error("Failed to load connections");
+      toast.error(getActionErrorMessage("load connections", e));
       console.error(e);
     }
   }, []);
@@ -343,22 +351,77 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
-  const refreshSyncSessionState = useCallback(async () => {
-    if (!isSupabaseSyncEnabled) return;
-    const session = await getSyncSession();
-    setSyncSession(session);
-    setState((s) => ({
-      ...s,
-      session,
-      authReady: true,
-      loading: false,
-    }));
-    await primeSyncState(session);
-    if (session) {
-      await hydrateFromSyncSnapshot();
-      await flushPendingOperations();
-    }
-  }, [hydrateFromSyncSnapshot]);
+  const scheduleSyncBootstrap = useCallback(
+    async (reason: string, sessionOverride?: Session | null) => {
+      if (!isSupabaseSyncEnabled) return;
+      queuedBootstrapRef.current = { reason, session: sessionOverride };
+      if (bootstrapPromiseRef.current) return bootstrapPromiseRef.current;
+
+      bootstrapPromiseRef.current = (async () => {
+        while (queuedBootstrapRef.current) {
+          const request = queuedBootstrapRef.current;
+          queuedBootstrapRef.current = null;
+          const session =
+            request.session !== undefined ? request.session : await getSyncSession();
+
+          debugSyncLog("bootstrap:start", {
+            reason: request.reason,
+            hasSession: !!session,
+          });
+
+          try {
+            setSyncSession(session);
+            if (!session) {
+              todosCacheRef.current = {};
+              setState((s) => ({
+                ...s,
+                groups: [],
+                selectedGroupId: null,
+                todos: [],
+                allTodos: [],
+                connections: [],
+                session: null,
+                authReady: true,
+                loading: false,
+              }));
+              continue;
+            }
+
+            setState((s) => ({
+              ...s,
+              session,
+              authReady: true,
+              loading: true,
+            }));
+
+            await primeSyncState(session);
+            await hydrateFromSyncSnapshot();
+            setState((s) => ({
+              ...s,
+              session,
+              authReady: true,
+              loading: false,
+            }));
+            debugSyncLog("bootstrap:done", { reason: request.reason });
+          } catch (error) {
+            console.error(error);
+            toast.error(getActionErrorMessage("start live sync", error));
+            setState((s) => ({
+              ...s,
+              session: session ?? null,
+              authReady: true,
+              loading: false,
+            }));
+          }
+        }
+      })().finally(() => {
+        bootstrapPromiseRef.current = null;
+      });
+
+      return bootstrapPromiseRef.current;
+    },
+    [hydrateFromSyncSnapshot]
+  );
 
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
@@ -734,69 +797,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     let cancelled = false;
+    let subscription: { unsubscribe: () => void } | null = null;
+
     const initSync = async () => {
-      try {
-        const session = await getSyncSession();
-        if (cancelled) return;
-        setSyncSession(session);
-        setState((s) => ({
-          ...s,
-          session,
-          authReady: true,
-        }));
-        await primeSyncState(session);
-        if (cancelled) return;
-        if (session) {
-          await hydrateFromSyncSnapshot();
-        }
-      } catch (error) {
-        console.error(error);
-        if (!cancelled) {
-          setState((s) => ({ ...s, authReady: true }));
-        }
-      } finally {
-        if (!cancelled) {
-          setState((s) => ({ ...s, loading: false }));
-        }
-      }
+      await scheduleSyncBootstrap("initial");
+      if (cancelled) return;
+      subscription = onSyncAuthStateChange((event, session) => {
+        if (cancelled || event === "INITIAL_SESSION") return;
+        debugSyncLog("auth:event", { event, hasSession: !!session });
+        void scheduleSyncBootstrap(`auth:${event}`, session);
+      });
     };
 
     void initSync();
 
-    const subscription = onSyncAuthStateChange(async (_event, session) => {
-      try {
-        setSyncSession(session);
-        if (cancelled) return;
-        todosCacheRef.current = {};
-        setState((s) => ({
-          ...s,
-          session,
-          authReady: true,
-          loading: false,
-          groups: [],
-          selectedGroupId: null,
-          todos: [],
-          allTodos: [],
-          connections: [],
-        }));
-        await primeSyncState(session);
-        if (cancelled) return;
-        if (session) {
-          await hydrateFromSyncSnapshot();
-        }
-      } catch (error) {
-        console.error(error);
-        if (!cancelled) {
-          setState((s) => ({ ...s, authReady: true, loading: false }));
-        }
-      }
-    });
-
     return () => {
       cancelled = true;
-      subscription.unsubscribe();
+      subscription?.unsubscribe();
     };
-  }, [refreshConnections, refreshGroups]);
+  }, [refreshConnections, refreshGroups, scheduleSyncBootstrap]);
 
   useEffect(() => {
     if (!appShell || !isSupabaseSyncEnabled) return;
@@ -813,7 +832,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (!cancelled && launchUrl?.url) {
             const handled = await handleAuthRedirect(launchUrl.url);
             if (handled) {
-              await refreshSyncSessionState();
+              await scheduleSyncBootstrap("native-launch-url");
             }
           }
 
@@ -821,7 +840,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             try {
               const handled = await handleAuthRedirect(url);
               if (!cancelled && handled) {
-                await refreshSyncSessionState();
+                await scheduleSyncBootstrap("native-app-url");
               }
             } catch (error) {
               console.error(error);
@@ -831,7 +850,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           resumeListener = await CapacitorApp.addListener("resume", async () => {
             try {
               if (!cancelled) {
-                await refreshSyncSessionState();
+                await scheduleSyncBootstrap("native-resume");
               }
             } catch (error) {
               console.error(error);
@@ -857,7 +876,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             for (const url of urls) {
               const handled = await handleAuthRedirect(url);
               if (handled) {
-                await refreshSyncSessionState();
+                await scheduleSyncBootstrap("tauri-current-url");
                 break;
               }
             }
@@ -868,7 +887,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               for (const url of urls) {
                 const handled = await handleAuthRedirect(url);
                 if (!cancelled && handled) {
-                  await refreshSyncSessionState();
+                  await scheduleSyncBootstrap("tauri-open-url");
                   break;
                 }
               }
@@ -890,7 +909,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       void resumeListener?.remove();
       tauriUnlisten?.();
     };
-  }, [appShell, refreshSyncSessionState]);
+  }, [appShell, scheduleSyncBootstrap]);
 
   // Refresh todos when group changes
   useEffect(() => {
@@ -953,12 +972,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [state.groups, state.session]);
 
   useEffect(() => {
-    if (!isSupabaseSyncEnabled || !state.session) return;
+    if (!isSupabaseSyncEnabled || !state.authReady || state.loading || !state.session) return;
     return subscribeToRealtime(() => {
-      void hydrateFromSyncSnapshot();
-      void flushPendingOperations();
+      void scheduleSyncBootstrap("realtime", state.session);
     });
-  }, [state.session, hydrateFromSyncSnapshot]);
+  }, [state.authReady, state.loading, state.session, scheduleSyncBootstrap]);
 
   useEffect(() => {
     if (!isSupabaseSyncEnabled) return;

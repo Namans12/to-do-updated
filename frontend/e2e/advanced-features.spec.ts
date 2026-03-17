@@ -70,4 +70,17 @@ test("templates, task history, and graph quick add work together", async ({ page
   await expect(page.getByText("GraphPlan Task", { exact: true })).toHaveCount(0);
   await page.getByText("New graph task", { exact: true }).first().dblclick();
   await expect(page.getByText("GraphPlan Task", { exact: true })).toBeVisible();
+
+  const graphTodoCard = page
+    .locator("[data-todo-id]")
+    .filter({ hasText: "New graph task" })
+    .first();
+  await graphTodoCard.getByTitle("Toggle completion").click();
+
+  const todosAfterToggleRes = await page.request.get(`/api/groups/${targetGroup.data.id}/todos`);
+  const todosAfterToggleJson = await todosAfterToggleRes.json();
+  const graphTodo = todosAfterToggleJson.data.find(
+    (todo: { title: string; is_completed: number }) => todo.title === "New graph task"
+  );
+  expect(graphTodo?.is_completed).toBe(1);
 });

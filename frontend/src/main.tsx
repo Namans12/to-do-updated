@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { Fragment, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Capacitor } from "@capacitor/core";
 import { Toaster } from "react-hot-toast";
@@ -51,7 +51,7 @@ if (import.meta.env.PROD && !isNativeShell) {
 }
 
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>
+  import.meta.env.DEV && !isNativeShell ? <StrictMode>
     <ThemeProvider>
       <AppProvider>
         <App />
@@ -65,5 +65,19 @@ createRoot(document.getElementById("root")!).render(
         />
       </AppProvider>
     </ThemeProvider>
-  </StrictMode>
+  </StrictMode> : <Fragment>
+    <ThemeProvider>
+      <AppProvider>
+        <App />
+        <Toaster
+          position="bottom-right"
+          toastOptions={{
+            className:
+              "!bg-white dark:!bg-slate-800 !text-slate-900 dark:!text-slate-100 !shadow-xl !border !border-slate-200 dark:!border-slate-700 !rounded-xl",
+            duration: 2500,
+          }}
+        />
+      </AppProvider>
+    </ThemeProvider>
+  </Fragment>
 );

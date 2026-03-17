@@ -398,8 +398,9 @@ export default function GraphView() {
 
   // Ensure Graph-aks reflects connection changes when opening this view.
   useEffect(() => {
+    if (connections.length > 0) return;
     refreshConnections().catch(() => undefined);
-  }, [refreshConnections]);
+  }, [connections.length, refreshConnections]);
   useEffect(() => {
     if (!isCutMode) setHoverEdgeKey(null);
   }, [isCutMode]);
@@ -1562,18 +1563,25 @@ export default function GraphView() {
     }
   };
 
+  const queueGraphRefresh = useCallback(
+    ({ todos: shouldRefreshTodos = false, connections: shouldRefreshConnections = false }) => {
+      if (shouldRefreshTodos) {
+        void refreshTodos().catch(() => undefined);
+      }
+      if (shouldRefreshConnections) {
+        void refreshConnections().catch(() => undefined);
+      }
+    },
+    [refreshConnections, refreshTodos]
+  );
+
   /* ── Toggle todo ────────────────────────────────── */
 
   const handleToggle = async (todoId: string) => {
     try {
-      await todosApi.toggleComplete(todoId);
-      // Refresh local todos
-      if (groupId) {
-        const data = await todosApi.list(groupId);
-        setTodos(data.filter((t) => !t.deleted_at));
-      }
-      await refreshConnections();
-      await refreshTodos();
+      const updated = await todosApi.toggleComplete(todoId);
+      setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      queueGraphRefresh({ todos: true, connections: true });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to toggle");
     }
@@ -1630,7 +1638,7 @@ export default function GraphView() {
         parent_todo_id: draftTodoParentId || null,
       });
       setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      await refreshTodos();
+      queueGraphRefresh({ todos: true });
       toast.success("Task updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update task");
@@ -1643,8 +1651,7 @@ export default function GraphView() {
       await todosApi.delete(selectedTodo.id);
       setSelectedTodoId(null);
       setTodos((prev) => prev.filter((item) => item.id !== selectedTodo.id));
-      await refreshTodos();
-      await refreshConnections();
+      queueGraphRefresh({ todos: true, connections: true });
       toast.success("Task moved to trash");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete task");
@@ -1656,7 +1663,7 @@ export default function GraphView() {
     try {
       const created = await todosApi.create(groupId, "New graph task");
       setTodos((prev) => [...prev, created]);
-      await refreshTodos();
+      queueGraphRefresh({ todos: true });
       setSelectedTodoId(null);
       setSelectedConnectionId(null);
       const nextPos = {
@@ -2537,10 +2544,14 @@ export default function GraphView() {
                       className="flex items-center gap-2 rounded-t-[10px] px-3 py-2.5 cursor-grab active:cursor-grabbing touch-none transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40"
                     >
                       <button
+                        onPointerDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleToggle(todo.id);
+                          void handleToggle(todo.id);
                         }}
                         className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-all duration-300 ${
                           isCompleted

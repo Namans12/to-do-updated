@@ -9,7 +9,7 @@ import type {
   TrashGroup,
   TrashItem,
 } from "../types";
-import { isBrowserOnline } from "./config";
+import { isBrowserOnline, syncDebugEnabled } from "./config";
 import {
   deletePendingOperation,
   readPendingOperations,
@@ -92,6 +92,12 @@ let memorySnapshot: SyncCacheSnapshot | null = null;
 let activeSession: Session | null = null;
 let realtimeChannel: RealtimeChannel | null = null;
 let flushPromise: Promise<void> | null = null;
+let remoteSnapshotPromise: Promise<SyncCacheSnapshot> | null = null;
+
+function debugSyncLog(...args: unknown[]) {
+  if (!syncDebugEnabled) return;
+  console.info("[nodes-sync][repo]", ...args);
+}
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -110,6 +116,30 @@ function isMissingColumnOrRelationError(error: unknown) {
     message.includes("relation") ||
     message.includes("does not exist")
   );
+}
+
+function toRepositoryError(action: string, error: unknown) {
+  const message = getErrorMessage(error).trim();
+  const lowerMessage = message.toLowerCase();
+  if (
+    lowerMessage.includes("auth-token") ||
+    lowerMessage.includes("lock broken") ||
+    lowerMessage.includes("not released within")
+  ) {
+    return new Error("Live sync is still starting up. Please wait a moment and try again.");
+  }
+  if (
+    lowerMessage.includes("sign in to use live sync") ||
+    lowerMessage.includes("jwt") ||
+    lowerMessage.includes("refresh token") ||
+    lowerMessage.includes("session")
+  ) {
+    return new Error("Your live sync session has expired. Sign in again and retry.");
+  }
+  if (isMissingColumnOrRelationError(error)) {
+    return new Error("Your Supabase schema is out of date. Re-run the latest schema and try again.");
+  }
+  return new Error(message ? `Failed to ${action}. ${message}` : `Failed to ${action}.`);
 }
 
 function nowIso() {
@@ -345,7 +375,21 @@ async function fetchRemoteSnapshot() {
     lastSyncedAt: nowIso(),
   };
   await commitSnapshot(snapshot);
+  debugSyncLog("snapshot:updated", {
+    groups: snapshot.groups.length,
+    todos: snapshot.todos.length,
+    connections: snapshot.connections.length,
+    activity: snapshot.activity.length,
+  });
   return snapshot;
+}
+
+async function refreshRemoteSnapshot() {
+  if (remoteSnapshotPromise) return remoteSnapshotPromise;
+  remoteSnapshotPromise = fetchRemoteSnapshot().finally(() => {
+    remoteSnapshotPromise = null;
+  });
+  return remoteSnapshotPromise;
 }
 
 async function maybeRefreshRemote() {
@@ -354,7 +398,7 @@ async function maybeRefreshRemote() {
     return snapshot;
   }
   if (!snapshot.lastSyncedAt) {
-    return fetchRemoteSnapshot();
+    return refreshRemoteSnapshot();
   }
   return snapshot;
 }
@@ -559,7 +603,7 @@ async function createGroupRemote(name: string, id: string = crypto.randomUUID())
       })
     ).error;
   }
-  if (error) throw error;
+  if (error) throw toRepositoryError("create the group", error);
   await writeRemoteActivity("group", id, "created", `Created group "${name}".`, { name });
   return {
     id,
@@ -577,7 +621,7 @@ async function updateGroupRemote(id: string, name: string) {
     .from("groups")
     .update({ name, updated_at: timestamp })
     .eq("id", id);
-  if (error) throw error;
+  if (error) throw toRepositoryError("rename the group", error);
   await writeRemoteActivity("group", id, "updated", `Renamed group to "${name}".`, { name });
 }
 
@@ -644,7 +688,7 @@ async function createTodoRemote(
       })
     ).error;
   }
-  if (error) throw error;
+  if (error) throw toRepositoryError("create the task", error);
   await writeRemoteActivity("todo", id, "created", `Created task "${title}".`, { title, group_id: groupId });
   const { user_id: _userId, ...todo } = row;
   return todo;
@@ -658,7 +702,7 @@ async function updateTodoRemote(id: string, data: Record<string, unknown>) {
     patch.recurrence_enabled = patch.recurrence_rule ? 1 : 0;
   }
   const { error } = await supabase.from("todos").update(patch).eq("id", id);
-  if (error) throw error;
+  if (error) throw toRepositoryError("update the task", error);
   await writeRemoteActivity("todo", id, "updated", "Updated task details.", patch);
 }
 
@@ -1036,7 +1080,7 @@ export async function flushPendingOperations() {
       await applyQueuedOperation(operation);
       await deletePendingOperation(operation.id);
     }
-    await fetchRemoteSnapshot();
+    await refreshRemoteSnapshot();
   })().finally(() => {
     flushPromise = null;
   });
@@ -1059,7 +1103,7 @@ export async function primeSyncState(session: Session | null) {
     });
     return;
   }
-  await withOfflineFallback(fetchRemoteSnapshot, getSnapshot);
+  await withOfflineFallback(refreshRemoteSnapshot, getSnapshot);
   await flushPendingOperations();
 }
 
@@ -1069,30 +1113,30 @@ export function subscribeToRealtime(onInvalidate: () => void) {
   realtimeChannel = supabase
     .channel(`nodes-sync-${activeSession.user.id}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "groups" }, async () => {
-      await fetchRemoteSnapshot();
+      await refreshRemoteSnapshot();
       onInvalidate();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "todos" }, async () => {
-      await fetchRemoteSnapshot();
+      await refreshRemoteSnapshot();
       onInvalidate();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "connections" }, async () => {
-      await fetchRemoteSnapshot();
+      await refreshRemoteSnapshot();
       onInvalidate();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "connection_items" }, async () => {
-      await fetchRemoteSnapshot();
+      await refreshRemoteSnapshot();
       onInvalidate();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "activity_logs" }, async () => {
-      await fetchRemoteSnapshot();
+      await refreshRemoteSnapshot();
       onInvalidate();
     });
   realtimeChannel.subscribe();
 
   const onOnline = () => {
     void flushPendingOperations();
-    void fetchRemoteSnapshot().then(onInvalidate);
+    void refreshRemoteSnapshot().then(onInvalidate);
   };
   window.addEventListener("online", onOnline);
 

@@ -6,7 +6,7 @@ export const supabase = isSupabaseSyncEnabled
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
       },
       realtime: {
         params: {
