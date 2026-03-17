@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nodes To-Do",
+  "version": "1.0.0",
+  "identifier": "com.namans.todo",
+  "build": {
+    "beforeDevCommand": "npm run dev:host",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nodes To-Do",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["com.namans.todo"]
+      }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all"
+  }
+}

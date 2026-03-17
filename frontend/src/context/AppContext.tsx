@@ -7,10 +7,19 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { Capacitor } from "@capacitor/core";
+import { App as CapacitorApp } from "@capacitor/app";
 import type { Session } from "@supabase/supabase-js";
 import type { AppSettings, Group, Todo, Connection, View } from "../types";
 import { groupsApi, todosApi, connectionsApi } from "../api/client";
-import { sendMagicLink, getSyncSession, onSyncAuthStateChange, signOutSync } from "../sync/auth";
+import {
+  getSyncSession,
+  handleAuthRedirect,
+  onSyncAuthStateChange,
+  signInWithEmailPassword,
+  signOutSync,
+  signUpWithEmailPassword,
+} from "../sync/auth";
 import { isSupabaseSyncEnabled } from "../sync/config";
 import {
   flushPendingOperations,
@@ -84,7 +93,8 @@ interface AppContextType extends AppState {
   stopReminderAlarm: () => Promise<void>;
   updateSettings: (settings: Partial<AppSettings>) => void;
   setShortcutHelpOpen: (open: boolean) => void;
-  sendMagicLinkEmail: (email: string) => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
+  signUpWithEmail: (email: string, password: string) => Promise<{ needsEmailConfirmation: boolean }>;
   signOutSession: () => Promise<void>;
   unlockWithPasscode: (passcode: string) => Promise<boolean>;
   setDevicePasscode: (passcode: string) => Promise<void>;
@@ -122,6 +132,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   graphDefaultLayout: "smart",
   shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
 };
+const E2E_MODE = import.meta.env.VITE_E2E === "true";
 
 function readReminderAcks(): Record<string, string> {
   try {
@@ -212,6 +223,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const lastToastAlarmKeyRef = useRef<string | null>(null);
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
   const stateRef = useRef(state);
+  const appShell = Capacitor.isNativePlatform() || (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
   useEffect(() => {
     stateRef.current = state;
@@ -330,6 +342,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
       connections: snapshot.connections,
     }));
   }, []);
+
+  const refreshSyncSessionState = useCallback(async () => {
+    if (!isSupabaseSyncEnabled) return;
+    const session = await getSyncSession();
+    setSyncSession(session);
+    setState((s) => ({
+      ...s,
+      session,
+      authReady: true,
+      loading: false,
+    }));
+    await primeSyncState(session);
+    if (session) {
+      await hydrateFromSyncSnapshot();
+      await flushPendingOperations();
+    }
+  }, [hydrateFromSyncSnapshot]);
 
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
@@ -467,8 +496,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setState((s) => ({ ...s, shortcutHelpOpen: open }));
   }, []);
 
-  const sendMagicLinkEmail = useCallback(async (email: string) => {
-    await sendMagicLink(email);
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    await signInWithEmailPassword(email, password);
+  }, []);
+
+  const signUpWithEmail = useCallback(async (email: string, password: string) => {
+    const result = await signUpWithEmailPassword(email, password);
+    return {
+      needsEmailConfirmation: !result.session,
+    };
   }, []);
 
   const signOutSession = useCallback(async () => {
@@ -650,7 +686,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         const prefix = nextAlarm.highPriority ? "High Priority Reminder" : "Reminder";
         const alarmKey = `${nextAlarm.todoId}:${nextAlarm.reminderAt}`;
-        if (lastToastAlarmKeyRef.current !== alarmKey) {
+        if (!E2E_MODE && lastToastAlarmKeyRef.current !== alarmKey) {
           toast(`${prefix}: ${nextAlarm.title}`, {
             id: `reminder-${nextAlarm.todoId}`,
             duration: 5000,
@@ -658,12 +694,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
           lastToastAlarmKeyRef.current = alarmKey;
         }
 
-        if ("Notification" in window) {
+        if (!E2E_MODE && "Notification" in window) {
           if (Notification.permission === "granted") {
             new Notification(prefix, { body: nextAlarm.title });
           } else if (Notification.permission === "default") {
             Notification.requestPermission().catch(() => undefined);
           }
+        }
+
+        if (E2E_MODE) {
+          return { ...s, activeReminderAlarm: null };
         }
 
         return {
@@ -757,6 +797,100 @@ export function AppProvider({ children }: { children: ReactNode }) {
       subscription.unsubscribe();
     };
   }, [refreshConnections, refreshGroups]);
+
+  useEffect(() => {
+    if (!appShell || !isSupabaseSyncEnabled) return;
+
+    let cancelled = false;
+    let urlListener: { remove: () => Promise<void> } | null = null;
+    let resumeListener: { remove: () => Promise<void> } | null = null;
+    let tauriUnlisten: (() => void) | null = null;
+
+    const setupNativeAppLifecycle = async () => {
+      try {
+        if (Capacitor.isNativePlatform()) {
+          const launchUrl = await CapacitorApp.getLaunchUrl();
+          if (!cancelled && launchUrl?.url) {
+            const handled = await handleAuthRedirect(launchUrl.url);
+            if (handled) {
+              await refreshSyncSessionState();
+            }
+          }
+
+          urlListener = await CapacitorApp.addListener("appUrlOpen", async ({ url }) => {
+            try {
+              const handled = await handleAuthRedirect(url);
+              if (!cancelled && handled) {
+                await refreshSyncSessionState();
+              }
+            } catch (error) {
+              console.error(error);
+            }
+          });
+
+          resumeListener = await CapacitorApp.addListener("resume", async () => {
+            try {
+              if (!cancelled) {
+                await refreshSyncSessionState();
+              }
+            } catch (error) {
+              console.error(error);
+            }
+          });
+        }
+
+        if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+          const { getCurrent, isRegistered, onOpenUrl, register } = await import(
+            "@tauri-apps/plugin-deep-link"
+          );
+          try {
+            const alreadyRegistered = await isRegistered("com.namans.todo");
+            if (!alreadyRegistered) {
+              await register("com.namans.todo");
+            }
+          } catch (error) {
+            console.error(error);
+          }
+
+          const urls = await getCurrent();
+          if (!cancelled && urls?.length) {
+            for (const url of urls) {
+              const handled = await handleAuthRedirect(url);
+              if (handled) {
+                await refreshSyncSessionState();
+                break;
+              }
+            }
+          }
+
+          tauriUnlisten = await onOpenUrl(async (urls) => {
+            try {
+              for (const url of urls) {
+                const handled = await handleAuthRedirect(url);
+                if (!cancelled && handled) {
+                  await refreshSyncSessionState();
+                  break;
+                }
+              }
+            } catch (error) {
+              console.error(error);
+            }
+          });
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    };
+
+    void setupNativeAppLifecycle();
+
+    return () => {
+      cancelled = true;
+      void urlListener?.remove();
+      void resumeListener?.remove();
+      tauriUnlisten?.();
+    };
+  }, [appShell, refreshSyncSessionState]);
 
   // Refresh todos when group changes
   useEffect(() => {
@@ -882,7 +1016,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         stopReminderAlarm,
         updateSettings,
         setShortcutHelpOpen,
-        sendMagicLinkEmail,
+        signInWithEmail,
+        signUpWithEmail,
         signOutSession,
         unlockWithPasscode,
         setDevicePasscode,

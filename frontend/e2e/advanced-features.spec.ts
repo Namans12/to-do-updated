@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
 
+async function dismissReminderAlarm(page: import("@playwright/test").Page) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const stopButton = page.getByRole("button", { name: "Stop" });
+    if (!(await stopButton.isVisible().catch(() => false))) break;
+    await stopButton.click();
+    await page.waitForTimeout(150);
+  }
+}
+
 test("templates, task history, and graph quick add work together", async ({ page }) => {
   const unique = Date.now();
   const sourceGroupName = `Template Source ${unique}`;
@@ -20,10 +29,13 @@ test("templates, task history, and graph quick add work together", async ({ page
     window.localStorage.setItem("nodes-todo-shortcuts-seen", "true");
   });
   await page.goto("/");
+  await dismissReminderAlarm(page);
 
+  await dismissReminderAlarm(page);
   await page.getByText(sourceGroupName, { exact: true }).click();
   await expect(page.getByRole("heading", { name: sourceGroupName, exact: true })).toBeVisible();
 
+  await dismissReminderAlarm(page);
   await page.getByRole("button", { name: `Edit ${todoTitle}` }).click();
   await page.locator(`input[value="${todoTitle}"]`).fill(updatedTodoTitle);
   await page.getByRole("button", { name: "Save" }).click();
@@ -37,18 +49,21 @@ test("templates, task history, and graph quick add work together", async ({ page
   await expect(page.getByText(updatedTodoTitle, { exact: true }).first()).toBeVisible();
   await page.keyboard.press("Escape");
 
+  await dismissReminderAlarm(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Template name").fill(templateName);
   await page.getByLabel("Template description").fill("Reusable weekly planning board");
   await page.getByRole("button", { name: "Save Template" }).click();
   await expect(page.getByText(templateName, { exact: true })).toBeVisible();
 
+  await dismissReminderAlarm(page);
   await page.getByText(targetGroupName, { exact: true }).click();
   await page.keyboard.press("s");
   await page.getByRole("button", { name: "Apply" }).first().click();
   await page.keyboard.press("t");
   await expect(page.getByText(updatedTodoTitle, { exact: true })).toBeVisible();
 
+  await dismissReminderAlarm(page);
   await page.keyboard.press("g");
   await page.getByLabel("Quick add task").click();
   await expect(page.getByText("New graph task", { exact: true }).first()).toBeVisible();

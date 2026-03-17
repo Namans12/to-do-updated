@@ -1,5 +1,13 @@
+import { Capacitor } from "@capacitor/core";
+import { BiometricAuth } from "@aparajita/capacitor-biometric-auth";
+
 const DEVICE_AUTH_CREDENTIAL_ID_KEY = "nodes-device-auth-credential-id";
+const DEVICE_AUTH_NATIVE_ENABLED_KEY = "nodes-device-auth-native-enabled";
 const DEVICE_AUTH_UNLOCKED_KEY = "nodes-device-auth-unlocked";
+
+function isNativeDeviceAuthPlatform() {
+  return Capacitor.isNativePlatform();
+}
 
 function randomBuffer(length = 32) {
   return crypto.getRandomValues(new Uint8Array(length));
@@ -17,7 +25,7 @@ function base64UrlToBytes(value: string) {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
-export function isDeviceAuthSupported() {
+function isWebAuthnSupported() {
   return typeof window !== "undefined" && "PublicKeyCredential" in window && "credentials" in navigator;
 }
 
@@ -25,11 +33,22 @@ export function readStoredDeviceCredentialId() {
   return localStorage.getItem(DEVICE_AUTH_CREDENTIAL_ID_KEY);
 }
 
+function isNativeDeviceAuthConfigured() {
+  return localStorage.getItem(DEVICE_AUTH_NATIVE_ENABLED_KEY) === "true";
+}
+
+export function isDeviceAuthSupported() {
+  if (typeof window === "undefined") return false;
+  return isNativeDeviceAuthPlatform() || isWebAuthnSupported();
+}
+
 export function isDeviceAuthConfigured() {
-  return !!readStoredDeviceCredentialId();
+  if (typeof window === "undefined") return false;
+  return isNativeDeviceAuthPlatform() ? isNativeDeviceAuthConfigured() : !!readStoredDeviceCredentialId();
 }
 
 export function isDeviceAuthUnlockedForSession() {
+  if (typeof window === "undefined") return false;
   return sessionStorage.getItem(DEVICE_AUTH_UNLOCKED_KEY) === "true";
 }
 
@@ -43,11 +62,52 @@ export function lockDeviceAuthSession() {
 
 export function clearStoredDeviceAuth() {
   localStorage.removeItem(DEVICE_AUTH_CREDENTIAL_ID_KEY);
+  localStorage.removeItem(DEVICE_AUTH_NATIVE_ENABLED_KEY);
   sessionStorage.removeItem(DEVICE_AUTH_UNLOCKED_KEY);
 }
 
-export async function enrollDeviceAuth(userLabel: string) {
-  if (!isDeviceAuthSupported()) {
+async function enrollNativeDeviceAuth() {
+  const availability = await BiometricAuth.checkBiometry();
+  if (!availability.isAvailable && !availability.deviceIsSecure) {
+    throw new Error("This device does not have biometric or screen-lock authentication enabled.");
+  }
+
+  await BiometricAuth.authenticate({
+    reason: "Enable device unlock for Nodes",
+    cancelTitle: "Cancel",
+    allowDeviceCredential: true,
+    iosFallbackTitle: "Use device passcode",
+    androidTitle: "Enable device unlock",
+    androidSubtitle: "Use your device security to unlock Nodes",
+    androidConfirmationRequired: false,
+  });
+
+  localStorage.setItem(DEVICE_AUTH_NATIVE_ENABLED_KEY, "true");
+  markDeviceAuthUnlocked();
+  return "native-device-auth";
+}
+
+async function verifyNativeDeviceAuth() {
+  if (!isNativeDeviceAuthConfigured()) {
+    throw new Error("No device authentication is configured on this device.");
+  }
+
+  await BiometricAuth.authenticate({
+    reason: "Unlock Nodes",
+    cancelTitle: "Cancel",
+    allowDeviceCredential: true,
+    iosFallbackTitle: "Use device passcode",
+    androidTitle: "Unlock Nodes",
+    androidSubtitle: "Authenticate to open your workspace",
+    androidConfirmationRequired: false,
+  });
+
+  markDeviceAuthUnlocked();
+  return true;
+}
+
+async function enrollWebDeviceAuth(userLabel: string) {
+  if (!isWebAuthnSupported()) {
     throw new Error("Device authentication is not supported on this browser.");
   }
 
@@ -85,8 +145,8 @@ export async function enrollDeviceAuth(userLabel: string) {
   return credentialId;
 }
 
-export async function verifyDeviceAuth() {
-  if (!isDeviceAuthSupported()) {
+async function verifyWebDeviceAuth() {
+  if (!isWebAuthnSupported()) {
     throw new Error("Device authentication is not supported on this browser.");
   }
 
@@ -116,4 +176,14 @@ export async function verifyDeviceAuth() {
 
   markDeviceAuthUnlocked();
   return true;
+}
+
+export async function enrollDeviceAuth(userLabel: string) {
+  return isNativeDeviceAuthPlatform()
+    ? enrollNativeDeviceAuth()
+    : enrollWebDeviceAuth(userLabel);
+}
+
+export async function verifyDeviceAuth() {
+  return isNativeDeviceAuthPlatform() ? verifyNativeDeviceAuth() : verifyWebDeviceAuth();
 }

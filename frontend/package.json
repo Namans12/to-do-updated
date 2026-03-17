@@ -5,13 +5,25 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:host": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
+    "build:web": "npm run build",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "desktop:dev": "tauri dev",
+    "desktop:check": "cargo check --manifest-path src-tauri\\Cargo.toml",
+    "desktop:build": "tauri build",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:open": "cap open android",
+    "android:build": "npm run android:sync && cd android && gradlew.bat assembleDebug"
   },
   "dependencies": {
+    "@aparajita/capacitor-biometric-auth": "^10.0.0",
+    "@capacitor/app": "^8.0.1",
+    "@capacitor/core": "^8.2.0",
     "@supabase/supabase-js": "^2.57.4",
+    "@tauri-apps/plugin-deep-link": "^2.4.7",
     "framer-motion": "^11.18.0",
     "idb": "^8.0.3",
     "lucide-react": "^0.469.0",
@@ -20,10 +32,13 @@
     "react-hot-toast": "^2.5.2"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/cli": "^8.2.0",
+    "@playwright/test": "^1.54.2",
+    "@tauri-apps/cli": "^2.10.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "@playwright/test": "^1.54.2",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",

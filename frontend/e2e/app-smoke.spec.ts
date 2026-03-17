@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
 
+async function dismissReminderAlarm(page: import("@playwright/test").Page) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const stopButton = page.getByRole("button", { name: "Stop" });
+    if (!(await stopButton.isVisible().catch(() => false))) break;
+    await stopButton.click();
+    await page.waitForTimeout(150);
+  }
+}
+
 test("main app flow covers shortcuts, reminders, and connection meaning", async ({ page }) => {
   const unique = Date.now();
   const groupName = `E2E Group ${unique}`;
@@ -22,7 +31,9 @@ test("main app flow covers shortcuts, reminders, and connection meaning", async 
   await page.request.post("/api/groups", { data: { name: groupName } });
   await page.request.post("/api/groups", { data: { name: secondGroupName } });
   await page.reload();
+  await dismissReminderAlarm(page);
 
+  await dismissReminderAlarm(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await page.getByRole("switch", { name: /Enable keyboard shortcuts/i }).click();
@@ -38,6 +49,7 @@ test("main app flow covers shortcuts, reminders, and connection meaning", async 
   await expect(page.getByText("GraphPlan", { exact: true }).first()).toBeVisible();
   await page.keyboard.press("t");
 
+  await dismissReminderAlarm(page);
   await page.getByText(groupName, { exact: true }).click();
   await expect(page.getByRole("heading", { name: groupName, exact: true })).toBeVisible();
 

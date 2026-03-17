@@ -93,6 +93,25 @@ let activeSession: Session | null = null;
 let realtimeChannel: RealtimeChannel | null = null;
 let flushPromise: Promise<void> | null = null;
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    return typeof message === "string" ? message : "";
+  }
+  return "";
+}
+
+function isMissingColumnOrRelationError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("could not find the") ||
+    message.includes("column") ||
+    message.includes("relation") ||
+    message.includes("does not exist")
+  );
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -273,25 +292,34 @@ async function fetchRemoteSnapshot() {
   if (!supabase) throw new Error("Supabase sync is not configured.");
   const userId = await requireUserId();
 
-  const [groupsRes, todosRes, connectionsRes, itemsRes] = await Promise.all([
+  const [groupsRes, todosRes] = await Promise.all([
     supabase.from("groups").select("*").eq("user_id", userId).order("position", { ascending: true }),
     supabase.from("todos").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
-    supabase.from("connections").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
-    supabase.from("connection_items").select("*").order("position", { ascending: true }),
   ]);
 
   if (groupsRes.error) throw groupsRes.error;
   if (todosRes.error) throw todosRes.error;
-  if (connectionsRes.error) throw connectionsRes.error;
-  if (itemsRes.error) throw itemsRes.error;
 
   const groups = (groupsRes.data as GroupRow[])
     .filter((group) => !group.deleted_at)
     .map(({ deleted_at: _deletedAt, user_id: _userId, ...group }) => group);
   const todos = (todosRes.data as TodoRow[]).map(({ user_id: _userId, ...todo }) => todo);
-  const connectionRows = connectionsRes.data as ConnectionRow[];
-  const itemRows = itemsRes.data as ConnectionItemRow[];
-  const connections = buildConnections(connectionRows, itemRows, todos);
+  let connections: Connection[] = [];
+  try {
+    const [connectionsRes, itemsRes] = await Promise.all([
+      supabase.from("connections").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+      supabase.from("connection_items").select("*").order("position", { ascending: true }),
+    ]);
+    if (connectionsRes.error) throw connectionsRes.error;
+    if (itemsRes.error) throw itemsRes.error;
+    connections = buildConnections(
+      connectionsRes.data as ConnectionRow[],
+      itemsRes.data as ConnectionItemRow[],
+      todos
+    );
+  } catch (error) {
+    console.warn("Live sync connections are unavailable; continuing without them.", error);
+  }
   let activity = (memorySnapshot?.activity ?? []).slice(0, 200);
   try {
     const activityRes = await supabase
@@ -518,7 +546,19 @@ async function createGroupRemote(name: string, id: string = crypto.randomUUID())
     created_at: timestamp,
     updated_at: timestamp,
   };
-  const { error } = await supabase.from("groups").insert(row);
+  let error = (await supabase.from("groups").insert(row)).error;
+  if (error && isMissingColumnOrRelationError(error)) {
+    error = (
+      await supabase.from("groups").insert({
+        id,
+        user_id: userId,
+        name,
+        position,
+        created_at: timestamp,
+        updated_at: timestamp,
+      })
+    ).error;
+  }
   if (error) throw error;
   await writeRemoteActivity("group", id, "created", `Created group "${name}".`, { name });
   return {
@@ -585,7 +625,25 @@ async function createTodoRemote(
     created_at: timestamp,
     updated_at: timestamp,
   };
-  const { error } = await supabase.from("todos").insert(row);
+  let error = (await supabase.from("todos").insert(row)).error;
+  if (error && isMissingColumnOrRelationError(error)) {
+    error = (
+      await supabase.from("todos").insert({
+        id,
+        user_id: userId,
+        group_id: groupId,
+        title,
+        description: description ?? null,
+        high_priority: options?.high_priority ? 1 : 0,
+        reminder_at: (options?.reminder_at as string | null | undefined) ?? null,
+        is_completed: 0,
+        completed_at: null,
+        position,
+        created_at: timestamp,
+        updated_at: timestamp,
+      })
+    ).error;
+  }
   if (error) throw error;
   await writeRemoteActivity("todo", id, "created", `Created task "${title}".`, { title, group_id: groupId });
   const { user_id: _userId, ...todo } = row;
@@ -1681,7 +1739,13 @@ export const syncedTrashApi = {
       .eq("user_id", userId)
       .not("deleted_at", "is", null)
       .order("deleted_at", { ascending: false });
-    if (error) throw error;
+    if (error) {
+      if (isMissingColumnOrRelationError(error)) {
+        console.warn("Live sync trash groups are unavailable; using local trash snapshot only.", error);
+        return buildTrashPayload(snapshot);
+      }
+      throw error;
+    }
 
     const deletedGroups = (data ?? []) as TrashGroup[];
     const deletedGroupById = new Map(deletedGroups.map((group) => [group.id, group]));
