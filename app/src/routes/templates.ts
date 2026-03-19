@@ -57,13 +57,28 @@ function templatePath(id: string) {
 
 function readTemplateFiles() {
   const dir = ensureTemplatesDir();
-  return fs
-    .readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) =>
-      JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as TemplateFilePayload
-    )
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const parsed: TemplateFilePayload[] = [];
+  for (const name of fs.readdirSync(dir).filter((entry) => entry.endsWith(".json"))) {
+    const fullPath = path.join(dir, name);
+    try {
+      const payload = JSON.parse(fs.readFileSync(fullPath, "utf8")) as Partial<TemplateFilePayload>;
+      if (
+        typeof payload?.id !== "string" ||
+        typeof payload?.name !== "string" ||
+        typeof payload?.created_at !== "string"
+      ) {
+        console.warn(`[templates] Skipping malformed template file: ${name}`);
+        continue;
+      }
+      parsed.push(payload as TemplateFilePayload);
+    } catch (error) {
+      console.warn(
+        `[templates] Failed to parse template file: ${name}`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+  return parsed.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
 export function createTemplatesRouter(dbOverride?: DbOverride) {

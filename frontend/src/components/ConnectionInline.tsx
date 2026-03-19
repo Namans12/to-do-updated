@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { todosApi, connectionsApi } from "../api/client";
-import { useApp } from "../context/AppContext";
 import type { Connection } from "../types";
 import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -10,10 +9,16 @@ import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel }
 interface ConnectionInlineProps {
   connection: Connection;
   highlightTodoId?: string | null;
+  refreshTodos: () => Promise<void>;
+  refreshConnections: () => Promise<void>;
 }
 
-export default function ConnectionInline({ connection, highlightTodoId = null }: ConnectionInlineProps) {
-  const { refreshTodos, refreshConnections } = useApp();
+function ConnectionInline({
+  connection,
+  highlightTodoId = null,
+  refreshTodos,
+  refreshConnections,
+}: ConnectionInlineProps) {
   const [expanded, setExpanded] = useState(false);
   const { progress, is_fully_complete } = connection;
 
@@ -117,18 +122,6 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
               <span className="text-[10px] text-slate-400 dark:text-slate-500">
                 {progress.completed}/{progress.total}
               </span>
-              {!is_fully_complete && (
-                <>
-                  <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                    {progress.available_count} ready · {progress.blocked_count} blocked
-                  </span>
-                  {progress.critical_path_length ? (
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                      Path {progress.critical_path_length}
-                    </span>
-                  ) : null}
-                </>
-              )}
             </div>
 
             {/* Current / Next task preview */}
@@ -327,3 +320,17 @@ export default function ConnectionInline({ connection, highlightTodoId = null }:
     </motion.div>
   );
 }
+
+function areConnectionInlinePropsEqual(
+  prev: ConnectionInlineProps,
+  next: ConnectionInlineProps
+) {
+  return (
+    prev.connection === next.connection &&
+    prev.highlightTodoId === next.highlightTodoId &&
+    prev.refreshTodos === next.refreshTodos &&
+    prev.refreshConnections === next.refreshConnections
+  );
+}
+
+export default memo(ConnectionInline, areConnectionInlinePropsEqual);

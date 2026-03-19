@@ -7,7 +7,6 @@ import {
   FolderOpen,
   Check,
   Zap,
-  Sparkles,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import GraphToolbar from "./graph/GraphToolbar";
@@ -65,6 +64,37 @@ const ZOOM_STEP = 0.1;
 const CUT_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f43f5e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cpath d='M20 4 8.12 15.88'/%3E%3Cpath d='M14.47 14.48 20 20'/%3E%3Cpath d='M8.12 8.12 12 12'/%3E%3C/svg%3E\") 6 6, crosshair";
 
+const NODE_MAX_H = 120;
+const TITLE_MAX_LINES = 2;
+const DESCRIPTION_MAX_LINES = 3;
+const TITLE_CHARS_PER_LINE = 18;
+const DESCRIPTION_CHARS_PER_LINE = 24;
+
+const estimateWrappedLines = (value: string, charsPerLine: number) => {
+  if (!value) return 0;
+  return value
+    .split(/\r?\n/)
+    .map((part) => {
+      const segment = part.trimEnd();
+      if (!segment) return 1;
+      return Math.max(1, Math.ceil(segment.length / charsPerLine));
+    })
+    .reduce((sum, lines) => sum + lines, 0);
+};
+
+const getTodoNodeHeight = (todo?: Pick<Todo, "title" | "description"> | null) => {
+  if (!todo) return NODE_H;
+  const titleLines = Math.min(
+    TITLE_MAX_LINES,
+    Math.max(1, estimateWrappedLines((todo.title ?? "").trim(), TITLE_CHARS_PER_LINE))
+  );
+  const descriptionLines = todo.description
+    ? Math.min(DESCRIPTION_MAX_LINES, estimateWrappedLines(todo.description.trim(), DESCRIPTION_CHARS_PER_LINE))
+    : 0;
+  const computed = 36 + titleLines * 14 + descriptionLines * 11;
+  return Math.max(NODE_H, Math.min(NODE_MAX_H, computed));
+};
+
 const snapGrid = (v: number, max: number, min = 0) =>
   Math.round(Math.max(min, Math.min(v, max)) / GRID) * GRID;
 
@@ -95,19 +125,21 @@ const oppositeSide = (side: PortSide): PortSide => {
 const getPortAt = (
   pos: Record<string, NodePosition>,
   todoId: string,
-  side: PortSide
+  side: PortSide,
+  getHeightForTodoId: (todoId: string) => number = () => NODE_H
 ): { x: number; y: number } | null => {
   const p = pos[todoId];
   if (!p) return null;
+  const nodeH = getHeightForTodoId(todoId);
   switch (side) {
     case "left":
-      return { x: p.x, y: p.y + NODE_H / 2 };
+      return { x: p.x, y: p.y + nodeH / 2 };
     case "right":
-      return { x: p.x + NODE_W, y: p.y + NODE_H / 2 };
+      return { x: p.x + NODE_W, y: p.y + nodeH / 2 };
     case "top":
       return { x: p.x + NODE_W / 2, y: p.y };
     case "bottom":
-      return { x: p.x + NODE_W / 2, y: p.y + NODE_H };
+      return { x: p.x + NODE_W / 2, y: p.y + nodeH };
   }
 };
 
@@ -115,7 +147,8 @@ const getClosestOppositePortsAt = (
   pos: Record<string, NodePosition>,
   fromId: string,
   toId: string,
-  maxDistance = Number.POSITIVE_INFINITY
+  maxDistance = Number.POSITIVE_INFINITY,
+  getHeightForTodoId: (todoId: string) => number = () => NODE_H
 ) => {
   let best:
     | {
@@ -128,10 +161,10 @@ const getClosestOppositePortsAt = (
     | null = null;
 
   for (const fromSide of PORT_SIDES) {
-    const fromPort = getPortAt(pos, fromId, fromSide);
+    const fromPort = getPortAt(pos, fromId, fromSide, getHeightForTodoId);
     if (!fromPort) continue;
     const toSide = oppositeSide(fromSide);
-    const toPort = getPortAt(pos, toId, toSide);
+    const toPort = getPortAt(pos, toId, toSide, getHeightForTodoId);
     if (!toPort) continue;
     const dist = Math.hypot(toPort.x - fromPort.x, toPort.y - fromPort.y);
     if (dist > maxDistance) continue;
@@ -154,7 +187,8 @@ const getClosestAnyPortsAt = (
   pos: Record<string, NodePosition>,
   fromId: string,
   toId: string,
-  maxDistance = Number.POSITIVE_INFINITY
+  maxDistance = Number.POSITIVE_INFINITY,
+  getHeightForTodoId: (todoId: string) => number = () => NODE_H
 ) => {
   let best:
     | {
@@ -167,10 +201,10 @@ const getClosestAnyPortsAt = (
     | null = null;
 
   for (const fromSide of PORT_SIDES) {
-    const fromPort = getPortAt(pos, fromId, fromSide);
+    const fromPort = getPortAt(pos, fromId, fromSide, getHeightForTodoId);
     if (!fromPort) continue;
     for (const toSide of PORT_SIDES) {
-      const toPort = getPortAt(pos, toId, toSide);
+      const toPort = getPortAt(pos, toId, toSide, getHeightForTodoId);
       if (!toPort) continue;
       const dist = Math.hypot(toPort.x - fromPort.x, toPort.y - fromPort.y);
       if (dist > maxDistance) continue;
@@ -197,6 +231,8 @@ function buildAutoLayout(
 ) {
   const fresh: Record<string, NodePosition> = {};
   const todoById = new Map(todos.map((todo) => [todo.id, todo] as const));
+  const nodeHeightById = new Map(todos.map((todo) => [todo.id, getTodoNodeHeight(todo)] as const));
+  const getNodeHeightForId = (todoId: string) => nodeHeightById.get(todoId) ?? NODE_H;
   const relevantConnections = connections.filter((conn) =>
     conn.items.some((item) => todoById.has(item.todo_id))
   );
@@ -205,13 +241,20 @@ function buildAutoLayout(
 
   const place = (todoId: string, x: number, y: number) => {
     if (placed.has(todoId)) return;
+    const nextNodeH = getNodeHeightForId(todoId);
     let nextX = snapGrid(x, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
-    let nextY = snapGrid(y, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
+    let nextY = snapGrid(y, canvasSize.h - nextNodeH - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY);
     let guard = 0;
     while (
-      Object.values(fresh).some(
-        (pos) => Math.abs(pos.x - nextX) < NODE_W && Math.abs(pos.y - nextY) < NODE_H
-      ) &&
+      Object.entries(fresh).some(([otherId, pos]) => {
+        const otherNodeH = getNodeHeightForId(otherId);
+        return (
+          nextX < pos.x + NODE_W &&
+          nextX + NODE_W > pos.x &&
+          nextY < pos.y + otherNodeH &&
+          nextY + nextNodeH > pos.y
+        );
+      }) &&
       guard < 20
     ) {
       nextX = snapGrid(
@@ -222,7 +265,7 @@ function buildAutoLayout(
       if (guard % 3 === 2) {
         nextY = snapGrid(
           nextY + 100,
-          canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
+          canvasSize.h - nextNodeH - RIGHT_BOTTOM_BOUNDARY,
           LEFT_TOP_BOUNDARY
         );
       }
@@ -335,11 +378,30 @@ function buildAutoLayout(
     groupedByLevel.set(todo.planning_level, bucket);
   });
 
+  const usedPositions = Object.values(fresh);
+  const maxPlacedX =
+    usedPositions.length > 0
+      ? Math.max(...usedPositions.map((pos) => pos.x))
+      : 80;
+  const fallbackBaseX = snapGrid(
+    Math.min(
+      maxPlacedX + NODE_W + 80,
+      canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY - 440
+    ),
+    canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
+    LEFT_TOP_BOUNDARY
+  );
+  let fallbackRow = 0;
+
   for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
     levelTodos.forEach((todo, index) => {
-      place(todo.id, 80 + level * 240 + (index % 3) * 220, laneY + Math.floor(index / 3) * 140);
+      place(
+        todo.id,
+        fallbackBaseX + level * 220,
+        80 + (fallbackRow + index) * 120
+      );
     });
-    laneY += Math.max(180, Math.ceil(levelTodos.length / 3) * 140 + 40);
+    fallbackRow += Math.max(1, levelTodos.length);
   }
 
   return fresh;
@@ -348,7 +410,7 @@ function buildAutoLayout(
 /* ─── Component ────────────────────────────────────── */
 
 export default function GraphView() {
-  const { groups, connections, refreshConnections, refreshTodos, selectedGroupId, settings } =
+  const { groups, todos: syncedTodos, connections, refreshConnections, refreshTodos, selectedGroupId, settings } =
     useApp();
   const [groupId, setGroupId] = useState<string | null>(selectedGroupId);
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -374,9 +436,12 @@ export default function GraphView() {
   const [draftTodoRecurrenceRule, setDraftTodoRecurrenceRule] = useState<"" | "daily" | "weekly" | "monthly">("");
   const [draftTodoParentId, setDraftTodoParentId] = useState("");
   const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>(settings.graphDefaultLayout);
+  const [isCreatingTodo, setIsCreatingTodo] = useState(false);
+  const [isSavingTodoDraft, setIsSavingTodoDraft] = useState(false);
   const [nearBoundary, setNearBoundary] = useState({ right: false, bottom: false });
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTargetRef = useRef<string | null>(null);
+  const graphCreateLockRef = useRef<string | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({
     w: BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W,
@@ -384,6 +449,25 @@ export default function GraphView() {
   });
   const canvasRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
+  const lastGraphCreateRef = useRef<{ signature: string; timestamp: number } | null>(null);
+  const dedupeGraphTodos = useCallback((items: Todo[]) => {
+    const map = new Map<string, Todo>();
+    items.forEach((item) => {
+      map.set(item.id, item);
+    });
+    return [...map.values()];
+  }, []);
+  const nodeHeightById = useMemo(() => {
+    const map = new Map<string, number>();
+    todos.forEach((todo) => {
+      map.set(todo.id, getTodoNodeHeight(todo));
+    });
+    return map;
+  }, [todos]);
+  const getNodeHeightForId = useCallback(
+    (todoId: string) => nodeHeightById.get(todoId) ?? NODE_H,
+    [nodeHeightById]
+  );
 
   // Keep graph group selection valid as groups are deleted/restored in real time.
   useEffect(() => {
@@ -419,11 +503,16 @@ export default function GraphView() {
       setLoading(false);
       return;
     }
+    if (groupId === selectedGroupId) {
+      setTodos(dedupeGraphTodos(syncedTodos.filter((t) => !t.deleted_at)));
+      setLoading(false);
+      return;
+    }
     const load = async () => {
       setLoading(true);
       try {
         const data = await todosApi.list(groupId);
-        setTodos(data.filter((t) => !t.deleted_at));
+        setTodos(dedupeGraphTodos(data.filter((t) => !t.deleted_at)));
       } catch {
         setTodos([]);
         toast.error("Failed to load tasks");
@@ -432,7 +521,7 @@ export default function GraphView() {
       }
     };
     load();
-  }, [groupId]);
+  }, [dedupeGraphTodos, groupId, selectedGroupId, syncedTodos]);
 
   /* ── Auto-layout ────────────────────────────────── */
 
@@ -446,6 +535,7 @@ export default function GraphView() {
         const updated = { ...parsed };
         let dirty = false;
         todos.forEach((t, i) => {
+          const nodeHeight = getNodeHeightForId(t.id);
           if (!updated[t.id]) {
             const cols = Math.max(3, Math.ceil(Math.sqrt(todos.length)));
             updated[t.id] = {
@@ -456,7 +546,7 @@ export default function GraphView() {
               ),
               y: snapGrid(
                 60 + Math.floor(i / cols) * (NODE_H + 60),
-                canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
+                canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY,
                 LEFT_TOP_BOUNDARY
               ),
             };
@@ -470,7 +560,7 @@ export default function GraphView() {
             );
             const clampedY = snapGrid(
               current.y,
-              canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY,
+              canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY,
               LEFT_TOP_BOUNDARY
             );
             if (clampedX !== current.x || clampedY !== current.y) {
@@ -489,7 +579,7 @@ export default function GraphView() {
     const fresh = buildAutoLayout(todos, connections, canvasSize, layoutMode);
     setPositions(fresh);
     localStorage.setItem(key, JSON.stringify(fresh));
-  }, [todos, groupId, canvasSize.w, canvasSize.h, connections, layoutMode]);
+  }, [todos, groupId, canvasSize.w, canvasSize.h, connections, layoutMode, getNodeHeightForId]);
 
   const savePositions = useCallback(
     (pos: Record<string, NodePosition>) => {
@@ -507,6 +597,16 @@ export default function GraphView() {
   const selectedConnection =
     groupConnections.find((conn) => conn.id === selectedConnectionId) ?? null;
   const selectedTodo = todos.find((todo) => todo.id === selectedTodoId) ?? null;
+  const activeTodoInspectorTitle = selectedTodo?.title ?? "New graph task";
+  const nextAvailableTodoIds = useMemo(() => {
+    const ids = new Set<string>();
+    groupConnections.forEach((conn) => {
+      if (conn.progress.next_available_item_id) {
+        ids.add(conn.progress.next_available_item_id);
+      }
+    });
+    return ids;
+  }, [groupConnections]);
 
   useEffect(() => {
     if (!selectedConnection) {
@@ -551,7 +651,13 @@ export default function GraphView() {
   const connectedAdjacents = useMemo(() => {
     const pairs = new Map<string, AdjPair>();
     for (const edge of groupEdges) {
-      const bestTouch = getClosestOppositePortsAt(positions, edge.fromId, edge.toId, SNAP_PX);
+      const bestTouch = getClosestOppositePortsAt(
+        positions,
+        edge.fromId,
+        edge.toId,
+        SNAP_PX,
+        getNodeHeightForId
+      );
       if (!bestTouch) continue;
       const key = canonicalPairKey(edge.fromId, edge.toId);
       if (pairs.has(key)) continue;
@@ -566,7 +672,7 @@ export default function GraphView() {
     }
 
     return pairs;
-  }, [groupEdges, positions]);
+  }, [getNodeHeightForId, groupEdges, positions]);
 
   const fusedGraph = useMemo(() => {
     const graph = new Map<string, Set<string>>();
@@ -619,8 +725,8 @@ export default function GraphView() {
         }
       }
 
-      const firstPort = getPortAt(positions, firstId, firstSide);
-      const secondPort = getPortAt(positions, secondId, secondSide);
+      const firstPort = getPortAt(positions, firstId, firstSide, getNodeHeightForId);
+      const secondPort = getPortAt(positions, secondId, secondSide, getNodeHeightForId);
       if (!firstPort || !secondPort) continue;
 
       hidden.add(`${firstId}:${firstSide}`);
@@ -634,7 +740,7 @@ export default function GraphView() {
     }
 
     return { hidden, shared };
-  }, [connectedAdjacents, positions]);
+  }, [connectedAdjacents, getNodeHeightForId, positions]);
 
   const getFusedComponent = useCallback(
     (startId: string) => {
@@ -666,23 +772,27 @@ export default function GraphView() {
             left: p.x - 8,
             top: p.y - 8,
             right: p.x + NODE_W + 8,
-            bottom: p.y + NODE_H + 8,
+            bottom: p.y + getNodeHeightForId(t.id) + 8,
           };
         }),
-    [todos, positions]
+    [getNodeHeightForId, todos, positions]
   );
 
   const todoIds = useMemo(() => todos.map((t) => t.id), [todos]);
 
   const overlapArea = (
+    idA: string,
+    idB: string,
     a: NodePosition | undefined,
     b: NodePosition | undefined
   ) => {
     if (!a || !b) return 0;
+    const heightA = getNodeHeightForId(idA);
+    const heightB = getNodeHeightForId(idB);
     const left = Math.max(a.x, b.x);
     const right = Math.min(a.x + NODE_W, b.x + NODE_W);
     const top = Math.max(a.y, b.y);
-    const bottom = Math.min(a.y + NODE_H, b.y + NODE_H);
+    const bottom = Math.min(a.y + heightA, b.y + heightB);
     const w = right - left;
     const h = bottom - top;
     if (w <= OVERLAP_EPS || h <= OVERLAP_EPS) return 0;
@@ -697,12 +807,12 @@ export default function GraphView() {
         if (!a) continue;
         for (const otherId of todoIds) {
           if (id === otherId || movingIds.has(otherId)) continue;
-          total += overlapArea(a, pos[otherId]);
+          total += overlapArea(id, otherId, a, pos[otherId]);
         }
       }
       return total;
     },
-    [todoIds]
+    [getNodeHeightForId, todoIds]
   );
 
   /* ── Port helpers ───────────────────────────────── */
@@ -711,7 +821,7 @@ export default function GraphView() {
     todoId: string,
     side: PortSide
   ): { x: number; y: number } | null => {
-    return getPortAt(positions, todoId, side);
+    return getPortAt(positions, todoId, side, getNodeHeightForId);
   };
 
   const sideNormal = (side: PortSide) => {
@@ -1209,6 +1319,7 @@ export default function GraphView() {
       longPressTargetRef.current = id;
       longPressTimerRef.current = setTimeout(() => {
         if (draggingNode || longPressTargetRef.current !== id) return;
+        setIsCreatingTodo(false);
         setSelectedTodoId(id);
         setSelectedConnectionId(null);
         clearLongPress();
@@ -1220,7 +1331,7 @@ export default function GraphView() {
   /* ── Drag: connect ──────────────────────────────── */
 
   const onPortDown = (
-    e: React.MouseEvent,
+    e: ReactPointerEvent,
     todoId: string,
     side: "left" | "right" | "top" | "bottom"
   ) => {
@@ -1236,11 +1347,12 @@ export default function GraphView() {
     });
   };
 
-  const getDragBounds = useCallback(() => {
+  const getDragBounds = useCallback((todoId: string) => {
+    const nodeHeight = getNodeHeightForId(todoId);
     const minX = LEFT_TOP_BOUNDARY;
     const minY = LEFT_TOP_BOUNDARY;
     const maxX = canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY;
-    const maxY = canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY;
+    const maxY = canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY;
 
     return {
       minX,
@@ -1248,7 +1360,7 @@ export default function GraphView() {
       maxX: Math.max(minX, maxX),
       maxY: Math.max(minY, maxY),
     };
-  }, [canvasSize.w, canvasSize.h]);
+  }, [canvasSize.w, canvasSize.h, getNodeHeightForId]);
 
   const clampScrollAtMaxZoomOut = useCallback(() => {
     const el = canvasRef.current;
@@ -1285,7 +1397,7 @@ export default function GraphView() {
       for (const todo of todos) {
         if (todo.id === sourceTodoId) continue;
         for (const side of PORT_SIDES) {
-          const port = getPortAt(positions, todo.id, side);
+          const port = getPortAt(positions, todo.id, side, getNodeHeightForId);
           if (!port) continue;
           const dist = Math.hypot(port.x - pointerX, port.y - pointerY);
           if (dist <= PORT_CONNECT_THRESHOLD && dist < bestDist) {
@@ -1297,7 +1409,7 @@ export default function GraphView() {
 
       return bestTodoId;
     },
-    [positions, todos, zoomScale]
+    [getNodeHeightForId, positions, todos, zoomScale]
   );
 
   /* ── Global pointer handlers ────────────────────── */
@@ -1311,7 +1423,7 @@ export default function GraphView() {
       const rawX = (e.clientX - (rect?.left ?? 0) + scrollLeft) / zoomScale - dragOffset.x;
       const rawY = (e.clientY - (rect?.top ?? 0) + scrollTop) / zoomScale - dragOffset.y;
       // Clamp to current canvas limits, mirroring top/left boundary behavior
-      const { minX, minY, maxX: maxNodeX, maxY: maxNodeY } = getDragBounds();
+      const { minX, minY, maxX: maxNodeX, maxY: maxNodeY } = getDragBounds(draggingNode);
       const resistedX = applyEdgeResistance(rawX, maxNodeX);
       const resistedY = applyEdgeResistance(rawY, maxNodeY);
       const clampedX = Math.min(Math.max(resistedX, minX), maxNodeX);
@@ -1334,9 +1446,10 @@ export default function GraphView() {
         for (const id of fused) {
           const p = prev[id];
           if (!p) continue;
+          const nodeMaxY = canvasSize.h - getNodeHeightForId(id) - RIGHT_BOTTOM_BOUNDARY;
           updated[id] = {
             x: snapGrid(p.x + deltaX, maxNodeX, LEFT_TOP_BOUNDARY),
-            y: snapGrid(p.y + deltaY, maxNodeY, LEFT_TOP_BOUNDARY),
+            y: snapGrid(p.y + deltaY, nodeMaxY, LEFT_TOP_BOUNDARY),
           };
         }
         const prevOverlap = movingOverlapArea(prev, movingIds);
@@ -1363,7 +1476,9 @@ export default function GraphView() {
       findPortOverlapTarget,
       getFusedComponent,
       getDragBounds,
+      getNodeHeightForId,
       movingOverlapArea,
+      canvasSize.h,
       zoomScale,
     ]
   );
@@ -1386,7 +1501,13 @@ export default function GraphView() {
         for (const todo of todos) {
           const toId = todo.id;
           if (fusedSet.has(toId)) continue;
-          const touch = getClosestAnyPortsAt(positions, fromId, toId, CONNECT_THRESHOLD);
+          const touch = getClosestAnyPortsAt(
+            positions,
+            fromId,
+            toId,
+            CONNECT_THRESHOLD,
+            getNodeHeightForId
+          );
           if (!touch) continue;
           if (touch.dist < portTouchBestDist) {
             portTouchBestDist = touch.dist;
@@ -1429,6 +1550,7 @@ export default function GraphView() {
     hoverTarget,
     findPortOverlapTarget,
     getFusedComponent,
+    getNodeHeightForId,
     todos,
   ]);
 
@@ -1469,7 +1591,7 @@ export default function GraphView() {
     );
     const maxY = Math.max(
       0,
-      ...Object.values(positions).map((p) => p.y + NODE_H + 220)
+      ...Object.entries(positions).map(([id, p]) => p.y + getNodeHeightForId(id) + 220)
     );
 
     const minCanvasW = isFullscreen
@@ -1491,7 +1613,7 @@ export default function GraphView() {
     setCanvasSize((prev) =>
       prev.w !== nextW || prev.h !== nextH ? { w: nextW, h: nextH } : prev
     );
-  }, [positions, isFullscreen, draggingNode]);
+  }, [positions, isFullscreen, draggingNode, getNodeHeightForId]);
 
   /* ── Create connection ──────────────────────────── */
 
@@ -1614,6 +1736,18 @@ export default function GraphView() {
     }
   };
 
+  const openConnectionInspector = useCallback((connectionId: string) => {
+    setIsCreatingTodo(false);
+    setSelectedTodoId(null);
+    setSelectedConnectionId(connectionId);
+  }, []);
+
+  const openTodoInspector = useCallback((todoId: string) => {
+    setIsCreatingTodo(false);
+    setSelectedConnectionId(null);
+    setSelectedTodoId(todoId);
+  }, []);
+
   const handleDeleteSelectedConnection = async () => {
     if (!selectedConnection) return;
     try {
@@ -1626,9 +1760,84 @@ export default function GraphView() {
     }
   };
 
+  const handleDeleteConnectedGroup = async () => {
+    if (!selectedConnection || selectedConnection.items.length === 0) return;
+    try {
+      const fusedTodoIds = new Set(getFusedComponent(selectedConnection.items[0]!.todo_id));
+      const connectionIds = groupConnections
+        .filter((conn) => conn.items.some((item) => fusedTodoIds.has(item.todo_id)))
+        .map((conn) => conn.id);
+      await Promise.all(connectionIds.map((connectionId) => connectionsApi.delete(connectionId)));
+      setSelectedConnectionId(null);
+      await refreshConnections();
+      toast.success("Connected group deleted");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete connected group");
+    }
+  };
+
   const handleSaveSelectedTodo = async () => {
+    if (isSavingTodoDraft) return;
+    if (isCreatingTodo) {
+      if (!groupId) return;
+      try {
+        setIsSavingTodoDraft(true);
+        const title = draftTodoTitle.trim() || "New graph task";
+        const description = draftTodoDescription.trim() || "";
+        const signature = `${groupId}::${title}::${description}`;
+        if (graphCreateLockRef.current === signature) {
+          return;
+        }
+        const lastCreate = lastGraphCreateRef.current;
+        if (
+          lastCreate &&
+          lastCreate.signature === signature &&
+          Date.now() - lastCreate.timestamp < 3000
+        ) {
+          setIsCreatingTodo(false);
+          setSelectedTodoId(null);
+          setSelectedConnectionId(null);
+          return;
+        }
+        graphCreateLockRef.current = signature;
+        const created = await todosApi.create(groupId, title, draftTodoDescription.trim() || undefined, {
+          high_priority: draftTodoHighPriority,
+          planning_level: draftTodoPlanningLevel,
+          recurrence_rule: draftTodoRecurrenceRule || null,
+          parent_todo_id: draftTodoParentId || null,
+        });
+        lastGraphCreateRef.current = { signature, timestamp: Date.now() };
+        setTodos((prev) => dedupeGraphTodos([...prev, created]));
+        setIsCreatingTodo(false);
+        setSelectedTodoId(null);
+        setSelectedConnectionId(null);
+        queueGraphRefresh({ todos: true });
+        const createdNodeHeight = getTodoNodeHeight(created);
+        const nextPos = {
+          x: snapGrid(120 + (todos.length % 4) * 220, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+          y: snapGrid(
+            100 + Math.floor(todos.length / 4) * 120,
+            canvasSize.h - createdNodeHeight - RIGHT_BOTTOM_BOUNDARY,
+            LEFT_TOP_BOUNDARY
+          ),
+        };
+        setPositions((prev) => {
+          const next = { ...prev, [created.id]: nextPos };
+          savePositions(next);
+          return next;
+        });
+        toast.success("Task added to GraphPlan");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to create task");
+      } finally {
+        graphCreateLockRef.current = null;
+        setIsSavingTodoDraft(false);
+      }
+      return;
+    }
     if (!selectedTodo) return;
     try {
+      setIsSavingTodoDraft(true);
       const updated = await todosApi.update(selectedTodo.id, {
         title: draftTodoTitle.trim() || selectedTodo.title,
         description: draftTodoDescription.trim() || null,
@@ -1638,10 +1847,14 @@ export default function GraphView() {
         parent_todo_id: draftTodoParentId || null,
       });
       setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setIsCreatingTodo(false);
+      setSelectedTodoId(null);
       queueGraphRefresh({ todos: true });
       toast.success("Task updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update task");
+    } finally {
+      setIsSavingTodoDraft(false);
     }
   };
 
@@ -1649,6 +1862,7 @@ export default function GraphView() {
     if (!selectedTodo) return;
     try {
       await todosApi.delete(selectedTodo.id);
+      setIsCreatingTodo(false);
       setSelectedTodoId(null);
       setTodos((prev) => prev.filter((item) => item.id !== selectedTodo.id));
       queueGraphRefresh({ todos: true, connections: true });
@@ -1658,28 +1872,23 @@ export default function GraphView() {
     }
   };
 
-  const handleQuickAddTodo = async () => {
-    if (!groupId) return;
-    try {
-      const created = await todosApi.create(groupId, "New graph task");
-      setTodos((prev) => [...prev, created]);
-      queueGraphRefresh({ todos: true });
-      setSelectedTodoId(null);
-      setSelectedConnectionId(null);
-      const nextPos = {
-        x: snapGrid(120 + (todos.length % 4) * 220, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
-        y: snapGrid(100 + Math.floor(todos.length / 4) * 120, canvasSize.h - NODE_H - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
-      };
-      setPositions((prev) => {
-        const next = { ...prev, [created.id]: nextPos };
-        savePositions(next);
-        return next;
-      });
-      toast.success("Task added to GraphPlan");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to create task");
-    }
-  };
+  const handleQuickAddTodo = useCallback(() => {
+    setIsCreatingTodo(true);
+    setSelectedTodoId(null);
+    setSelectedConnectionId(null);
+    setDraftTodoTitle("New graph task");
+    setDraftTodoDescription("");
+    setDraftTodoHighPriority(false);
+    setDraftTodoPlanningLevel(0);
+    setDraftTodoRecurrenceRule("");
+    setDraftTodoParentId("");
+  }, []);
+
+  const handleCloseTodoInspector = useCallback(() => {
+    if (isSavingTodoDraft) return;
+    setIsCreatingTodo(false);
+    setSelectedTodoId(null);
+  }, [isSavingTodoDraft]);
 
   const toggleFullscreen = async () => {
     try {
@@ -1848,14 +2057,8 @@ export default function GraphView() {
           GraphPlan
         </h2>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-          Drag between ports to connect tasks &middot; Max 2 connections per task
+          Drag between ports to connect tasks
         </p>
-        <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-2xl border border-slate-200/80 bg-white/70 px-3 py-2 text-xs text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/60 dark:text-slate-300">
-          <Sparkles size={12} className="text-indigo-500" />
-          <span className="truncate">
-            Current auto-layout: <span className="font-semibold text-slate-700 dark:text-slate-100">{layoutLabelMap[layoutMode]}</span>
-          </span>
-        </div>
       </div>
 
       {/* Group pills */}
@@ -1866,13 +2069,14 @@ export default function GraphView() {
             key={g.id}
             onClick={() => {
               setGroupId(g.id);
+              setIsCreatingTodo(false);
               setSelectedConnectionId(null);
               setSelectedTodoId(null);
             }}
-            className={`inline-flex min-h-[2.75rem] items-center gap-1.5 whitespace-nowrap rounded-2xl px-3 py-2.5 text-xs font-medium transition-all duration-200 sm:px-4 sm:py-2 sm:text-sm ${
+            className={`inline-flex min-h-[2.35rem] items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-2 text-xs font-medium transition-all duration-150 sm:min-h-[2.5rem] sm:px-3.5 sm:py-2 sm:text-sm ${
               groupId === g.id
-                ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 scale-[1.02]"
-                : "glass text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:scale-[1.02]"
+                ? "bg-indigo-500 text-white"
+                : "border border-slate-200 bg-white/90 text-slate-600 hover:bg-white dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-300 dark:hover:bg-slate-900"
             }`}
           >
             <FolderOpen size={14} className="shrink-0" />
@@ -1904,9 +2108,11 @@ export default function GraphView() {
             showPanel={showPanel}
             isCutMode={isCutMode}
             isFullscreen={isFullscreen}
+            layoutMode={layoutMode}
             onTogglePanel={() => setShowPanel((value) => !value)}
             onToggleCutMode={toggleCutMode}
             onToggleFullscreen={() => void toggleFullscreen()}
+            onApplyLayout={applyLayout}
             onZoomOut={() =>
               setZoomScale((z) => Math.max(MIN_ZOOM, Number((z - ZOOM_STEP).toFixed(2))))
             }
@@ -1926,24 +2132,26 @@ export default function GraphView() {
               connection={selectedConnection}
               draftName={draftConnectionName}
               draftKind={draftConnectionKind}
-              layoutMode={layoutMode}
               onDraftNameChange={setDraftConnectionName}
               onDraftKindChange={setDraftConnectionKind}
               onSave={() => void handleSaveSelectedConnection()}
               onDelete={() => void handleDeleteSelectedConnection()}
-              onClose={() => setSelectedConnectionId(null)}
-              onApplyLayout={applyLayout}
+              onDeleteGroup={() => void handleDeleteConnectedGroup()}
+              onClose={() => {
+                setIsCreatingTodo(false);
+                setSelectedConnectionId(null);
+              }}
             />
           )}
-          {selectedTodo && !isCutMode && (
+          {(selectedTodo || isCreatingTodo) && !isCutMode && (
             <GraphTodoInspector
-              todo={selectedTodo}
+              title={activeTodoInspectorTitle}
               draftTitle={draftTodoTitle}
               draftDescription={draftTodoDescription}
               draftHighPriority={draftTodoHighPriority}
               draftPlanningLevel={draftTodoPlanningLevel}
               draftRecurrenceRule={draftTodoRecurrenceRule}
-              parentOptions={todos.filter((item) => item.id !== selectedTodo.id)}
+              parentOptions={todos.filter((item) => item.id !== selectedTodo?.id)}
               draftParentTodoId={draftTodoParentId}
               onDraftTitleChange={setDraftTodoTitle}
               onDraftDescriptionChange={setDraftTodoDescription}
@@ -1953,7 +2161,8 @@ export default function GraphView() {
               onDraftParentTodoIdChange={setDraftTodoParentId}
               onSave={() => void handleSaveSelectedTodo()}
               onDelete={() => void handleDeleteSelectedTodo()}
-              onClose={() => setSelectedTodoId(null)}
+              onClose={handleCloseTodoInspector}
+              showDelete={!isCreatingTodo}
             />
           )}
 
@@ -1963,6 +2172,7 @@ export default function GraphView() {
             onScroll={clampScrollAtMaxZoomOut}
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) {
+                setIsCreatingTodo(false);
                 setSelectedConnectionId(null);
                 setSelectedTodoId(null);
               }
@@ -2027,13 +2237,14 @@ export default function GraphView() {
                 {todos.map((todo) => {
                   const pos = positions[todo.id];
                   if (!pos) return null;
+                  const nodeHeight = getNodeHeightForId(todo.id);
                   return (
                     <rect
                       key={`edge-mask-${todo.id}`}
                       x={pos.x + 3}
                       y={pos.y + 3}
                       width={Math.max(0, NODE_W - 6)}
-                      height={Math.max(0, NODE_H - 6)}
+                      height={Math.max(0, nodeHeight - 6)}
                       rx={10}
                       ry={10}
                       fill="white"
@@ -2189,7 +2400,9 @@ export default function GraphView() {
                   const touch = getClosestOppositePortsAt(
                     positions,
                     edge.fromId,
-                    edge.toId
+                    edge.toId,
+                    Number.POSITIVE_INFINITY,
+                    getNodeHeightForId
                   );
                   if (!touch) return null;
                   const cx = (touch.from.x + touch.to.x) / 2;
@@ -2205,7 +2418,9 @@ export default function GraphView() {
                           r={14}
                           fill="transparent"
                           style={{ pointerEvents: "all", cursor: "pointer" }}
-                          onClick={() => setSelectedConnectionId(conn.id)}
+                          onClick={() => {
+                            openConnectionInspector(conn.id);
+                          }}
                         />
                         <circle
                           cx={cx} cy={cy} r={9}
@@ -2363,7 +2578,9 @@ export default function GraphView() {
                         strokeWidth={16}
                         strokeLinecap="round"
                         style={{ pointerEvents: "stroke", cursor: "pointer" }}
-                        onClick={() => setSelectedConnectionId(conn.id)}
+                        onClick={() => {
+                          openConnectionInspector(conn.id);
+                        }}
                       />
                     )}
                     {/* Midpoint arrow */}
@@ -2454,17 +2671,16 @@ export default function GraphView() {
             {todos.map((todo) => {
               const pos = positions[todo.id];
               if (!pos) return null;
+              const nodeHeight = getNodeHeightForId(todo.id);
               const isCompleted = todo.is_completed === 1;
               const isDragging = draggingNode === todo.id;
               const isTarget = hoverTarget === todo.id;
               const conns = connectionCount[todo.id] ?? 0;
-              const canConnect = conns < 2;
+              const canConnect = !isCompleted;
               const hidePort = (side: PortSide) =>
                 sharedAdjacentPorts.hidden.has(`${todo.id}:${side}`);
 
-              const isNext = groupConnections.some((c) => {
-                return c.progress.next_available_item_id === todo.id;
-              });
+              const isNext = nextAvailableTodoIds.has(todo.id);
 
               const isConnected = conns > 0;
               const badgeNumber = isCompleted
@@ -2487,7 +2703,7 @@ export default function GraphView() {
                     left: pos.x,
                     top: pos.y,
                     width: NODE_W,
-                    height: NODE_H,
+                    height: nodeHeight,
                     zIndex: nodeLayer,
                     transition: isDragging ? "none" : "box-shadow 0.2s, transform 0.15s",
                   }}
@@ -2514,8 +2730,7 @@ export default function GraphView() {
                     onPointerLeave={clearLongPress}
                     onDoubleClick={() => {
                       if (!isDragging) {
-                        setSelectedTodoId(todo.id);
-                        setSelectedConnectionId(null);
+                        openTodoInspector(todo.id);
                       }
                     }}
                     className={`relative h-full rounded-xl border-2 transition-all duration-200 ${
@@ -2564,7 +2779,7 @@ export default function GraphView() {
                       </button>
                       <div className="flex-1 min-w-0">
                         <p
-                          className={`text-[13px] font-medium truncate leading-tight ${
+                          className={`text-[13px] font-medium leading-tight line-clamp-2 break-words ${
                             isCompleted
                               ? "line-through text-slate-400 dark:text-slate-500"
                               : "text-slate-800 dark:text-slate-100"
@@ -2573,7 +2788,7 @@ export default function GraphView() {
                           {todo.title}
                         </p>
                         {todo.description && (
-                          <p className="text-[10px] text-slate-400 dark:text-slate-500 truncate mt-0.5 leading-tight">
+                          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5 leading-tight whitespace-pre-line line-clamp-3 break-words">
                             {todo.description}
                           </p>
                         )}
@@ -2610,7 +2825,7 @@ export default function GraphView() {
                         side="top"
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "top"}
-                        onMouseDown={(e) => onPortDown(e, todo.id, "top")}
+                        onPointerDown={(e) => onPortDown(e, todo.id, "top")}
                         onHoverChange={(hovered) =>
                           setHoverPort(hovered ? { todoId: todo.id, side: "top" } : null)
                         }
@@ -2622,7 +2837,7 @@ export default function GraphView() {
                         side="left"
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "left"}
-                        onMouseDown={(e) => onPortDown(e, todo.id, "left")}
+                        onPointerDown={(e) => onPortDown(e, todo.id, "left")}
                         onHoverChange={(hovered) =>
                           setHoverPort(hovered ? { todoId: todo.id, side: "left" } : null)
                         }
@@ -2634,7 +2849,7 @@ export default function GraphView() {
                         side="right"
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "right"}
-                        onMouseDown={(e) => onPortDown(e, todo.id, "right")}
+                        onPointerDown={(e) => onPortDown(e, todo.id, "right")}
                         onHoverChange={(hovered) =>
                           setHoverPort(hovered ? { todoId: todo.id, side: "right" } : null)
                         }
@@ -2646,7 +2861,7 @@ export default function GraphView() {
                         side="bottom"
                         canConnect={canConnect}
                         isActive={connectDrag?.fromTodoId === todo.id && connectDrag.fromPortSide === "bottom"}
-                        onMouseDown={(e) => onPortDown(e, todo.id, "bottom")}
+                        onPointerDown={(e) => onPortDown(e, todo.id, "bottom")}
                         onHoverChange={(hovered) =>
                           setHoverPort(hovered ? { todoId: todo.id, side: "bottom" } : null)
                         }
@@ -2665,9 +2880,7 @@ export default function GraphView() {
                 if (conns <= 0) return null;
 
                 const isCompleted = todo.is_completed === 1;
-                const isNext = groupConnections.some((c) => {
-                  return c.progress.next_available_item_id === todo.id;
-                });
+                const isNext = nextAvailableTodoIds.has(todo.id);
                 if (isCompleted) return null;
                 const badgeNumber = isCompleted
                   ? completionOrder[todo.id] ?? connectionOrder[todo.id] ?? 1
@@ -2715,14 +2928,14 @@ function Port({
   side,
   canConnect,
   isActive,
-  onMouseDown,
+  onPointerDown,
   onHoverChange,
   edgeColor,
 }: {
   side: "left" | "right" | "top" | "bottom";
   canConnect: boolean;
   isActive: boolean;
-  onMouseDown: (e: React.MouseEvent) => void;
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
   onHoverChange: (hovered: boolean) => void;
   edgeColor?: string;
 }) {
@@ -2755,10 +2968,10 @@ function Port({
 
   return (
     <div
-      onMouseDown={onMouseDown}
-      onMouseEnter={() => onHoverChange(true)}
-      onMouseLeave={() => onHoverChange(false)}
-      className={`absolute ${posClass} group/port cursor-crosshair`}
+      onPointerDown={onPointerDown}
+      onPointerEnter={() => onHoverChange(true)}
+      onPointerLeave={() => onHoverChange(false)}
+      className={`absolute ${posClass} group/port cursor-crosshair touch-none`}
       style={{ zIndex: 30 }}
     >
       <div

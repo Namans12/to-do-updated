@@ -1,7 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { memo, useState, useRef, useEffect } from "react";
 import { todosApi } from "../api/client";
-import { useApp } from "../context/AppContext";
-import type { Todo } from "../types";
+import type { AppSettings, Connection, Todo } from "../types";
 import {
   Trash2,
   ChevronDown,
@@ -24,6 +23,11 @@ import TodoHistoryModal from "./TodoHistoryModal";
 
 interface TodoItemProps {
   todo: Todo;
+  groupTodos: Todo[];
+  connections: Connection[];
+  settings: AppSettings;
+  refreshTodos: () => Promise<void>;
+  refreshConnections: () => Promise<void>;
   isHighlighted?: boolean;
   nextTodoId?: string | null;
   layoutId?: string;
@@ -53,8 +57,13 @@ function buildReminderAt(date: string, time: string): string | null {
   return dt.toISOString();
 }
 
-export default function TodoItem({
+function TodoItem({
   todo,
+  groupTodos,
+  connections,
+  settings,
+  refreshTodos,
+  refreshConnections,
   isHighlighted = false,
   nextTodoId = null,
   layoutId,
@@ -63,8 +72,8 @@ export default function TodoItem({
   childCompletion,
   parentTitle = null,
 }: TodoItemProps) {
-  const { refreshTodos, refreshConnections, settings, todos, connections } = useApp();
   const [isEditing, setIsEditing] = useState(false);
+  const [optimisticCompleted, setOptimisticCompleted] = useState(todo.is_completed === 1);
   const [editTitle, setEditTitle] = useState(todo.title);
   const [editDesc, setEditDesc] = useState(todo.description ?? "");
   const initialReminder = toLocalDateTimeParts(todo.reminder_at);
@@ -83,7 +92,7 @@ export default function TodoItem({
   const editDescRef = useRef<HTMLTextAreaElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const todayDate = new Date().toISOString().slice(0, 10);
-  const siblingTodos = todos.filter((item) => item.group_id === todo.group_id && item.id !== todo.id && !item.deleted_at);
+  const siblingTodos = groupTodos.filter((item) => item.id !== todo.id && !item.deleted_at);
   const dependencyImpact = connections.reduce(
     (acc, connection) => {
       if (connection.kind !== "dependency") return acc;
@@ -113,17 +122,22 @@ export default function TodoItem({
     }
   }, [isHighlighted]);
 
+  useEffect(() => {
+    setOptimisticCompleted(todo.is_completed === 1);
+  }, [todo.is_completed]);
+
   const handleToggle = async () => {
     setIsChecking(true);
+    const nextCompleted = !optimisticCompleted;
+    setOptimisticCompleted(nextCompleted);
     try {
       await todosApi.toggleComplete(todo.id);
-      // Delay refresh after animation
-      setTimeout(async () => {
-        await refreshTodos();
-        await refreshConnections();
+      setTimeout(() => {
         setIsChecking(false);
-      }, 400);
+      }, 220);
+      void Promise.all([refreshTodos(), refreshConnections()]).catch(() => undefined);
     } catch (error) {
+      setOptimisticCompleted((prev) => !prev);
       toast.error(getActionErrorMessage("update the task", error));
       setIsChecking(false);
     }
@@ -311,7 +325,7 @@ export default function TodoItem({
     }
   };
 
-  const isCompleted = todo.is_completed === 1;
+  const isCompleted = optimisticCompleted;
   const showStrike = isCompleted || isChecking;
 
   return (
@@ -757,3 +771,24 @@ export default function TodoItem({
     </motion.div>
   );
 }
+
+function areTodoItemPropsEqual(prev: TodoItemProps, next: TodoItemProps) {
+  return (
+    prev.todo === next.todo &&
+    prev.groupTodos === next.groupTodos &&
+    prev.connections === next.connections &&
+    prev.settings === next.settings &&
+    prev.refreshTodos === next.refreshTodos &&
+    prev.refreshConnections === next.refreshConnections &&
+    prev.isHighlighted === next.isHighlighted &&
+    prev.nextTodoId === next.nextTodoId &&
+    prev.layoutId === next.layoutId &&
+    prev.depth === next.depth &&
+    prev.childCount === next.childCount &&
+    prev.parentTitle === next.parentTitle &&
+    prev.childCompletion?.completed === next.childCompletion?.completed &&
+    prev.childCompletion?.total === next.childCompletion?.total
+  );
+}
+
+export default memo(TodoItem, areTodoItemPropsEqual);

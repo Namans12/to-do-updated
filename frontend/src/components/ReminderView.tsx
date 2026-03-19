@@ -3,7 +3,7 @@ import { AlarmClock, Bell, CalendarDays, Clock3, FolderOpen, Milestone, Spline }
 import { useApp } from "../context/AppContext";
 import EmptyState from "./EmptyState";
 
-type ReminderBucketKey = "overdue" | "today" | "upcoming" | "noReminder";
+type ReminderBucketKey = "overdue" | "today" | "upcoming";
 
 function startOfToday() {
   const now = new Date();
@@ -37,17 +37,14 @@ export default function ReminderView() {
       overdue: [],
       today: [],
       upcoming: [],
-      noReminder: [],
     };
 
     for (const todo of visibleTodos) {
       if (!todo.reminder_at) {
-        grouped.noReminder.push(todo);
         continue;
       }
       const dueAt = new Date(todo.reminder_at);
       if (Number.isNaN(dueAt.getTime())) {
-        grouped.noReminder.push(todo);
         continue;
       }
       if (dueAt < today) {
@@ -69,9 +66,6 @@ export default function ReminderView() {
     grouped.overdue.sort(sortByReminder);
     grouped.today.sort(sortByReminder);
     grouped.upcoming.sort(sortByReminder);
-    grouped.noReminder.sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
 
     return grouped;
   }, [visibleTodos]);
@@ -108,13 +102,6 @@ export default function ReminderView() {
       description: "Scheduled reminders coming up next.",
       accent: "text-indigo-500",
       icon: Clock3,
-    },
-    {
-      key: "noReminder",
-      title: "No Reminder",
-      description: "Open tasks without a reminder yet.",
-      accent: "text-slate-400",
-      icon: Bell,
     },
   ];
 
@@ -153,7 +140,7 @@ export default function ReminderView() {
           Agenda
         </h2>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Overdue, due today, upcoming, and unplanned tasks in one place.
+          Overdue, due today, and upcoming tasks in one place.
         </p>
         <div className="mt-4 grid w-full max-w-md grid-cols-2 rounded-2xl border border-slate-200 bg-white/70 p-1 text-sm shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
           <button

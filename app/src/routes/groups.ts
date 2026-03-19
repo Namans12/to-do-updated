@@ -7,6 +7,11 @@ import { groups, todos } from "../db/schema.js";
 // Type for the injected DB (allows test override)
 type DbOverride = ReturnType<typeof getDb>;
 
+function autoCapitalize(str: string): string {
+  if (str.length === 0) return str;
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
 export function createGroupsRouter(dbOverride?: DbOverride) {
   const router = new Hono();
 
@@ -29,7 +34,7 @@ export function createGroupsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Name must be at most 100 characters" }, 400);
       }
 
-      const trimmedName = name.trim();
+      const trimmedName = autoCapitalize(name.trim());
       const { db: drizzleDb, sqlite } = db();
 
       const normalizedName = trimmedName.toLowerCase();
@@ -256,7 +261,7 @@ export function createGroupsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Name must be at most 100 characters" }, 400);
       }
 
-      const trimmedName = name.trim();
+      const trimmedName = autoCapitalize(name.trim());
       const normalizedName = trimmedName.toLowerCase();
       const { db: drizzleDb } = db();
 

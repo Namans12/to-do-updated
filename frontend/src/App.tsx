@@ -207,7 +207,7 @@ export default function App() {
             <div className="w-6 h-6 rounded-lg bg-indigo-500 animate-check-bounce" />
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
-            Loading Nodes...
+            Deciphering your nodes…
           </p>
         </div>
       </div>

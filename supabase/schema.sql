@@ -62,8 +62,13 @@ create table if not exists public.activity_logs (
 );
 
 create index if not exists groups_user_position_idx on public.groups(user_id, position);
+create unique index if not exists groups_user_name_unique
+on public.groups(user_id, lower(name));
 create index if not exists todos_user_group_position_idx on public.todos(user_id, group_id, position);
 create index if not exists todos_user_deleted_idx on public.todos(user_id, deleted_at);
+create unique index if not exists todos_user_group_title_active_unique
+on public.todos(user_id, group_id, lower(title))
+where deleted_at is null;
 create index if not exists connections_user_created_idx on public.connections(user_id, created_at);
 create index if not exists connection_items_connection_position_idx on public.connection_items(connection_id, position);
 create index if not exists activity_logs_user_created_idx on public.activity_logs(user_id, created_at desc);

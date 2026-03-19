@@ -1,7 +1,7 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { memo, useState, useMemo, useRef, useEffect } from "react";
 import { connectionsApi, todosApi } from "../api/client";
 import { useApp } from "../context/AppContext";
-import type { Connection, Group } from "../types";
+import type { Connection } from "../types";
 import ConnectionModal from "./ConnectionModal";
 import {
   Share2,
@@ -24,7 +24,7 @@ import type { ConnectionKind } from "../types";
 import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
 
 export default function ConnectionView() {
-  const { refreshTodos, refreshConnections, connections, groups, loading: appLoading } = useApp();
+  const { refreshTodos, refreshConnections, connections, loading: appLoading } = useApp();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editKind, setEditKind] = useState<ConnectionKind>("sequence");
@@ -55,8 +55,7 @@ export default function ConnectionView() {
   const handleToggleTodo = async (todoId: string) => {
     try {
       await todosApi.toggleComplete(todoId);
-      await refreshConnections();
-      await refreshTodos();
+      void Promise.all([refreshConnections(), refreshTodos()]).catch(() => undefined);
     } catch (error) {
       toast.error(getActionErrorMessage("update the task", error));
     }
@@ -65,7 +64,7 @@ export default function ConnectionView() {
   const handleRemoveItem = async (connectionId: string, todoId: string) => {
     try {
       await connectionsApi.removeItem(connectionId, todoId);
-      await refreshConnections();
+      void refreshConnections().catch(() => undefined);
       toast.success("Removed from connection");
     } catch (error) {
       toast.error(getActionErrorMessage("remove the task from the connection", error));
@@ -121,12 +120,12 @@ export default function ConnectionView() {
         <div className="space-y-4 md:space-y-6">
           <AnimatePresence>
             {connections.map((conn) => (
-              <ConnectionCard
+              <MemoizedConnectionCard
                 key={conn.id}
                 connection={conn}
-                groups={groups}
                 isEditing={editingId === conn.id}
                 editName={editName}
+                refreshConnections={refreshConnections}
                 onStartEdit={() => {
                   setEditName(conn.name ?? "");
                   setEditKind(conn.kind);
@@ -160,10 +159,10 @@ export default function ConnectionView() {
 
 interface ConnectionCardProps {
   connection: Connection;
-  groups: Group[];
   isEditing: boolean;
   editName: string;
   editKind: ConnectionKind;
+  refreshConnections: () => Promise<void>;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSaveEdit: () => void;
@@ -179,6 +178,7 @@ function ConnectionCard({
   isEditing,
   editName,
   editKind,
+  refreshConnections,
   onStartEdit,
   onCancelEdit,
   onSaveEdit,
@@ -188,7 +188,6 @@ function ConnectionCard({
   onToggleTodo,
   onRemoveItem,
 }: ConnectionCardProps) {
-  const { refreshConnections } = useApp();
   const { progress, is_fully_complete } = connection;
   const [reorderMode, setReorderMode] = useState(false);
   const [reorderItems, setReorderItems] = useState<string[]>([]);
@@ -226,7 +225,7 @@ function ConnectionCard({
   const persistReorder = async (todoIds: string[]) => {
     try {
       await connectionsApi.reorderItems(connection.id, todoIds);
-      await refreshConnections();
+      void refreshConnections().catch(() => undefined);
       toast.success("Reordered");
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed to reorder");
@@ -430,16 +429,6 @@ function ConnectionCard({
             >
               {progress.percentage}%
             </span>
-            {!is_fully_complete && (
-              <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                {progress.available_count} ready · {progress.blocked_count} blocked
-              </span>
-            )}
-            {!is_fully_complete && progress.critical_path_length ? (
-              <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                Critical path {progress.critical_path_length}
-              </span>
-            ) : null}
           </div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
@@ -599,3 +588,26 @@ function ConnectionCard({
     </motion.div>
   );
 }
+
+function areConnectionCardPropsEqual(
+  prev: ConnectionCardProps,
+  next: ConnectionCardProps
+) {
+  return (
+    prev.connection === next.connection &&
+    prev.isEditing === next.isEditing &&
+    prev.editName === next.editName &&
+    prev.editKind === next.editKind &&
+    prev.refreshConnections === next.refreshConnections &&
+    prev.onStartEdit === next.onStartEdit &&
+    prev.onCancelEdit === next.onCancelEdit &&
+    prev.onSaveEdit === next.onSaveEdit &&
+    prev.onEditNameChange === next.onEditNameChange &&
+    prev.onEditKindChange === next.onEditKindChange &&
+    prev.onDelete === next.onDelete &&
+    prev.onToggleTodo === next.onToggleTodo &&
+    prev.onRemoveItem === next.onRemoveItem
+  );
+}
+
+const MemoizedConnectionCard = memo(ConnectionCard, areConnectionCardPropsEqual);

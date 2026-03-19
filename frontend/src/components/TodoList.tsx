@@ -20,7 +20,9 @@ export default function TodoList() {
     selectedGroupId,
     groups,
     connections,
+    settings,
     refreshTodos,
+    refreshConnections,
     highlightTodoId,
     clearHighlightedTodo,
     reorderMode,
@@ -585,6 +587,8 @@ export default function TodoList() {
                     <ConnectionInline
                       connection={conn}
                       highlightTodoId={highlightTodoId}
+                      refreshTodos={refreshTodos}
+                      refreshConnections={refreshConnections}
                     />
                   </div>
                 </motion.div>
@@ -620,6 +624,11 @@ export default function TodoList() {
                     )}
                     <TodoItem
                       todo={todo}
+                      groupTodos={todos}
+                      connections={connections}
+                      settings={settings}
+                      refreshTodos={refreshTodos}
+                      refreshConnections={refreshConnections}
                       isHighlighted={highlightTodoId === todo.id}
                       nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
                       layoutId={`todo-${todo.id}`}
@@ -837,6 +846,11 @@ export default function TodoList() {
                     <TodoItem
                       key={`completed-todo-${todo.id}`}
                       todo={todo}
+                      groupTodos={todos}
+                      connections={connections}
+                      settings={settings}
+                      refreshTodos={refreshTodos}
+                      refreshConnections={refreshConnections}
                       isHighlighted={highlightTodoId === todo.id}
                       nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
                       layoutId={`todo-${todo.id}`}
@@ -849,6 +863,8 @@ export default function TodoList() {
                           key={`completed-conn-${conn.id}`}
                           connection={conn}
                           highlightTodoId={highlightTodoId}
+                          refreshTodos={refreshTodos}
+                          refreshConnections={refreshConnections}
                         />
                       ))}
                     </div>

@@ -66,10 +66,11 @@ test("templates, task history, and graph quick add work together", async ({ page
   await dismissReminderAlarm(page);
   await page.keyboard.press("g");
   await page.getByLabel("Quick add task").click();
-  await expect(page.getByText("New graph task", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("GraphPlan Task", { exact: true })).toHaveCount(0);
-  await page.getByText("New graph task", { exact: true }).first().dblclick();
   await expect(page.getByText("GraphPlan Task", { exact: true })).toBeVisible();
+  await page.getByPlaceholder("Task title").fill("New graph task");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("GraphPlan Task", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("New graph task", { exact: true }).first()).toBeVisible();
 
   const graphTodoCard = page
     .locator("[data-todo-id]")

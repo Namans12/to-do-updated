@@ -197,6 +197,40 @@ function buildAllTodosSnapshot(
   return merged;
 }
 
+function getTodoActivityTimestamp(todo: Todo): number {
+  const candidates = [todo.updated_at, todo.completed_at, todo.created_at];
+  let latest = 0;
+  for (const value of candidates) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed) && parsed > latest) latest = parsed;
+  }
+  return latest;
+}
+
+function getGroupActivityTimestamp(group: Group, todos: Todo[]): number {
+  let latest = 0;
+  for (const todo of todos) {
+    if (todo.group_id !== group.id || todo.deleted_at) continue;
+    const activity = getTodoActivityTimestamp(todo);
+    if (activity > latest) latest = activity;
+  }
+  if (latest > 0) return latest;
+  const fallbackUpdated = Date.parse(group.updated_at);
+  if (!Number.isNaN(fallbackUpdated)) return fallbackUpdated;
+  const fallbackCreated = Date.parse(group.created_at);
+  return Number.isNaN(fallbackCreated) ? 0 : fallbackCreated;
+}
+
+function sortGroupsByRecentActivity(groups: Group[], todos: Todo[]): Group[] {
+  return [...groups].sort((a, b) => {
+    const aActivity = getGroupActivityTimestamp(a, todos);
+    const bActivity = getGroupActivityTimestamp(b, todos);
+    if (aActivity !== bActivity) return bActivity - aActivity;
+    return a.position - b.position;
+  });
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>({
     groups: [],
@@ -230,6 +264,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const todosCacheRef = useRef<Record<string, Todo[]>>({});
   const stateRef = useRef(state);
   const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
+  const snapshotHydrationPromiseRef = useRef<Promise<void> | null>(null);
   const queuedBootstrapRef = useRef<{ reason: string; session?: Session | null } | null>(null);
   const appShell = Capacitor.isNativePlatform() || (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
@@ -265,14 +300,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
           // Clear stale todos immediately when the active group was deleted
           todos: groupStillExists ? s.todos : [],
         };
+        const mergedTodos = buildAllTodosSnapshot(
+          nextState.groups,
+          nextState.selectedGroupId,
+          nextState.todos,
+          todosCacheRef.current
+        );
+        const sortedGroups = sortGroupsByRecentActivity(nextState.groups, mergedTodos);
+        const selectedExistsAfterSort = !!(
+          nextState.selectedGroupId && sortedGroups.some((g) => g.id === nextState.selectedGroupId)
+        );
+        const selectedGroupId = selectedExistsAfterSort
+          ? nextState.selectedGroupId
+          : sortedGroups[0]?.id ?? null;
+        const visibleTodos =
+          selectedGroupId === nextState.selectedGroupId
+            ? nextState.todos
+            : selectedGroupId
+            ? todosCacheRef.current[selectedGroupId] ?? []
+            : [];
         return {
           ...nextState,
-          allTodos: buildAllTodosSnapshot(
-            nextState.groups,
-            nextState.selectedGroupId,
-            nextState.todos,
-            todosCacheRef.current
-          ),
+          groups: sortedGroups,
+          selectedGroupId,
+          todos: visibleTodos,
+          allTodos: mergedTodos,
         };
       });
     } catch (e) {
@@ -295,16 +347,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const todos = await todosApi.list(currentGroupId);
       todosCacheRef.current[currentGroupId] = todos;
       setState((s) => {
-        const nextState =
-          s.selectedGroupId === currentGroupId ? { ...s, todos } : s;
+        const nextState = s.selectedGroupId === currentGroupId ? { ...s, todos } : s;
+        const mergedTodos = buildAllTodosSnapshot(
+          nextState.groups,
+          nextState.selectedGroupId,
+          nextState.todos,
+          todosCacheRef.current
+        );
+        const sortedGroups = sortGroupsByRecentActivity(nextState.groups, mergedTodos);
+        const selectedExistsAfterSort = !!(
+          nextState.selectedGroupId && sortedGroups.some((group) => group.id === nextState.selectedGroupId)
+        );
+        const selectedGroupId = selectedExistsAfterSort
+          ? nextState.selectedGroupId
+          : sortedGroups[0]?.id ?? null;
+        const visibleTodos =
+          selectedGroupId === nextState.selectedGroupId
+            ? nextState.todos
+            : selectedGroupId
+            ? todosCacheRef.current[selectedGroupId] ?? []
+            : [];
         return {
           ...nextState,
-          allTodos: buildAllTodosSnapshot(
-            nextState.groups,
-            nextState.selectedGroupId,
-            nextState.todos,
-            todosCacheRef.current
-          ),
+          groups: sortedGroups,
+          selectedGroupId,
+          todos: visibleTodos,
+          allTodos: mergedTodos,
         };
       });
     } catch (e) {
@@ -339,13 +407,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     todosCacheRef.current = Object.fromEntries(
       groups.map((group) => [group.id, snapshot.todos.filter((todo) => todo.group_id === group.id)])
     );
-    const selectedTodos = nextSelectedGroupId ? todosCacheRef.current[nextSelectedGroupId] ?? [] : [];
+    const sortedGroups = sortGroupsByRecentActivity(groups, snapshot.todos);
+    const sortedSelectedGroupId =
+      nextSelectedGroupId && sortedGroups.some((group) => group.id === nextSelectedGroupId)
+        ? nextSelectedGroupId
+        : sortedGroups[0]?.id ?? null;
+    const sortedSelectedTodos = sortedSelectedGroupId
+      ? todosCacheRef.current[sortedSelectedGroupId] ?? []
+      : [];
 
     setState((s) => ({
       ...s,
-      groups,
-      selectedGroupId: nextSelectedGroupId,
-      todos: selectedTodos,
+      groups: sortedGroups,
+      selectedGroupId: sortedSelectedGroupId,
+      todos: sortedSelectedTodos,
       allTodos: snapshot.todos,
       connections: snapshot.connections,
     }));
@@ -423,11 +498,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [hydrateFromSyncSnapshot]
   );
 
+  const scheduleSyncHydration = useCallback(async () => {
+    if (!isSupabaseSyncEnabled || !stateRef.current.session) return;
+    if (snapshotHydrationPromiseRef.current) return snapshotHydrationPromiseRef.current;
+    snapshotHydrationPromiseRef.current = (async () => {
+      await hydrateFromSyncSnapshot();
+    })().finally(() => {
+      snapshotHydrationPromiseRef.current = null;
+    });
+    return snapshotHydrationPromiseRef.current;
+  }, [hydrateFromSyncSnapshot]);
+
   const selectGroup = useCallback((id: string | null) => {
     const cached = id ? todosCacheRef.current[id] : [];
     setState((s) => {
+      const sortedGroups = sortGroupsByRecentActivity(s.groups, s.allTodos);
       const nextState = {
         ...s,
+        groups: sortedGroups,
         selectedGroupId: id,
         todos: cached ?? [],
         currentView: "todos" as const,
@@ -927,6 +1015,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     todosCacheRef.current[state.selectedGroupId] = state.todos;
     setState((s) => ({
       ...s,
+      groups: sortGroupsByRecentActivity(
+        s.groups,
+        buildAllTodosSnapshot(
+          s.groups,
+          s.selectedGroupId,
+          s.todos,
+          todosCacheRef.current
+        )
+      ),
       allTodos: buildAllTodosSnapshot(
         s.groups,
         s.selectedGroupId,
@@ -951,6 +1048,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
               todosCacheRef.current[group.id] = todos;
               setState((s) => ({
                 ...s,
+                groups: sortGroupsByRecentActivity(
+                  s.groups,
+                  buildAllTodosSnapshot(
+                    s.groups,
+                    s.selectedGroupId,
+                    s.todos,
+                    todosCacheRef.current
+                  )
+                ),
                 allTodos: buildAllTodosSnapshot(
                   s.groups,
                   s.selectedGroupId,
@@ -974,9 +1080,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isSupabaseSyncEnabled || !state.authReady || state.loading || !state.session) return;
     return subscribeToRealtime(() => {
-      void scheduleSyncBootstrap("realtime", state.session);
+      void scheduleSyncHydration();
     });
-  }, [state.authReady, state.loading, state.session, scheduleSyncBootstrap]);
+  }, [state.authReady, state.loading, state.session, scheduleSyncHydration]);
 
   useEffect(() => {
     if (!isSupabaseSyncEnabled) return;

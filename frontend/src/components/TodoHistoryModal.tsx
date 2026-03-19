@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { activityApi, backupsApi } from "../api/client";
 import type { ActivityLog, BackupSnapshot, BackupTaskPreview, Todo } from "../types";
 import { ArrowRight, Clock3, History, RotateCcw, Sparkles, X } from "lucide-react";
@@ -60,11 +61,13 @@ export default function TodoHistoryModal({
           backupsApi.list(),
         ]);
         if (cancelled) return;
-        setHistory(historyEntries);
-        setBackups(backupEntries);
+        setHistory(normalizeActivityEntries(historyEntries));
+        setBackups(normalizeBackups(backupEntries));
       } catch (error) {
         if (!cancelled) {
           toast.error(error instanceof Error ? error.message : "Failed to load task history");
+          setHistory([]);
+          setBackups([]);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -100,10 +103,10 @@ export default function TodoHistoryModal({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+  const modal = (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6" onClick={onClose}>
       <div
-        className="w-full max-w-5xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+        className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
@@ -134,16 +137,24 @@ export default function TodoHistoryModal({
                   {history.length === 0 ? (
                     <div className="text-sm text-slate-400">No activity recorded for this task yet.</div>
                   ) : (
-                    history.map((entry) => {
+                    history.map((entry, index) => {
                       const payload = getActivityPayload(entry.payload);
                       const rows = buildDiffRows(payload.before ?? null, payload.after ?? null);
+                      const summary =
+                        typeof entry.summary === "string" && entry.summary.trim().length > 0
+                          ? entry.summary
+                          : "Activity updated";
+                      const actionLabel =
+                        typeof entry.action === "string" && entry.action.trim().length > 0
+                          ? entry.action.replace(/_/g, " ")
+                          : "event";
 
                       return (
-                        <div key={entry.id} className="rounded-2xl bg-slate-50 px-3 py-3 dark:bg-slate-950/40">
+                        <div key={entry.id || `${todo.id}-${index}`} className="rounded-2xl bg-slate-50 px-3 py-3 dark:bg-slate-950/40">
                           <div className="flex items-start justify-between gap-3">
-                            <div className="text-sm font-medium">{entry.summary}</div>
+                            <div className="text-sm font-medium">{summary}</div>
                             <span className="rounded-full bg-slate-200/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-                              {entry.action.replace(/_/g, " ")}
+                              {actionLabel}
                             </span>
                           </div>
                           <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
@@ -228,11 +239,59 @@ export default function TodoHistoryModal({
       </div>
     </div>
   );
+
+  if (typeof document === "undefined") return modal;
+  return createPortal(modal, document.body);
 }
 
 function getActivityPayload(payload: unknown): ActivityPayload {
   if (!payload || typeof payload !== "object") return {};
   return payload as ActivityPayload;
+}
+
+function normalizeActivityEntries(input: unknown): ActivityLog[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((entry): entry is ActivityLog => !!entry && typeof entry === "object")
+    .map((entry) => ({
+      ...entry,
+      id: typeof entry.id === "string" ? entry.id : crypto.randomUUID(),
+      entity_type: typeof entry.entity_type === "string" ? entry.entity_type : "todo",
+      entity_id: typeof entry.entity_id === "string" ? entry.entity_id : "",
+      action: typeof entry.action === "string" ? entry.action : "event",
+      summary: typeof entry.summary === "string" ? entry.summary : "Activity updated",
+      payload_json: typeof entry.payload_json === "string" ? entry.payload_json : null,
+      payload: "payload" in entry ? entry.payload : null,
+      created_at:
+        typeof entry.created_at === "string" && entry.created_at
+          ? entry.created_at
+          : new Date().toISOString(),
+    }));
+}
+
+function normalizeBackups(input: unknown): BackupSnapshot[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((backup): backup is BackupSnapshot => !!backup && typeof backup === "object")
+    .map((backup) => ({
+      ...backup,
+      id: typeof backup.id === "string" ? backup.id : crypto.randomUUID(),
+      label: typeof backup.label === "string" ? backup.label : "Snapshot",
+      created_at:
+        typeof backup.created_at === "string" && backup.created_at
+          ? backup.created_at
+          : new Date().toISOString(),
+      counts:
+        backup.counts && typeof backup.counts === "object"
+          ? backup.counts
+          : {
+              groups: 0,
+              todos: 0,
+              connections: 0,
+              connection_items: 0,
+              activity_logs: 0,
+            },
+    }));
 }
 
 function buildDiffRows(before: TodoSnapshot, after: TodoSnapshot): DiffRow[] {

@@ -371,9 +371,14 @@ export default function SettingsView() {
                 </div>
               </div>
               {settings.passcodeLockEnabled && (
-                <button type="button" onClick={lockApp} className="btn-ghost !px-3 !py-2 text-xs">
-                  <Unlock size={13} />
-                  <span className="ml-1">Lock now</span>
+                <button
+                  type="button"
+                  onClick={lockApp}
+                  className="btn-ghost inline-flex !h-9 !w-9 items-center justify-center !p-0 shrink-0"
+                  aria-label="Lock app now"
+                  title="Lock now"
+                >
+                  <LockKeyhole size={15} />
                 </button>
               )}
             </div>
@@ -430,8 +435,14 @@ export default function SettingsView() {
                 </div>
               </div>
               {settings.deviceAuthEnabled && deviceAuthConfigured && (
-                <button type="button" onClick={lockApp} className="btn-ghost !px-3 !py-2 text-xs">
-                  Lock now
+                <button
+                  type="button"
+                  onClick={lockApp}
+                  className="btn-ghost inline-flex !h-9 !w-9 items-center justify-center !p-0 shrink-0"
+                  aria-label="Lock app now"
+                  title="Lock now"
+                >
+                  <LockKeyhole size={15} />
                 </button>
               )}
             </div>

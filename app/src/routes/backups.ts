@@ -61,15 +61,28 @@ function backupPath(backupId: string) {
 
 function readBackupFiles() {
   const dir = ensureBackupsDir();
-  return fs
-    .readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => {
-      const fullPath = path.join(dir, name);
-      const parsed = JSON.parse(fs.readFileSync(fullPath, "utf8")) as BackupFilePayload;
-      return parsed;
-    })
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const parsed: BackupFilePayload[] = [];
+  for (const name of fs.readdirSync(dir).filter((entry) => entry.endsWith(".json"))) {
+    const fullPath = path.join(dir, name);
+    try {
+      const payload = JSON.parse(fs.readFileSync(fullPath, "utf8")) as Partial<BackupFilePayload>;
+      if (
+        typeof payload?.id !== "string" ||
+        typeof payload?.created_at !== "string" ||
+        typeof payload?.label !== "string"
+      ) {
+        console.warn(`[backups] Skipping malformed backup file: ${name}`);
+        continue;
+      }
+      parsed.push(payload as BackupFilePayload);
+    } catch (error) {
+      console.warn(
+        `[backups] Failed to parse backup file: ${name}`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+  return parsed.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
 export function createBackupsRouter(dbOverride?: DbOverride) {

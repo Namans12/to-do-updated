@@ -1,37 +1,27 @@
-import type { Connection, ConnectionKind, GraphLayoutMode } from "../../types";
+import type { Connection, ConnectionKind } from "../../types";
 import { connectionKindMeta } from "../../utils/connectionKinds";
-import { GitBranch, LayoutGrid, Link2, Trash2, X } from "lucide-react";
-
-const layoutLabels: Record<GraphLayoutMode, string> = {
-  smart: "Smart",
-  horizontal: "Horizontal",
-  vertical: "Vertical",
-  radial: "Radial",
-  planning: "Planning",
-};
+import { GitBranch, Link2, Trash2, Unlink, X } from "lucide-react";
 
 export default function GraphConnectionInspector({
   connection,
   draftName,
   draftKind,
-  layoutMode,
   onDraftNameChange,
   onDraftKindChange,
   onSave,
   onDelete,
+  onDeleteGroup,
   onClose,
-  onApplyLayout,
 }: {
   connection: Connection;
   draftName: string;
   draftKind: ConnectionKind;
-  layoutMode: GraphLayoutMode;
   onDraftNameChange: (name: string) => void;
   onDraftKindChange: (kind: ConnectionKind) => void;
   onSave: () => void;
   onDelete: () => void;
+  onDeleteGroup: () => void;
   onClose: () => void;
-  onApplyLayout: (mode: GraphLayoutMode) => void;
 }) {
   const meta = connectionKindMeta[draftKind];
 
@@ -108,29 +98,6 @@ export default function GraphConnectionInspector({
           </ul>
         </div>
 
-        <div>
-          <div className="mb-1.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
-            <LayoutGrid size={12} />
-            Auto layout
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(layoutLabels) as GraphLayoutMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => onApplyLayout(mode)}
-                className={`rounded-2xl border px-3 py-1.5 text-[11px] font-medium transition-colors ${
-                  mode === layoutMode
-                    ? "border-indigo-400 bg-indigo-500 text-white shadow-lg shadow-indigo-500/20"
-                    : "border-slate-200 bg-white/80 text-slate-600 hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/40"
-                }`}
-              >
-                {layoutLabels[mode]}
-              </button>
-            ))}
-          </div>
-        </div>
-
         <div className="rounded-2xl border border-slate-200/80 px-3 py-2.5 dark:border-slate-700/70">
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
             {connection.items.length} task{connection.items.length !== 1 ? "s" : ""} in this link
@@ -148,8 +115,16 @@ export default function GraphConnectionInspector({
               onClick={onDelete}
               className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10 sm:w-auto"
             >
-              <Trash2 size={12} />
+              <Unlink size={12} />
               Delete connection
+            </button>
+            <button
+              type="button"
+              onClick={onDeleteGroup}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10 sm:w-auto"
+            >
+              <Trash2 size={12} />
+              Delete whole connection
             </button>
           </div>
         </div>

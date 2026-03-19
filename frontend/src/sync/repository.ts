@@ -118,6 +118,16 @@ function isMissingColumnOrRelationError(error: unknown) {
   );
 }
 
+function isDuplicateTodoTitleConstraintError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("todos_user_group_title_active_unique");
+}
+
+function isDuplicateGroupNameConstraintError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("groups_user_name_unique");
+}
+
 function toRepositoryError(action: string, error: unknown) {
   const message = getErrorMessage(error).trim();
   const lowerMessage = message.toLowerCase();
@@ -139,11 +149,71 @@ function toRepositoryError(action: string, error: unknown) {
   if (isMissingColumnOrRelationError(error)) {
     return new Error("Your Supabase schema is out of date. Re-run the latest schema and try again.");
   }
+  if (isDuplicateTodoTitleConstraintError(error)) {
+    return new Error("A task with this title already exists in this group.");
+  }
+  if (isDuplicateGroupNameConstraintError(error)) {
+    return new Error(
+      "A group with this name already exists (including in Trash). Restore or permanently delete it first."
+    );
+  }
   return new Error(message ? `Failed to ${action}. ${message}` : `Failed to ${action}.`);
 }
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function autoCapitalize(str: string): string {
+  if (!str.length) return str;
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function normalizeTodoTitleForStore(title: string): string {
+  return autoCapitalize(title.trim());
+}
+
+function normalizeTodoTitleForCompare(title: string): string {
+  return title.trim().toLowerCase();
+}
+
+function normalizeGroupNameForStore(name: string): string {
+  return autoCapitalize(name.trim());
+}
+
+function normalizeGroupNameForCompare(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function assertNoDuplicateGroupName(groups: Group[], name: string, exceptId?: string) {
+  const normalized = normalizeGroupNameForCompare(name);
+  const duplicate = groups.some(
+    (group) => group.id !== exceptId && normalizeGroupNameForCompare(group.name) === normalized
+  );
+  if (duplicate) {
+    throw new Error(
+      "A group with this name already exists (including in Trash). Restore or permanently delete it first."
+    );
+  }
+}
+
+function assertNoDuplicateTodoTitle(
+  todos: Todo[],
+  groupId: string,
+  title: string,
+  exceptId?: string
+) {
+  const normalized = normalizeTodoTitleForCompare(title);
+  const duplicate = todos.some(
+    (todo) =>
+      todo.group_id === groupId &&
+      !todo.deleted_at &&
+      todo.id !== exceptId &&
+      normalizeTodoTitleForCompare(todo.title) === normalized
+  );
+  if (duplicate) {
+    throw new Error("A to-do with this title already exists in this group");
+  }
 }
 
 function parsePayload(payload_json: string | null) {
@@ -299,6 +369,35 @@ function buildConnections(
         progress,
         is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
         created_at: row.created_at,
+      };
+    })
+    .filter((connection) => connection.items.length >= 2);
+}
+
+function buildConnectionsFromSnapshotDraft(snapshot: SyncCacheSnapshot): Connection[] {
+  const todoById = new Map(snapshot.todos.map((todo) => [todo.id, todo] as const));
+  return snapshot.connections
+    .map((connection) => {
+      const items = connection.items
+        .map((item, index) => {
+          const todo = todoById.get(item.todo_id);
+          if (!todo || todo.deleted_at) return null;
+          return {
+            ...item,
+            title: todo.title,
+            is_completed: todo.is_completed,
+            high_priority: todo.high_priority,
+            completed_at: todo.completed_at,
+            created_at: todo.created_at,
+            position: item.position ?? index,
+          };
+        })
+        .filter(Boolean) as ConnectionItem[];
+      return {
+        ...connection,
+        items,
+        progress: buildConnectionProgress(connection.kind, items),
+        is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
       };
     })
     .filter((connection) => connection.items.length >= 2);
@@ -578,13 +677,32 @@ async function remoteBuildConnection(connectionId: string) {
 async function createGroupRemote(name: string, id: string = crypto.randomUUID()) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
   const userId = await requireUserId();
+  const normalizedName = normalizeGroupNameForStore(name);
+  if (!normalizedName) {
+    throw new Error("Name is required and must be a non-empty string");
+  }
   const snapshot = await getSnapshot();
+  assertNoDuplicateGroupName(snapshot.groups, normalizedName);
+  const { data: remoteGroups, error: remoteGroupsError } = await supabase
+    .from("groups")
+    .select("id,name")
+    .eq("user_id", userId);
+  if (remoteGroupsError) throw toRepositoryError("create the group", remoteGroupsError);
+  const hasRemoteDuplicate = (remoteGroups ?? []).some((group) => {
+    const remoteName = typeof group.name === "string" ? group.name : "";
+    return normalizeGroupNameForCompare(remoteName) === normalizeGroupNameForCompare(normalizedName);
+  });
+  if (hasRemoteDuplicate) {
+    throw new Error(
+      "A group with this name already exists (including in Trash). Restore or permanently delete it first."
+    );
+  }
   const position = snapshot.groups.length;
   const timestamp = nowIso();
   const row: GroupRow = {
     id,
     user_id: userId,
-    name,
+    name: normalizedName,
     position,
     deleted_at: null,
     created_at: timestamp,
@@ -596,7 +714,7 @@ async function createGroupRemote(name: string, id: string = crypto.randomUUID())
       await supabase.from("groups").insert({
         id,
         user_id: userId,
-        name,
+        name: normalizedName,
         position,
         created_at: timestamp,
         updated_at: timestamp,
@@ -604,10 +722,12 @@ async function createGroupRemote(name: string, id: string = crypto.randomUUID())
     ).error;
   }
   if (error) throw toRepositoryError("create the group", error);
-  await writeRemoteActivity("group", id, "created", `Created group "${name}".`, { name });
+  await writeRemoteActivity("group", id, "created", `Created group "${normalizedName}".`, {
+    name: normalizedName,
+  });
   return {
     id,
-    name,
+    name: normalizedName,
     position,
     created_at: timestamp,
     updated_at: timestamp,
@@ -616,13 +736,35 @@ async function createGroupRemote(name: string, id: string = crypto.randomUUID())
 
 async function updateGroupRemote(id: string, name: string) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
+  const normalizedName = normalizeGroupNameForStore(name);
+  if (!normalizedName) {
+    throw new Error("Name is required and must be a non-empty string");
+  }
+  const userId = await requireUserId();
+  const { data: remoteGroups, error: remoteGroupsError } = await supabase
+    .from("groups")
+    .select("id,name")
+    .eq("user_id", userId);
+  if (remoteGroupsError) throw toRepositoryError("rename the group", remoteGroupsError);
+  const hasRemoteDuplicate = (remoteGroups ?? []).some((group) => {
+    if (group.id === id) return false;
+    const remoteName = typeof group.name === "string" ? group.name : "";
+    return normalizeGroupNameForCompare(remoteName) === normalizeGroupNameForCompare(normalizedName);
+  });
+  if (hasRemoteDuplicate) {
+    throw new Error(
+      "A group with this name already exists (including in Trash). Restore or permanently delete it first."
+    );
+  }
   const timestamp = nowIso();
   const { error } = await supabase
     .from("groups")
-    .update({ name, updated_at: timestamp })
+    .update({ name: normalizedName, updated_at: timestamp })
     .eq("id", id);
   if (error) throw toRepositoryError("rename the group", error);
-  await writeRemoteActivity("group", id, "updated", `Renamed group to "${name}".`, { name });
+  await writeRemoteActivity("group", id, "updated", `Renamed group to "${normalizedName}".`, {
+    name: normalizedName,
+  });
 }
 
 async function reorderGroupsRemote(items: Array<{ id: string; position: number }>) {
@@ -645,7 +787,27 @@ async function createTodoRemote(
 ) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
   const userId = await requireUserId();
+  const normalizedTitle = normalizeTodoTitleForStore(title);
+  const normalizedTitleCompare = normalizeTodoTitleForCompare(normalizedTitle);
+  if (!normalizedTitle) {
+    throw new Error("Title is required and must be a non-empty string");
+  }
   const snapshot = await getSnapshot();
+  assertNoDuplicateTodoTitle(snapshot.todos, groupId, normalizedTitle);
+  const { data: remoteTodos, error: remoteTodosError } = await supabase
+    .from("todos")
+    .select("id,title")
+    .eq("user_id", userId)
+    .eq("group_id", groupId)
+    .is("deleted_at", null);
+  if (remoteTodosError) throw toRepositoryError("create the task", remoteTodosError);
+  const hasRemoteDuplicate = (remoteTodos ?? []).some((todo) => {
+    const remoteTitle = typeof todo.title === "string" ? todo.title : "";
+    return normalizeTodoTitleForCompare(remoteTitle) === normalizedTitleCompare;
+  });
+  if (hasRemoteDuplicate) {
+    throw new Error("A to-do with this title already exists in this group");
+  }
   const groupTodos = snapshot.todos.filter((todo) => todo.group_id === groupId && !todo.deleted_at);
   const position = groupTodos.length;
   const timestamp = nowIso();
@@ -653,7 +815,7 @@ async function createTodoRemote(
     id,
     user_id: userId,
     group_id: groupId,
-    title,
+    title: normalizedTitle,
     description: description ?? null,
     high_priority: options?.high_priority ? 1 : 0,
     reminder_at: (options?.reminder_at as string | null | undefined) ?? null,
@@ -676,7 +838,7 @@ async function createTodoRemote(
         id,
         user_id: userId,
         group_id: groupId,
-        title,
+        title: normalizedTitle,
         description: description ?? null,
         high_priority: options?.high_priority ? 1 : 0,
         reminder_at: (options?.reminder_at as string | null | undefined) ?? null,
@@ -689,15 +851,55 @@ async function createTodoRemote(
     ).error;
   }
   if (error) throw toRepositoryError("create the task", error);
-  await writeRemoteActivity("todo", id, "created", `Created task "${title}".`, { title, group_id: groupId });
+  await writeRemoteActivity("todo", id, "created", `Created task "${normalizedTitle}".`, {
+    title: normalizedTitle,
+    group_id: groupId,
+  });
   const { user_id: _userId, ...todo } = row;
   return todo;
 }
 
 async function updateTodoRemote(id: string, data: Record<string, unknown>) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
+  const { data: currentTodo, error: currentTodoError } = await supabase
+    .from("todos")
+    .select("id,user_id,group_id,title,deleted_at")
+    .eq("id", id)
+    .maybeSingle();
+  if (currentTodoError) throw toRepositoryError("update the task", currentTodoError);
+  if (!currentTodo) throw new Error("Task not found.");
+  const currentGroupId = currentTodo.group_id as string;
+  const currentUserId = currentTodo.user_id as string;
   const timestamp = nowIso();
   const patch: Record<string, unknown> = { ...data, updated_at: timestamp };
+  if ("title" in patch && patch.title !== undefined) {
+    if (typeof patch.title !== "string" || !patch.title.trim()) {
+      throw new Error("Title must be a non-empty string");
+    }
+    patch.title = normalizeTodoTitleForStore(patch.title);
+    const normalizedTitleCompare = normalizeTodoTitleForCompare(patch.title as string);
+    const { data: remoteTodos, error: remoteTodosError } = await supabase
+      .from("todos")
+      .select("id,title")
+      .eq("user_id", currentUserId)
+      .eq("group_id", currentGroupId)
+      .is("deleted_at", null);
+    if (remoteTodosError) throw toRepositoryError("update the task", remoteTodosError);
+    const hasRemoteDuplicate = (remoteTodos ?? []).some((todo) => {
+      if (todo.id === id) return false;
+      const remoteTitle = typeof todo.title === "string" ? todo.title : "";
+      return normalizeTodoTitleForCompare(remoteTitle) === normalizedTitleCompare;
+    });
+    if (hasRemoteDuplicate) {
+      throw new Error("A to-do with this title already exists in this group");
+    }
+  }
+  if ("high_priority" in patch) {
+    patch.high_priority = patch.high_priority ? 1 : 0;
+  }
+  if ("planning_level" in patch && patch.planning_level != null) {
+    patch.planning_level = Number(patch.planning_level);
+  }
   if ("recurrence_rule" in patch) {
     patch.recurrence_enabled = patch.recurrence_rule ? 1 : 0;
   }
@@ -1259,15 +1461,29 @@ export const syncedGroupsApi = {
   create: async (name: string) =>
     withOfflineFallback(
       async () => {
-        const group = await createGroupRemote(name);
-        await fetchRemoteSnapshot();
+        const normalizedName = normalizeGroupNameForStore(name);
+        if (!normalizedName) {
+          throw new Error("Name is required and must be a non-empty string");
+        }
+        const snapshot = await getSnapshot();
+        assertNoDuplicateGroupName(snapshot.groups, normalizedName);
+        const group = await createGroupRemote(normalizedName);
+        await mutateSnapshot((snapshot) => {
+          snapshot.groups = [...snapshot.groups, group].sort((a, b) => a.position - b.position);
+        });
         return group;
       },
       async () => {
+        const normalizedName = normalizeGroupNameForStore(name);
+        if (!normalizedName) {
+          throw new Error("Name is required and must be a non-empty string");
+        }
+        const snapshot = await getSnapshot();
+        assertNoDuplicateGroupName(snapshot.groups, normalizedName);
         const group: Group = {
           id: crypto.randomUUID(),
-          name,
-          position: (await getSnapshot()).groups.length,
+          name: normalizedName,
+          position: snapshot.groups.length,
           created_at: nowIso(),
           updated_at: nowIso(),
         };
@@ -1277,12 +1493,12 @@ export const syncedGroupsApi = {
             entityType: "group",
             entityId: group.id,
             action: "queued_create",
-            summary: `Queued creation of group "${name}" while offline.`,
+            summary: `Queued creation of group "${normalizedName}" while offline.`,
           });
         });
         await queueOperation({
           kind: "group.create",
-          payload: { id: group.id, name },
+          payload: { id: group.id, name: normalizedName },
         });
         return group;
       }
@@ -1290,32 +1506,70 @@ export const syncedGroupsApi = {
   update: async (id: string, name: string) =>
     withOfflineFallback(
       async () => {
-        await updateGroupRemote(id, name);
-        await fetchRemoteSnapshot();
-        return (await getSnapshot()).groups.find((group) => group.id === id)!;
-      },
-      async () => {
+        const normalizedName = normalizeGroupNameForStore(name);
+        if (!normalizedName) {
+          throw new Error("Name is required and must be a non-empty string");
+        }
         const snapshot = await getSnapshot();
         const current = snapshot.groups.find((group) => group.id === id);
         if (!current) throw new Error("Group not found.");
+        assertNoDuplicateGroupName(snapshot.groups, normalizedName, id);
+        await updateGroupRemote(id, normalizedName);
+        const refreshed = await getSnapshot();
+        const latest = refreshed.groups.find((group) => group.id === id);
+        if (!latest) throw new Error("Group not found.");
+        const next = { ...latest, name: normalizedName, updated_at: nowIso() };
+        await mutateSnapshot((draft) => {
+          draft.groups = draft.groups.map((group) => (group.id === id ? next : group));
+        });
+        return next;
+      },
+      async () => {
+        const normalizedName = normalizeGroupNameForStore(name);
+        if (!normalizedName) {
+          throw new Error("Name is required and must be a non-empty string");
+        }
+        const snapshot = await getSnapshot();
+        const current = snapshot.groups.find((group) => group.id === id);
+        if (!current) throw new Error("Group not found.");
+        assertNoDuplicateGroupName(snapshot.groups, normalizedName, id);
         const updatedAt = nowIso();
         await mutateSnapshot((draft) => {
           draft.groups = draft.groups.map((group) =>
-            group.id === id ? { ...group, name, updated_at: updatedAt } : group
+            group.id === id ? { ...group, name: normalizedName, updated_at: updatedAt } : group
           );
         });
         await queueOperation({
           kind: "group.update",
-          payload: { id, name, baseUpdatedAt: current.updated_at },
+          payload: { id, name: normalizedName, baseUpdatedAt: current.updated_at },
         });
-        return { ...current, name, updated_at: updatedAt };
+        return { ...current, name: normalizedName, updated_at: updatedAt };
       }
     ),
   delete: async (id: string) =>
     withOfflineFallback(
       async () => {
         await remoteGroupDelete(id);
-        await fetchRemoteSnapshot();
+        const timestamp = nowIso();
+        await mutateSnapshot((snapshot) => {
+          snapshot.groups = snapshot.groups.filter((group) => group.id !== id);
+          snapshot.todos = snapshot.todos.map((todo) =>
+            todo.group_id === id ? { ...todo, deleted_at: timestamp, updated_at: timestamp } : todo
+          );
+          snapshot.connections = snapshot.connections
+            .map((connection) => {
+              const items = connection.items.filter((item) =>
+                snapshot.todos.some((todo) => todo.id === item.todo_id && todo.group_id !== id)
+              );
+              return {
+                ...connection,
+                items,
+                progress: buildConnectionProgress(connection.kind, items),
+                is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+              };
+            })
+            .filter((connection) => connection.items.length >= 2);
+        });
       },
       async () => {
         const timestamp = nowIso();
@@ -1335,7 +1589,17 @@ export const syncedGroupsApi = {
     withOfflineFallback(
       async () => {
         await reorderGroupsRemote(items);
-        await fetchRemoteSnapshot();
+        const updatedAt = nowIso();
+        await mutateSnapshot((snapshot) => {
+          const positions = new Map(items.map((item) => [item.id, item.position]));
+          snapshot.groups = snapshot.groups
+            .map((group) => ({
+              ...group,
+              position: positions.get(group.id) ?? group.position,
+              updated_at: positions.has(group.id) ? updatedAt : group.updated_at,
+            }))
+            .sort((a, b) => a.position - b.position);
+        });
       },
       async () => {
         await mutateSnapshot((snapshot) => {
@@ -1367,17 +1631,30 @@ export const syncedTodosApi = {
   ) =>
     withOfflineFallback(
       async () => {
-        const todo = await createTodoRemote(groupId, title, description, options);
-        await fetchRemoteSnapshot();
+        const normalizedTitle = normalizeTodoTitleForStore(title);
+        if (!normalizedTitle) {
+          throw new Error("Title is required and must be a non-empty string");
+        }
+        const snapshot = await getSnapshot();
+        assertNoDuplicateTodoTitle(snapshot.todos, groupId, normalizedTitle);
+        const todo = await createTodoRemote(groupId, normalizedTitle, description, options);
+        await mutateSnapshot((draft) => {
+          draft.todos.push(todo);
+        });
         return todo;
       },
       async () => {
         const snapshot = await getSnapshot();
+        const normalizedTitle = normalizeTodoTitleForStore(title);
+        if (!normalizedTitle) {
+          throw new Error("Title is required and must be a non-empty string");
+        }
+        assertNoDuplicateTodoTitle(snapshot.todos, groupId, normalizedTitle);
         const groupTodos = snapshot.todos.filter((todo) => todo.group_id === groupId && !todo.deleted_at);
         const todo: Todo = {
           id: crypto.randomUUID(),
           group_id: groupId,
-          title,
+          title: normalizedTitle,
           description: description ?? null,
           high_priority: options?.high_priority ? 1 : 0,
           reminder_at: (options?.reminder_at as string | null | undefined) ?? null,
@@ -1400,12 +1677,12 @@ export const syncedTodosApi = {
             entityType: "todo",
             entityId: todo.id,
             action: "queued_create",
-            summary: `Queued creation of "${title}" while offline.`,
+            summary: `Queued creation of "${normalizedTitle}" while offline.`,
           });
         });
         await queueOperation({
           kind: "todo.create",
-          payload: { id: todo.id, groupId, title, description, options },
+          payload: { id: todo.id, groupId, title: normalizedTitle, description, options },
         });
         return todo;
       }
@@ -1413,20 +1690,75 @@ export const syncedTodosApi = {
   update: async (id: string, data: Record<string, unknown>) =>
     withOfflineFallback(
       async () => {
-        await updateTodoRemote(id, data);
-        await fetchRemoteSnapshot();
-        return (await getSnapshot()).todos.find((todo) => todo.id === id)!;
-      },
-      async () => {
+        const normalizedData: Record<string, unknown> = { ...data };
+        if ("high_priority" in normalizedData) {
+          normalizedData.high_priority = normalizedData.high_priority ? 1 : 0;
+        }
+        if ("planning_level" in normalizedData && normalizedData.planning_level != null) {
+          normalizedData.planning_level = Number(normalizedData.planning_level);
+        }
         const snapshot = await getSnapshot();
         const current = snapshot.todos.find((todo) => todo.id === id);
         if (!current) throw new Error("Task not found.");
+        if ("title" in normalizedData && normalizedData.title !== undefined) {
+          if (typeof normalizedData.title !== "string" || !normalizedData.title.trim()) {
+            throw new Error("Title must be a non-empty string");
+          }
+          normalizedData.title = normalizeTodoTitleForStore(normalizedData.title);
+          assertNoDuplicateTodoTitle(
+            snapshot.todos,
+            current.group_id,
+            normalizedData.title as string,
+            id
+          );
+        }
+        await updateTodoRemote(id, normalizedData);
         const next: Todo = {
           ...current,
-          ...data,
+          ...normalizedData,
           recurrence_enabled:
-            "recurrence_rule" in data
-              ? data.recurrence_rule
+            "recurrence_rule" in normalizedData
+              ? normalizedData.recurrence_rule
+                ? 1
+                : 0
+              : current.recurrence_enabled,
+          updated_at: nowIso(),
+        };
+        await mutateSnapshot((draft) => {
+          draft.todos = draft.todos.map((todo) => (todo.id === id ? next : todo));
+          draft.connections = buildConnectionsFromSnapshotDraft(draft);
+        });
+        return next;
+      },
+      async () => {
+        const normalizedData: Record<string, unknown> = { ...data };
+        if ("high_priority" in normalizedData) {
+          normalizedData.high_priority = normalizedData.high_priority ? 1 : 0;
+        }
+        if ("planning_level" in normalizedData && normalizedData.planning_level != null) {
+          normalizedData.planning_level = Number(normalizedData.planning_level);
+        }
+        const snapshot = await getSnapshot();
+        const current = snapshot.todos.find((todo) => todo.id === id);
+        if (!current) throw new Error("Task not found.");
+        if ("title" in normalizedData && normalizedData.title !== undefined) {
+          if (typeof normalizedData.title !== "string" || !normalizedData.title.trim()) {
+            throw new Error("Title must be a non-empty string");
+          }
+          normalizedData.title = normalizeTodoTitleForStore(normalizedData.title);
+          assertNoDuplicateTodoTitle(
+            snapshot.todos,
+            current.group_id,
+            normalizedData.title as string,
+            id
+          );
+        }
+        const next: Todo = {
+          ...current,
+          ...normalizedData,
+          recurrence_enabled:
+            "recurrence_rule" in normalizedData
+              ? normalizedData.recurrence_rule
                 ? 1
                 : 0
               : current.recurrence_enabled,
@@ -1437,7 +1769,7 @@ export const syncedTodosApi = {
         });
         await queueOperation({
           kind: "todo.update",
-          payload: { id, data, baseUpdatedAt: current.updated_at },
+          payload: { id, data: normalizedData, baseUpdatedAt: current.updated_at },
         });
         return next;
       }
@@ -1447,8 +1779,21 @@ export const syncedTodosApi = {
     withOfflineFallback(
       async () => {
         await toggleTodoRemote(id);
-        await fetchRemoteSnapshot();
-        return (await getSnapshot()).todos.find((todo) => todo.id === id)!;
+        const snapshot = await getSnapshot();
+        const current = snapshot.todos.find((todo) => todo.id === id);
+        if (!current) throw new Error("Task not found.");
+        const nextCompleted = current.is_completed === 1 ? 0 : 1;
+        const next = {
+          ...current,
+          is_completed: nextCompleted,
+          completed_at: nextCompleted ? nowIso() : null,
+          updated_at: nowIso(),
+        };
+        await mutateSnapshot((draft) => {
+          draft.todos = draft.todos.map((todo) => (todo.id === id ? next : todo));
+          draft.connections = buildConnectionsFromSnapshotDraft(draft);
+        });
+        return next;
       },
       async () => {
         const snapshot = await getSnapshot();
@@ -1475,7 +1820,23 @@ export const syncedTodosApi = {
     withOfflineFallback(
       async () => {
         await deleteTodoRemote(id);
-        await fetchRemoteSnapshot();
+        const timestamp = nowIso();
+        await mutateSnapshot((draft) => {
+          draft.todos = draft.todos.map((todo) =>
+            todo.id === id ? { ...todo, deleted_at: timestamp, updated_at: timestamp } : todo
+          );
+          draft.connections = draft.connections
+            .map((connection) => {
+              const items = connection.items.filter((item) => item.todo_id !== id);
+              return {
+                ...connection,
+                items,
+                progress: buildConnectionProgress(connection.kind, items),
+                is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+              };
+            })
+            .filter((connection) => connection.items.length >= 2);
+        });
       },
       async () => {
         const timestamp = nowIso();
@@ -1500,7 +1861,15 @@ export const syncedTodosApi = {
     withOfflineFallback(
       async () => {
         await reorderTodosRemote(items);
-        await fetchRemoteSnapshot();
+        const updatedAt = nowIso();
+        await mutateSnapshot((draft) => {
+          const positions = new Map(items.map((item) => [item.id, item.position]));
+          draft.todos = draft.todos.map((todo) =>
+            positions.has(todo.id)
+              ? { ...todo, position: positions.get(todo.id)!, updated_at: updatedAt }
+              : todo
+          );
+        });
       },
       async () => {
         await mutateSnapshot((draft) => {
@@ -1526,7 +1895,14 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         const connection = await createConnectionRemote(todoIds, name, kind);
-        await fetchRemoteSnapshot();
+        await mutateSnapshot((draft) => {
+          const existingIndex = draft.connections.findIndex((item) => item.id === connection.id);
+          if (existingIndex >= 0) {
+            draft.connections[existingIndex] = connection;
+          } else {
+            draft.connections.push(connection);
+          }
+        });
         return connection;
       },
       async () => {
@@ -1574,8 +1950,20 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         await updateConnectionRemote(id, data);
-        await fetchRemoteSnapshot();
-        return (await getSnapshot()).connections.find((connection) => connection.id === id)!;
+        const snapshot = await getSnapshot();
+        const current = snapshot.connections.find((connection) => connection.id === id);
+        if (!current) throw new Error("Connection not found.");
+        const next = {
+          ...current,
+          ...data,
+          progress: buildConnectionProgress(data.kind ?? current.kind, current.items),
+        };
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections.map((connection) =>
+            connection.id === id ? next : connection
+          );
+        });
+        return next;
       },
       async () => {
         const snapshot = await getSnapshot();
@@ -1598,7 +1986,33 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         await addConnectionItemRemote(connectionId, todoId);
-        await fetchRemoteSnapshot();
+        const snapshot = await getSnapshot();
+        const todo = snapshot.todos.find((item) => item.id === todoId);
+        if (!todo) throw new Error("Task not found.");
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections.map((connection) => {
+            if (connection.id !== connectionId) return connection;
+            const items = [
+              ...connection.items,
+              {
+                id: crypto.randomUUID(),
+                todo_id: todoId,
+                title: todo.title,
+                is_completed: todo.is_completed,
+                high_priority: todo.high_priority,
+                completed_at: todo.completed_at,
+                created_at: todo.created_at,
+                position: connection.items.length,
+              },
+            ];
+            return {
+              ...connection,
+              items,
+              progress: buildConnectionProgress(connection.kind, items),
+              is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+            };
+          });
+        });
       },
       async () => {
         const snapshot = await getSnapshot();
@@ -1640,7 +2054,19 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         const connection = await mergeConnectionsRemote(fromTodoId, toTodoId);
-        await fetchRemoteSnapshot();
+        const snapshot = await getSnapshot();
+        const fromConnection = snapshot.connections.find((item) =>
+          item.items.some((connectionItem) => connectionItem.todo_id === fromTodoId)
+        );
+        const toConnection = snapshot.connections.find((item) =>
+          item.items.some((connectionItem) => connectionItem.todo_id === toTodoId)
+        );
+        if (!fromConnection || !toConnection) return connection;
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections
+            .filter((item) => item.id !== toConnection.id)
+            .map((item) => (item.id === fromConnection.id ? connection : item));
+        });
         return connection;
       },
       async () => {
@@ -1691,8 +2117,26 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         await reorderConnectionItemsRemote(connectionId, todoIds);
-        await fetchRemoteSnapshot();
-        return (await getSnapshot()).connections.find((connection) => connection.id === connectionId)!;
+        const snapshot = await getSnapshot();
+        const connection = snapshot.connections.find((item) => item.id === connectionId);
+        if (!connection) throw new Error("Connection not found.");
+        const itemByTodoId = new Map(connection.items.map((item) => [item.todo_id, item]));
+        const items = todoIds
+          .map((todoId, index) => {
+            const item = itemByTodoId.get(todoId);
+            return item ? { ...item, position: index } : null;
+          })
+          .filter(Boolean) as ConnectionItem[];
+        const next = {
+          ...connection,
+          items,
+          progress: buildConnectionProgress(connection.kind, items),
+          is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+        };
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections.map((item) => (item.id === connectionId ? next : item));
+        });
+        return next;
       },
       async () => {
         const snapshot = await getSnapshot();
@@ -1724,7 +2168,22 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         await removeConnectionItemRemote(connectionId, todoId);
-        await fetchRemoteSnapshot();
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections
+            .map((connection) => {
+              if (connection.id !== connectionId) return connection;
+              const items = connection.items
+                .filter((item) => item.todo_id !== todoId)
+                .map((item, index) => ({ ...item, position: index }));
+              return {
+                ...connection,
+                items,
+                progress: buildConnectionProgress(connection.kind, items),
+                is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+              };
+            })
+            .filter((connection) => connection.items.length >= 2);
+        });
       },
       async () => {
         await mutateSnapshot((draft) => {
@@ -1752,7 +2211,9 @@ export const syncedConnectionsApi = {
     withOfflineFallback(
       async () => {
         await deleteConnectionRemote(id);
-        await fetchRemoteSnapshot();
+        await mutateSnapshot((draft) => {
+          draft.connections = draft.connections.filter((connection) => connection.id !== id);
+        });
       },
       async () => {
         await mutateSnapshot((draft) => {

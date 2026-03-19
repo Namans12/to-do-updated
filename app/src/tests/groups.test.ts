@@ -141,6 +141,36 @@ describe("Groups CRUD API", () => {
       const body = await res.json();
       expect(body.data.name).toBe("Office");
     });
+
+    it("should auto-capitalize first letter on create", async () => {
+      const res = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "home list" }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.data.name).toBe("Home list");
+    });
+
+    it("should return 400 for case-insensitive duplicate group names", async () => {
+      await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Office" }),
+      });
+
+      const res = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "office" }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("already exists");
+    });
   });
 
   // ─── GET /api/groups ────────────────────────────────────────
@@ -333,6 +363,49 @@ describe("Groups CRUD API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.data.name).toBe("Same Name");
+    });
+
+    it("should auto-capitalize first letter on update", async () => {
+      const createRes = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Initial" }),
+      });
+      const created = await createRes.json();
+
+      const res = await ctx.app.request(`/api/groups/${created.data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "work tasks" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.name).toBe("Work tasks");
+    });
+
+    it("should block case-insensitive duplicates on update", async () => {
+      await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Personal" }),
+      });
+      const createRes = await ctx.app.request("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Work" }),
+      });
+      const work = await createRes.json();
+
+      const res = await ctx.app.request(`/api/groups/${work.data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "personal" }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("already exists");
     });
   });
 

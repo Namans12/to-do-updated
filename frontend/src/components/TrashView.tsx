@@ -75,11 +75,16 @@ export default function TrashView() {
     load();
   }, [load]);
 
+  const queueAppRefresh = useCallback(() => {
+    void Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]).catch(() => undefined);
+  }, [refreshConnections, refreshGroups, refreshTodos]);
+
   const handleRestore = async (id: string) => {
     try {
       await trashApi.restore(id);
-      await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
-      await load();
+      setItems((prev) => prev.filter((item) => item.id !== id));
+      queueAppRefresh();
+      void load();
       toast.success("Restored");
     } catch (error) {
       toast.error(getActionErrorMessage("restore the task", error));
@@ -89,8 +94,9 @@ export default function TrashView() {
   const handleDelete = async (id: string) => {
     try {
       await trashApi.deletePermanently(id);
-      await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
-      await load();
+      setItems((prev) => prev.filter((item) => item.id !== id));
+      queueAppRefresh();
+      void load();
       toast.success("Permanently deleted");
     } catch (error) {
       toast.error(getActionErrorMessage("delete the task permanently", error));
@@ -100,8 +106,10 @@ export default function TrashView() {
   const handleRestoreGroup = async (groupId: string) => {
     try {
       await trashApi.restoreGroup(groupId);
-      await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
-      await load();
+      setTrashedGroups((prev) => prev.filter((group) => group.id !== groupId));
+      setItems((prev) => prev.filter((item) => item.group_id !== groupId));
+      queueAppRefresh();
+      void load();
       toast.success("Group restored");
     } catch (error) {
       toast.error(getActionErrorMessage("restore the group", error));
@@ -112,8 +120,10 @@ export default function TrashView() {
     if (!confirm(`Permanently delete group "${groupName}" and all its tasks from trash?`)) return;
     try {
       await trashApi.deleteGroupPermanently(groupId);
-      await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
-      await load();
+      setTrashedGroups((prev) => prev.filter((group) => group.id !== groupId));
+      setItems((prev) => prev.filter((item) => item.group_id !== groupId));
+      queueAppRefresh();
+      void load();
       toast.success("Group permanently deleted");
     } catch (error) {
       toast.error(getActionErrorMessage("delete the group permanently", error));
@@ -124,8 +134,10 @@ export default function TrashView() {
     if (!confirm("Permanently delete all items in trash?")) return;
     try {
       await trashApi.empty();
-      await Promise.all([refreshGroups(), refreshTodos(), refreshConnections()]);
-      await load();
+      setItems([]);
+      setTrashedGroups([]);
+      queueAppRefresh();
+      void load();
       toast.success("Trash emptied");
     } catch (error) {
       toast.error(getActionErrorMessage("empty the trash", error));
