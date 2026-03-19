@@ -26,7 +26,7 @@ type GroupRow = Group & {
   deleted_at: string | null;
 };
 
-type TodoRow = Omit<Todo, "parent_todo_title"> & {
+type TodoRow = Todo & {
   user_id: string;
 };
 
@@ -65,7 +65,6 @@ type SearchFilters = {
   highPriority?: "all" | "true" | "false";
   hasReminder?: "all" | "true" | "false";
   connectionKind?: ConnectionKind | "all";
-  planningLevel?: number | "all";
   sort?: "relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest";
 };
 
@@ -78,8 +77,6 @@ type SearchResult = {
   position: number;
   reminder_at: string | null;
   recurrence_rule: Todo["recurrence_rule"];
-  planning_level: number;
-  parent_todo_id: string | null;
   connection_kind: ConnectionKind | null;
   group: { id: string; name: string };
   created_at: string;
@@ -825,8 +822,6 @@ async function createTodoRemote(
     is_completed: 0,
     completed_at: null,
     position,
-    parent_todo_id: (options?.parent_todo_id as string | null | undefined) ?? null,
-    planning_level: Number(options?.planning_level ?? 0),
     deleted_at: null,
     created_at: timestamp,
     updated_at: timestamp,
@@ -896,9 +891,6 @@ async function updateTodoRemote(id: string, data: Record<string, unknown>) {
   }
   if ("high_priority" in patch) {
     patch.high_priority = patch.high_priority ? 1 : 0;
-  }
-  if ("planning_level" in patch && patch.planning_level != null) {
-    patch.planning_level = Number(patch.planning_level);
   }
   if ("recurrence_rule" in patch) {
     patch.recurrence_enabled = patch.recurrence_rule ? 1 : 0;
@@ -1386,11 +1378,6 @@ function searchLocal(
       filters?.connectionKind && filters.connectionKind !== "all"
         ? connectionKindByTodoId.get(todo.id) === filters.connectionKind
         : true
-    )
-    .filter((todo) =>
-      filters?.planningLevel !== undefined && filters.planningLevel !== "all"
-        ? todo.planning_level === filters.planningLevel
-        : true
     );
 
   const sort = filters?.sort ?? "relevance";
@@ -1420,8 +1407,6 @@ function searchLocal(
     position: todo.position,
     reminder_at: todo.reminder_at,
     recurrence_rule: todo.recurrence_rule,
-    planning_level: todo.planning_level,
-    parent_todo_id: todo.parent_todo_id,
     connection_kind: connectionKindByTodoId.get(todo.id) ?? null,
     group: {
       id: todo.group_id,
@@ -1664,9 +1649,6 @@ export const syncedTodosApi = {
           is_completed: 0,
           completed_at: null,
           position: groupTodos.length,
-          parent_todo_id: (options?.parent_todo_id as string | null | undefined) ?? null,
-          parent_todo_title: null,
-          planning_level: Number(options?.planning_level ?? 0),
           deleted_at: null,
           created_at: nowIso(),
           updated_at: nowIso(),
@@ -1693,9 +1675,6 @@ export const syncedTodosApi = {
         const normalizedData: Record<string, unknown> = { ...data };
         if ("high_priority" in normalizedData) {
           normalizedData.high_priority = normalizedData.high_priority ? 1 : 0;
-        }
-        if ("planning_level" in normalizedData && normalizedData.planning_level != null) {
-          normalizedData.planning_level = Number(normalizedData.planning_level);
         }
         const snapshot = await getSnapshot();
         const current = snapshot.todos.find((todo) => todo.id === id);
@@ -1734,9 +1713,6 @@ export const syncedTodosApi = {
         const normalizedData: Record<string, unknown> = { ...data };
         if ("high_priority" in normalizedData) {
           normalizedData.high_priority = normalizedData.high_priority ? 1 : 0;
-        }
-        if ("planning_level" in normalizedData && normalizedData.planning_level != null) {
-          normalizedData.planning_level = Number(normalizedData.planning_level);
         }
         const snapshot = await getSnapshot();
         const current = snapshot.todos.find((todo) => todo.id === id);

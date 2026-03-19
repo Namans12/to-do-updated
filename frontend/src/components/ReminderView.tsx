@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlarmClock, Bell, CalendarDays, Clock3, FolderOpen, Milestone, Spline } from "lucide-react";
+import { AlarmClock, Bell, CalendarDays, Clock3, FolderOpen, Milestone } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import EmptyState from "./EmptyState";
 
@@ -111,9 +111,6 @@ export default function ReminderView() {
       const aTime = a.reminder_at ? Date.parse(a.reminder_at) : Number.MAX_SAFE_INTEGER;
       const bTime = b.reminder_at ? Date.parse(b.reminder_at) : Number.MAX_SAFE_INTEGER;
       if (aTime !== bTime) return aTime - bTime;
-      if ((a.planning_level ?? 0) !== (b.planning_level ?? 0)) {
-        return (a.planning_level ?? 0) - (b.planning_level ?? 0);
-      }
       return Date.parse(a.created_at) - Date.parse(b.created_at);
     });
     const grouped = new Map<string, typeof visibleTodos>();
@@ -244,7 +241,7 @@ export default function ReminderView() {
         <EmptyState
           icon={<Milestone size={28} className="text-slate-300 dark:text-slate-600" />}
           title="No roadmap items yet"
-          description="Add reminders, planning levels, or parent tasks and they’ll stack into a simple roadmap here."
+          description="Add reminders and they’ll stack into a simple roadmap here."
         />
       ) : (
         <div className="space-y-4 sm:space-y-5">
@@ -256,7 +253,7 @@ export default function ReminderView() {
                     {label}
                   </h3>
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    Ordered by reminder, then planning depth.
+                    Ordered by reminder time.
                   </p>
                 </div>
                 <span className="text-xs text-slate-400 dark:text-slate-500">
@@ -265,9 +262,6 @@ export default function ReminderView() {
               </div>
               <div className="mt-4 space-y-3">
                 {items.map((todo) => {
-                  const parent = todo.parent_todo_id
-                    ? visibleTodos.find((item) => item.id === todo.parent_todo_id)
-                    : null;
                   return (
                     <button
                       key={todo.id}
@@ -278,16 +272,6 @@ export default function ReminderView() {
                         <span className="text-sm font-medium text-slate-800 dark:text-slate-100">
                           {todo.title}
                         </span>
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-                          <Spline size={10} />
-                          Level {todo.planning_level}
-                        </span>
-                        {parent && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
-                            <Spline size={10} />
-                            Child of {parent.title}
-                          </span>
-                        )}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
                         <span className="inline-flex items-center gap-1">

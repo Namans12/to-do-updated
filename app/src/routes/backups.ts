@@ -30,13 +30,10 @@ interface BackupFilePayload {
 
 function attachParentTitle(
   todo: typeof todos.$inferSelect | null,
-  lookup: Map<string, typeof todos.$inferSelect>
+  _lookup: Map<string, typeof todos.$inferSelect>
 ) {
   if (!todo) return null;
-  return {
-    ...todo,
-    parent_todo_title: todo.parent_todo_id ? lookup.get(todo.parent_todo_id)?.title ?? null : null,
-  };
+  return todo;
 }
 
 function findTodoInBackup(payload: BackupFilePayload, todoId: string) {

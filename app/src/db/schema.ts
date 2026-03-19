@@ -24,8 +24,6 @@ export const todos = sqliteTable("todos", {
   is_completed: integer("is_completed").notNull().default(0),
   completed_at: text("completed_at"),
   position: integer("position").notNull().default(0),
-  parent_todo_id: text("parent_todo_id"),
-  planning_level: integer("planning_level").notNull().default(0),
   deleted_at: text("deleted_at"),
   created_at: text("created_at").notNull(),
   updated_at: text("updated_at").notNull(),

@@ -24,12 +24,13 @@ create table if not exists public.todos (
   is_completed integer not null default 0,
   completed_at timestamptz,
   position integer not null default 0,
-  parent_todo_id text,
-  planning_level integer not null default 0,
   deleted_at timestamptz,
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now())
 );
+
+alter table public.todos drop column if exists parent_todo_id;
+alter table public.todos drop column if exists planning_level;
 
 create table if not exists public.connections (
   id text primary key,

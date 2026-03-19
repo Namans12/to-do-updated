@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, type ReactNode } from "react";
 import { searchApi } from "../api/client";
 import type { SearchResult } from "../api/client";
 import { useApp } from "../context/AppContext";
-import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, Layers3, ChevronDown, SlidersHorizontal } from "lucide-react";
+import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, ChevronDown, SlidersHorizontal } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import EmptyState from "./EmptyState";
 
@@ -18,7 +18,6 @@ export default function SearchView() {
   const [highPriority, setHighPriority] = useState<"all" | "true" | "false">("all");
   const [hasReminder, setHasReminder] = useState<"all" | "true" | "false">("all");
   const [connectionKind, setConnectionKind] = useState<"all" | "sequence" | "dependency" | "branch" | "related">("all");
-  const [planningLevel, setPlanningLevel] = useState<"all" | "0" | "1" | "2" | "3" | "4" | "5">("all");
   const [sort, setSort] = useState<"relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest">("relevance");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -30,7 +29,6 @@ export default function SearchView() {
     highPriority !== "all",
     hasReminder !== "all",
     connectionKind !== "all",
-    planningLevel !== "all",
     sort !== "relevance",
   ].filter(Boolean).length;
 
@@ -57,7 +55,6 @@ export default function SearchView() {
           highPriority,
           hasReminder,
           connectionKind,
-          planningLevel: planningLevel === "all" ? "all" : Number(planningLevel),
           sort,
         });
         setResults(data);
@@ -77,7 +74,7 @@ export default function SearchView() {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, completed, groupId, highPriority, hasReminder, connectionKind, planningLevel, sort]);
+  }, [query, completed, groupId, highPriority, hasReminder, connectionKind, sort]);
 
   return (
     <div className="animate-fade-in">
@@ -138,7 +135,6 @@ export default function SearchView() {
                   setHighPriority("all");
                   setHasReminder("all");
                   setConnectionKind("all");
-                  setPlanningLevel("all");
                   setSort("relevance");
                 }}
                 className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 transition-colors hover:text-slate-600 dark:hover:text-slate-200"
@@ -179,14 +175,6 @@ export default function SearchView() {
                 <option value="dependency">Dependency</option>
                 <option value="branch">Branch</option>
                 <option value="related">Related</option>
-              </FilterSelect>
-              <FilterSelect label="Level" value={planningLevel} onChange={setPlanningLevel}>
-                <option value="all">All levels</option>
-                {[0, 1, 2, 3, 4, 5].map((level) => (
-                  <option key={level} value={String(level)}>
-                    Level {level}
-                  </option>
-                ))}
               </FilterSelect>
             </div>
 
@@ -319,10 +307,6 @@ export default function SearchView() {
                           {item.connection_kind}
                         </span>
                       )}
-                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-semibold text-slate-500 dark:text-slate-300">
-                        <Layers3 size={10} />
-                        Level {item.planning_level}
-                      </span>
                     </div>
                   </div>
                 </div>

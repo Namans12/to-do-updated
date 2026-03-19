@@ -33,7 +33,6 @@ export function createSearchRouter(dbOverride?: DbOverride) {
     const highPriorityParam = c.req.query("high_priority");
     const hasReminderParam = c.req.query("has_reminder");
     const connectionKindParam = c.req.query("connection_kind");
-    const planningLevelParam = c.req.query("planning_level");
     const sortParam = c.req.query("sort");
 
     // Validate required query parameter
@@ -98,14 +97,6 @@ export function createSearchRouter(dbOverride?: DbOverride) {
       whereConditions = and(whereConditions, sql`${todos.reminder_at} IS NULL`);
     }
 
-    if (planningLevelParam !== undefined) {
-      const parsedPlanningLevel = Number(planningLevelParam);
-      if (!Number.isInteger(parsedPlanningLevel) || parsedPlanningLevel < 0 || parsedPlanningLevel > 5) {
-        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
-      }
-      whereConditions = and(whereConditions, eq(todos.planning_level, parsedPlanningLevel));
-    }
-
     if (connectionKindParam) {
       whereConditions = and(whereConditions, eq(connections.kind, connectionKindParam));
     }
@@ -123,8 +114,6 @@ export function createSearchRouter(dbOverride?: DbOverride) {
         group_name: groups.name,
         reminder_at: todos.reminder_at,
         recurrence_rule: todos.recurrence_rule,
-        planning_level: todos.planning_level,
-        parent_todo_id: todos.parent_todo_id,
         connection_kind: connections.kind,
         created_at: todos.created_at,
         updated_at: todos.updated_at,
@@ -173,8 +162,6 @@ export function createSearchRouter(dbOverride?: DbOverride) {
           position: r.position,
           reminder_at: r.reminder_at,
           recurrence_rule: r.recurrence_rule,
-          planning_level: r.planning_level,
-          parent_todo_id: r.parent_todo_id,
           connection_kind: r.connection_kind,
           group: {
             id: r.group_id,

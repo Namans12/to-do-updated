@@ -26,28 +26,8 @@ function parseReminderAt(value: unknown): string | null | undefined {
   return parsed.toISOString();
 }
 
-function parsePlanningLevel(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 5) {
-    return undefined;
-  }
-  return value;
-}
-
-function getParentTodoTitle(
-  drizzleDb: ReturnType<typeof getDb>["db"],
-  parentTodoId: string | null | undefined
-) {
-  if (!parentTodoId) return null;
-  return drizzleDb
-    .select({ title: todos.title })
-    .from(todos)
-    .where(eq(todos.id, parentTodoId))
-    .get()?.title ?? null;
-}
-
 function snapshotTodo(
-  drizzleDb: ReturnType<typeof getDb>["db"],
+  _drizzleDb: ReturnType<typeof getDb>["db"],
   todo: typeof todos.$inferSelect | null | undefined
 ) {
   if (!todo) return null;
@@ -64,9 +44,6 @@ function snapshotTodo(
     is_completed: todo.is_completed,
     completed_at: todo.completed_at,
     position: todo.position,
-    parent_todo_id: todo.parent_todo_id,
-    parent_todo_title: getParentTodoTitle(drizzleDb, todo.parent_todo_id),
-    planning_level: todo.planning_level,
     deleted_at: todo.deleted_at,
     created_at: todo.created_at,
     updated_at: todo.updated_at,
@@ -137,8 +114,6 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         high_priority,
         reminder_at,
         recurrence_rule,
-        planning_level,
-        parent_todo_id,
       } = body;
 
       const { db: drizzleDb, sqlite } = db();
@@ -189,25 +164,6 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
       if (recurrence_rule !== undefined && parsedRecurrenceRule === undefined) {
         return c.json({ error: "recurrence_rule must be daily, weekly, monthly, or null" }, 400);
       }
-      const parsedPlanningLevel = parsePlanningLevel(planning_level);
-      if (planning_level !== undefined && parsedPlanningLevel === undefined) {
-        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
-      }
-      let normalizedParentTodoId: string | null = null;
-      if (parent_todo_id !== undefined && parent_todo_id !== null && parent_todo_id !== "") {
-        if (typeof parent_todo_id !== "string") {
-          return c.json({ error: "parent_todo_id must be a string or null" }, 400);
-        }
-        const parentTodo = drizzleDb
-          .select()
-          .from(todos)
-          .where(and(eq(todos.id, parent_todo_id), isNull(todos.deleted_at)))
-          .get();
-        if (!parentTodo || parentTodo.group_id !== groupId) {
-          return c.json({ error: "parent_todo_id must reference an active todo in the same group" }, 400);
-        }
-        normalizedParentTodoId = parentTodo.id;
-      }
       const now = new Date().toISOString();
       const recurrenceState = buildRecurrenceState(
         parsedRecurrenceRule ? parsedReminderAt ?? now : null,
@@ -243,8 +199,6 @@ export function createGroupTodosRouter(dbOverride?: DbOverride) {
         is_completed: 0,
         completed_at: null,
         position: 0,
-        parent_todo_id: normalizedParentTodoId,
-        planning_level: parsedPlanningLevel ?? 0,
         deleted_at: null,
         created_at: now,
         updated_at: now,
@@ -626,8 +580,6 @@ export function createTodosRouter(dbOverride?: DbOverride) {
             is_completed: 0,
             completed_at: null,
             position: (maxPosResult?.maxPos ?? -1) + 1,
-            parent_todo_id: todo.parent_todo_id,
-            planning_level: todo.planning_level,
             deleted_at: null,
             created_at: now,
             updated_at: now,
@@ -673,8 +625,6 @@ export function createTodosRouter(dbOverride?: DbOverride) {
         high_priority,
         reminder_at,
         recurrence_rule,
-        planning_level,
-        parent_todo_id,
       } = body;
 
       const { db: drizzleDb } = db();
@@ -760,34 +710,6 @@ export function createTodosRouter(dbOverride?: DbOverride) {
             (effectiveRecurrenceRule as Parameters<typeof buildRecurrenceState>[1]) ?? null
           )
         );
-      }
-
-      const parsedPlanningLevel = parsePlanningLevel(planning_level);
-      if (planning_level !== undefined && parsedPlanningLevel === undefined) {
-        return c.json({ error: "planning_level must be an integer between 0 and 5" }, 400);
-      }
-      if (parsedPlanningLevel !== undefined) {
-        updates.planning_level = parsedPlanningLevel;
-      }
-
-      if (parent_todo_id !== undefined) {
-        if (parent_todo_id === null || parent_todo_id === "") {
-          updates.parent_todo_id = null;
-        } else if (typeof parent_todo_id !== "string") {
-          return c.json({ error: "parent_todo_id must be a string or null" }, 400);
-        } else if (parent_todo_id === id) {
-          return c.json({ error: "A task cannot be its own parent" }, 400);
-        } else {
-          const parentTodo = drizzleDb
-            .select()
-            .from(todos)
-            .where(and(eq(todos.id, parent_todo_id), isNull(todos.deleted_at)))
-            .get();
-          if (!parentTodo || parentTodo.group_id !== todo.group_id) {
-            return c.json({ error: "parent_todo_id must reference an active todo in the same group" }, 400);
-          }
-          updates.parent_todo_id = parentTodo.id;
-        }
       }
 
       if (normalizedTitle !== null) {

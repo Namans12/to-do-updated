@@ -31,8 +31,6 @@ export function runMigrations(dbPath?: string): void {
       is_completed INTEGER NOT NULL DEFAULT 0,
       completed_at TEXT,
       position INTEGER NOT NULL DEFAULT 0,
-      parent_todo_id TEXT,
-      planning_level INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -87,12 +85,6 @@ export function runMigrations(dbPath?: string): void {
   }
   if (!todoColumns.some((col) => col.name === "completed_at")) {
     sqlite.exec("ALTER TABLE todos ADD COLUMN completed_at TEXT");
-  }
-  if (!todoColumns.some((col) => col.name === "parent_todo_id")) {
-    sqlite.exec("ALTER TABLE todos ADD COLUMN parent_todo_id TEXT");
-  }
-  if (!todoColumns.some((col) => col.name === "planning_level")) {
-    sqlite.exec("ALTER TABLE todos ADD COLUMN planning_level INTEGER NOT NULL DEFAULT 0");
   }
   const connectionColumns = sqlite.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
   if (!connectionColumns.some((col) => col.name === "kind")) {

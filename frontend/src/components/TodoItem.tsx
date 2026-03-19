@@ -11,9 +11,7 @@ import {
   Bell,
   CalendarDays,
   Clock3,
-  Layers3,
   Repeat,
-  Spline,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import toast from "react-hot-toast";
@@ -23,7 +21,6 @@ import TodoHistoryModal from "./TodoHistoryModal";
 
 interface TodoItemProps {
   todo: Todo;
-  groupTodos: Todo[];
   connections: Connection[];
   settings: AppSettings;
   refreshTodos: () => Promise<void>;
@@ -32,9 +29,6 @@ interface TodoItemProps {
   nextTodoId?: string | null;
   layoutId?: string;
   depth?: number;
-  childCount?: number;
-  childCompletion?: { completed: number; total: number };
-  parentTitle?: string | null;
 }
 
 function toLocalDateTimeParts(iso: string | null): { date: string; time: string } {
@@ -59,7 +53,6 @@ function buildReminderAt(date: string, time: string): string | null {
 
 function TodoItem({
   todo,
-  groupTodos,
   connections,
   settings,
   refreshTodos,
@@ -68,9 +61,6 @@ function TodoItem({
   nextTodoId = null,
   layoutId,
   depth = 0,
-  childCount = 0,
-  childCompletion,
-  parentTitle = null,
 }: TodoItemProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [optimisticCompleted, setOptimisticCompleted] = useState(todo.is_completed === 1);
@@ -81,8 +71,6 @@ function TodoItem({
   const [editReminderDate, setEditReminderDate] = useState(initialReminder.date);
   const [editReminderTime, setEditReminderTime] = useState(initialReminder.time);
   const [editRecurrenceRule, setEditRecurrenceRule] = useState(todo.recurrence_rule ?? "");
-  const [editPlanningLevel, setEditPlanningLevel] = useState(String(todo.planning_level ?? 0));
-  const [editParentTodoId, setEditParentTodoId] = useState(todo.parent_todo_id ?? "");
   const [isChecking, setIsChecking] = useState(false);
   const [descriptionMode, setDescriptionMode] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
@@ -92,7 +80,6 @@ function TodoItem({
   const editDescRef = useRef<HTMLTextAreaElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const todayDate = new Date().toISOString().slice(0, 10);
-  const siblingTodos = groupTodos.filter((item) => item.id !== todo.id && !item.deleted_at);
   const dependencyImpact = connections.reduce(
     (acc, connection) => {
       if (connection.kind !== "dependency") return acc;
@@ -191,8 +178,6 @@ function TodoItem({
         high_priority: editHighPriority,
         reminder_at: reminderAt,
         recurrence_rule: editRecurrenceRule ? (editRecurrenceRule as "daily" | "weekly" | "monthly") : null,
-        planning_level: Number(editPlanningLevel),
-        parent_todo_id: editParentTodoId || null,
       });
       await refreshTodos();
       setIsEditing(false);
@@ -320,8 +305,6 @@ function TodoItem({
       setEditReminderDate(parts.date);
       setEditReminderTime(parts.time);
       setEditRecurrenceRule(todo.recurrence_rule ?? "");
-      setEditPlanningLevel(String(todo.planning_level ?? 0));
-      setEditParentTodoId(todo.parent_todo_id ?? "");
     }
   };
 
@@ -374,7 +357,6 @@ function TodoItem({
         <div className="flex-1 min-w-0">
           {!isEditing && depth > 0 && (
             <div className="mb-2 inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-indigo-600 dark:text-indigo-300">
-              <Spline size={10} />
               Subtask
             </div>
           )}
@@ -493,35 +475,6 @@ function TodoItem({
                     <option value="monthly">Monthly</option>
                   </select>
                 </label>
-                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                  <Layers3 size={12} />
-                  <select
-                    value={editPlanningLevel}
-                    onChange={(e) => setEditPlanningLevel(e.target.value)}
-                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs"
-                  >
-                    {[0, 1, 2, 3, 4, 5].map((level) => (
-                      <option key={level} value={String(level)}>
-                        Level {level}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                  <Spline size={12} />
-                  <select
-                    value={editParentTodoId}
-                    onChange={(e) => setEditParentTodoId(e.target.value)}
-                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs max-w-[160px]"
-                  >
-                    <option value="">No parent task</option>
-                    {siblingTodos.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={() => void handleSaveEdit()} className="btn-primary !py-1.5 !px-3 text-xs">
@@ -537,8 +490,6 @@ function TodoItem({
                     setEditReminderDate(parts.date);
                     setEditReminderTime(parts.time);
                     setEditRecurrenceRule(todo.recurrence_rule ?? "");
-                    setEditPlanningLevel(String(todo.planning_level ?? 0));
-                    setEditParentTodoId(todo.parent_todo_id ?? "");
                   }}
                   className="btn-ghost !py-1.5 !px-3 text-xs"
                 >
@@ -634,38 +585,13 @@ function TodoItem({
                     {todo.recurrence_rule}
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-500 dark:text-slate-300">
-                  <Layers3 size={10} />
-                  Level {todo.planning_level}
-                </span>
               </div>
-
-              {(parentTitle || childCount > 0) && (
+              {dependencyImpact.blockedCount > 0 && (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
-                  {parentTitle && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-                      <Spline size={10} />
-                      Child of {parentTitle}
-                    </span>
-                  )}
-                  {childCount > 0 && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-1 font-semibold text-indigo-600 dark:text-indigo-300">
-                      <Spline size={10} />
-                      {childCount} subtask{childCount !== 1 ? "s" : ""}
-                    </span>
-                  )}
-                  {childCompletion && childCompletion.total > 0 && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-1 font-semibold text-emerald-600 dark:text-emerald-300">
-                      <Check size={10} />
-                      Subtasks {childCompletion.completed}/{childCompletion.total}
-                    </span>
-                  )}
-                  {dependencyImpact.blockedCount > 0 && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-1 font-semibold text-amber-700 dark:text-amber-300">
-                      <Bell size={10} />
-                      Blocks {dependencyImpact.blockedCount}
-                    </span>
-                  )}
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-1 font-semibold text-amber-700 dark:text-amber-300">
+                    <Bell size={10} />
+                    Blocks {dependencyImpact.blockedCount}
+                  </span>
                 </div>
               )}
 
@@ -717,8 +643,6 @@ function TodoItem({
                 setEditDesc(todo.description ?? "");
                 setIsEditing(true);
                 setEditRecurrenceRule(todo.recurrence_rule ?? "");
-                setEditPlanningLevel(String(todo.planning_level ?? 0));
-                setEditParentTodoId(todo.parent_todo_id ?? "");
               }}
               data-edit-btn="true"
               data-todo-id={todo.id}
@@ -775,7 +699,6 @@ function TodoItem({
 function areTodoItemPropsEqual(prev: TodoItemProps, next: TodoItemProps) {
   return (
     prev.todo === next.todo &&
-    prev.groupTodos === next.groupTodos &&
     prev.connections === next.connections &&
     prev.settings === next.settings &&
     prev.refreshTodos === next.refreshTodos &&
@@ -783,11 +706,7 @@ function areTodoItemPropsEqual(prev: TodoItemProps, next: TodoItemProps) {
     prev.isHighlighted === next.isHighlighted &&
     prev.nextTodoId === next.nextTodoId &&
     prev.layoutId === next.layoutId &&
-    prev.depth === next.depth &&
-    prev.childCount === next.childCount &&
-    prev.parentTitle === next.parentTitle &&
-    prev.childCompletion?.completed === next.childCompletion?.completed &&
-    prev.childCompletion?.total === next.childCompletion?.total
+    prev.depth === next.depth
   );
 }
 

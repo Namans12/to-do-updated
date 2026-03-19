@@ -1,21 +1,15 @@
-import type { Todo } from "../../types";
-import { CheckSquare, Layers3, Repeat, Spline, Trash2, X } from "lucide-react";
+import { CheckSquare, Repeat, Trash2, X } from "lucide-react";
 
 export default function GraphTodoInspector({
   title,
   draftTitle,
   draftDescription,
   draftHighPriority,
-  draftPlanningLevel,
   draftRecurrenceRule,
-  parentOptions,
-  draftParentTodoId,
   onDraftTitleChange,
   onDraftDescriptionChange,
   onDraftHighPriorityChange,
-  onDraftPlanningLevelChange,
   onDraftRecurrenceRuleChange,
-  onDraftParentTodoIdChange,
   onSave,
   onDelete,
   onClose,
@@ -25,16 +19,11 @@ export default function GraphTodoInspector({
   draftTitle: string;
   draftDescription: string;
   draftHighPriority: boolean;
-  draftPlanningLevel: number;
   draftRecurrenceRule: "" | "daily" | "weekly" | "monthly";
-  parentOptions: Todo[];
-  draftParentTodoId: string;
   onDraftTitleChange: (value: string) => void;
   onDraftDescriptionChange: (value: string) => void;
   onDraftHighPriorityChange: (value: boolean) => void;
-  onDraftPlanningLevelChange: (value: number) => void;
   onDraftRecurrenceRuleChange: (value: "" | "daily" | "weekly" | "monthly") => void;
-  onDraftParentTodoIdChange: (value: string) => void;
   onSave: () => void;
   onDelete: () => void;
   onClose: () => void;
@@ -101,20 +90,6 @@ export default function GraphTodoInspector({
             High priority
           </label>
           <label className="flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs">
-            <Layers3 size={12} />
-            <select
-              value={String(draftPlanningLevel)}
-              onChange={(event) => onDraftPlanningLevelChange(Number(event.target.value))}
-              className="w-full bg-slate-800 text-slate-100 outline-none"
-            >
-              {[0, 1, 2, 3, 4, 5].map((level) => (
-                <option key={level} value={level}>
-                  Level {level}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs">
             <Repeat size={12} />
             <select
               value={draftRecurrenceRule}
@@ -127,21 +102,6 @@ export default function GraphTodoInspector({
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
               <option value="monthly">Monthly</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs">
-            <Spline size={12} />
-            <select
-              value={draftParentTodoId}
-              onChange={(event) => onDraftParentTodoIdChange(event.target.value)}
-              className="w-full bg-slate-800 text-slate-100 outline-none"
-            >
-              <option value="">No parent</option>
-              {parentOptions.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.title}
-                </option>
-              ))}
             </select>
           </label>
         </div>

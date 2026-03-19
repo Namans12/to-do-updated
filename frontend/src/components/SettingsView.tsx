@@ -116,7 +116,6 @@ export default function SettingsView() {
       reminders: visibleTodos.filter((todo) => !!todo.reminder_at).length,
       recurring: visibleTodos.filter((todo) => todo.recurrence_enabled === 1).length,
       highPriority: visibleTodos.filter((todo) => todo.high_priority === 1).length,
-      planningLevels: new Set(visibleTodos.map((todo) => todo.planning_level)).size,
       connections: connections.length,
     };
   }, [allTodos, connections.length, groups.length]);

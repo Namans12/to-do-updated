@@ -90,8 +90,6 @@ const restTodosApi = {
       high_priority?: boolean;
       reminder_at?: string | null;
       recurrence_rule?: RecurrenceRule | null;
-      planning_level?: number;
-      parent_todo_id?: string | null;
     }
   ) =>
     request<Todo>(`/groups/${groupId}/todos`, {
@@ -102,8 +100,6 @@ const restTodosApi = {
         high_priority: options?.high_priority,
         reminder_at: options?.reminder_at,
         recurrence_rule: options?.recurrence_rule,
-        planning_level: options?.planning_level,
-        parent_todo_id: options?.parent_todo_id,
       }),
     }),
   update: (
@@ -114,8 +110,6 @@ const restTodosApi = {
       high_priority?: boolean;
       reminder_at?: string | null;
       recurrence_rule?: RecurrenceRule | null;
-      planning_level?: number;
-      parent_todo_id?: string | null;
     }
   ) =>
     request<Todo>(`/todos/${id}`, {
@@ -220,8 +214,6 @@ export interface SearchResult {
   position: number;
   reminder_at: string | null;
   recurrence_rule: RecurrenceRule | null;
-  planning_level: number;
-  parent_todo_id: string | null;
   connection_kind: ConnectionKind | null;
   group: { id: string; name: string };
   created_at: string;
@@ -237,7 +229,6 @@ const restSearchApi = {
       highPriority?: "all" | "true" | "false";
       hasReminder?: "all" | "true" | "false";
       connectionKind?: ConnectionKind | "all";
-      planningLevel?: number | "all";
       sort?: "relevance" | "created_oldest" | "created_newest" | "updated_oldest" | "updated_newest";
     }
   ) => {
@@ -252,9 +243,6 @@ const restSearchApi = {
     }
     if (filters?.connectionKind && filters.connectionKind !== "all") {
       params.set("connection_kind", filters.connectionKind);
-    }
-    if (filters?.planningLevel !== undefined && filters.planningLevel !== "all") {
-      params.set("planning_level", String(filters.planningLevel));
     }
     if (filters?.sort && filters.sort !== "relevance") {
       params.set("sort", filters.sort);

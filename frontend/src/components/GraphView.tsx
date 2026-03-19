@@ -314,18 +314,16 @@ function buildAutoLayout(
 
     if (layoutMode === "planning") {
       items.forEach((item, index) => {
-        const level = todoById.get(item.todo_id)?.planning_level ?? 0;
-        place(item.todo_id, 90 + level * 240, laneY + index * 120);
+        place(item.todo_id, 90 + (index % 4) * 220, laneY + Math.floor(index / 4) * 140);
       });
-      laneY += Math.max(220, items.length * 120);
+      laneY += Math.max(220, Math.ceil(items.length / 4) * 160);
       continue;
     }
 
     if (conn.kind === "branch") {
       const root = items[0];
       if (!root) continue;
-      const rootLevel = todoById.get(root.todo_id)?.planning_level ?? 0;
-      const baseX = 140 + rootLevel * 240;
+      const baseX = 140;
       const baseY = laneY + 70;
       place(root.todo_id, baseX, baseY);
       const branchOffsets = items.length <= 2 ? [0] : [-140, 140];
@@ -337,8 +335,7 @@ function buildAutoLayout(
     }
 
     if (conn.kind === "dependency") {
-      const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-      const baseX = 140 + baseLevel * 240;
+      const baseX = 140;
       items.forEach((item, index) => {
         place(item.todo_id, baseX + (index % 2 === 0 ? 0 : 120), laneY + index * 120);
       });
@@ -347,8 +344,7 @@ function buildAutoLayout(
     }
 
     if (conn.kind === "related") {
-      const centerLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-      const centerX = 180 + centerLevel * 240;
+      const centerX = 180;
       const centerY = laneY + 110;
       items.forEach((item, index) => {
         const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
@@ -362,8 +358,7 @@ function buildAutoLayout(
       continue;
     }
 
-    const baseLevel = todoById.get(items[0]!.todo_id)?.planning_level ?? 0;
-    const baseX = 120 + baseLevel * 240;
+    const baseX = 120;
     items.forEach((item, index) => {
       place(item.todo_id, baseX + index * 220, laneY);
     });
@@ -371,12 +366,6 @@ function buildAutoLayout(
   }
 
   const leftovers = todos.filter((todo) => !placed.has(todo.id));
-  const groupedByLevel = new Map<number, Todo[]>();
-  leftovers.forEach((todo) => {
-    const bucket = groupedByLevel.get(todo.planning_level) ?? [];
-    bucket.push(todo);
-    groupedByLevel.set(todo.planning_level, bucket);
-  });
 
   const usedPositions = Object.values(fresh);
   const maxPlacedX =
@@ -393,16 +382,13 @@ function buildAutoLayout(
   );
   let fallbackRow = 0;
 
-  for (const [level, levelTodos] of [...groupedByLevel.entries()].sort((a, b) => a[0] - b[0])) {
-    levelTodos.forEach((todo, index) => {
-      place(
-        todo.id,
-        fallbackBaseX + level * 220,
-        80 + (fallbackRow + index) * 120
-      );
-    });
-    fallbackRow += Math.max(1, levelTodos.length);
-  }
+  leftovers.forEach((todo, index) => {
+    place(
+      todo.id,
+      fallbackBaseX + (index % 3) * 220,
+      80 + (fallbackRow + Math.floor(index / 3)) * 120
+    );
+  });
 
   return fresh;
 }
@@ -432,9 +418,7 @@ export default function GraphView() {
   const [draftTodoTitle, setDraftTodoTitle] = useState("");
   const [draftTodoDescription, setDraftTodoDescription] = useState("");
   const [draftTodoHighPriority, setDraftTodoHighPriority] = useState(false);
-  const [draftTodoPlanningLevel, setDraftTodoPlanningLevel] = useState(0);
   const [draftTodoRecurrenceRule, setDraftTodoRecurrenceRule] = useState<"" | "daily" | "weekly" | "monthly">("");
-  const [draftTodoParentId, setDraftTodoParentId] = useState("");
   const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>(settings.graphDefaultLayout);
   const [isCreatingTodo, setIsCreatingTodo] = useState(false);
   const [isSavingTodoDraft, setIsSavingTodoDraft] = useState(false);
@@ -622,17 +606,13 @@ export default function GraphView() {
       setDraftTodoTitle("");
       setDraftTodoDescription("");
       setDraftTodoHighPriority(false);
-      setDraftTodoPlanningLevel(0);
       setDraftTodoRecurrenceRule("");
-      setDraftTodoParentId("");
       return;
     }
     setDraftTodoTitle(selectedTodo.title);
     setDraftTodoDescription(selectedTodo.description ?? "");
     setDraftTodoHighPriority(selectedTodo.high_priority === 1);
-    setDraftTodoPlanningLevel(selectedTodo.planning_level ?? 0);
     setDraftTodoRecurrenceRule((selectedTodo.recurrence_rule as "" | "daily" | "weekly" | "monthly" | null) ?? "");
-    setDraftTodoParentId(selectedTodo.parent_todo_id ?? "");
   }, [selectedTodo]);
 
   const groupEdges = useMemo<GraphEdge[]>(() => {
@@ -1802,9 +1782,7 @@ export default function GraphView() {
         graphCreateLockRef.current = signature;
         const created = await todosApi.create(groupId, title, draftTodoDescription.trim() || undefined, {
           high_priority: draftTodoHighPriority,
-          planning_level: draftTodoPlanningLevel,
           recurrence_rule: draftTodoRecurrenceRule || null,
-          parent_todo_id: draftTodoParentId || null,
         });
         lastGraphCreateRef.current = { signature, timestamp: Date.now() };
         setTodos((prev) => dedupeGraphTodos([...prev, created]));
@@ -1842,9 +1820,7 @@ export default function GraphView() {
         title: draftTodoTitle.trim() || selectedTodo.title,
         description: draftTodoDescription.trim() || null,
         high_priority: draftTodoHighPriority,
-        planning_level: draftTodoPlanningLevel,
         recurrence_rule: draftTodoRecurrenceRule || null,
-        parent_todo_id: draftTodoParentId || null,
       });
       setTodos((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
       setIsCreatingTodo(false);
@@ -1879,9 +1855,7 @@ export default function GraphView() {
     setDraftTodoTitle("New graph task");
     setDraftTodoDescription("");
     setDraftTodoHighPriority(false);
-    setDraftTodoPlanningLevel(0);
     setDraftTodoRecurrenceRule("");
-    setDraftTodoParentId("");
   }, []);
 
   const handleCloseTodoInspector = useCallback(() => {
@@ -2149,16 +2123,11 @@ export default function GraphView() {
               draftTitle={draftTodoTitle}
               draftDescription={draftTodoDescription}
               draftHighPriority={draftTodoHighPriority}
-              draftPlanningLevel={draftTodoPlanningLevel}
               draftRecurrenceRule={draftTodoRecurrenceRule}
-              parentOptions={todos.filter((item) => item.id !== selectedTodo?.id)}
-              draftParentTodoId={draftTodoParentId}
               onDraftTitleChange={setDraftTodoTitle}
               onDraftDescriptionChange={setDraftTodoDescription}
               onDraftHighPriorityChange={setDraftTodoHighPriority}
-              onDraftPlanningLevelChange={setDraftTodoPlanningLevel}
               onDraftRecurrenceRuleChange={setDraftTodoRecurrenceRule}
-              onDraftParentTodoIdChange={setDraftTodoParentId}
               onSave={() => void handleSaveSelectedTodo()}
               onDelete={() => void handleDeleteSelectedTodo()}
               onClose={handleCloseTodoInspector}

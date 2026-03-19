@@ -5,7 +5,7 @@ import type { ActivityLog, BackupSnapshot, BackupTaskPreview, Todo } from "../ty
 import { ArrowRight, Clock3, History, RotateCcw, Sparkles, X } from "lucide-react";
 import toast from "react-hot-toast";
 
-type TodoSnapshot = (Partial<Todo> & { parent_todo_title?: string | null }) | null;
+type TodoSnapshot = Partial<Todo> | null;
 type ActivityPayload = {
   before?: Partial<Todo> | null;
   after?: Partial<Todo> | null;
@@ -27,8 +27,6 @@ const DIFF_FIELDS: Array<{ key: keyof Todo | "status"; label: string }> = [
   { key: "status", label: "Status" },
   { key: "reminder_at", label: "Reminder" },
   { key: "recurrence_rule", label: "Recurring task" },
-  { key: "planning_level", label: "Level" },
-  { key: "parent_todo_id", label: "Parent task" },
   { key: "position", label: "Order slot" },
   { key: "deleted_at", label: "Trash state" },
 ];
@@ -331,10 +329,6 @@ function formatTodoField(todo: TodoSnapshot, key: keyof Todo | "status"): string
       return todo.reminder_at ? new Date(todo.reminder_at).toLocaleString() : "No reminder";
     case "recurrence_rule":
       return todo.recurrence_rule ? `Repeats ${todo.recurrence_rule}` : "Does not repeat";
-    case "planning_level":
-      return `Level ${todo.planning_level ?? 0}`;
-    case "parent_todo_id":
-      return todo.parent_todo_title || todo.parent_todo_id || "Root task";
     case "position":
       return typeof todo.position === "number" ? String(todo.position) : "No order";
     case "deleted_at":
@@ -362,7 +356,7 @@ function getDiffTone(
   if (key === "status" && after === "Completed") return "positive";
   if (key === "status" && before === "Completed" && after === "Active") return "warning";
   if (key === "high_priority") return after === "High priority" ? "warning" : "neutral";
-  if (key === "reminder_at" || key === "recurrence_rule" || key === "parent_todo_id") return "warning";
+  if (key === "reminder_at" || key === "recurrence_rule") return "warning";
   return "neutral";
 }
 

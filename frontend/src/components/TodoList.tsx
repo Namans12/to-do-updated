@@ -624,7 +624,6 @@ export default function TodoList() {
                     )}
                     <TodoItem
                       todo={todo}
-                      groupTodos={todos}
                       connections={connections}
                       settings={settings}
                       refreshTodos={refreshTodos}
@@ -846,7 +845,6 @@ export default function TodoList() {
                     <TodoItem
                       key={`completed-todo-${todo.id}`}
                       todo={todo}
-                      groupTodos={todos}
                       connections={connections}
                       settings={settings}
                       refreshTodos={refreshTodos}

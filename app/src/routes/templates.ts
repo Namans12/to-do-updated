@@ -28,8 +28,6 @@ interface TemplateFilePayload {
       recurrence_rule: string | null;
       recurrence_enabled: number;
       next_occurrence_at: string | null;
-      planning_level: number;
-      parent_original_id: string | null;
     }>;
     connections: Array<{
       name: string | null;
@@ -196,8 +194,6 @@ export function createTemplatesRouter(dbOverride?: DbOverride) {
           recurrence_rule: todo.recurrence_rule,
           recurrence_enabled: todo.recurrence_enabled,
           next_occurrence_at: todo.next_occurrence_at,
-          planning_level: todo.planning_level,
-          parent_original_id: todo.parent_todo_id,
         })),
         connections: templateConnections
           .filter((connection) => itemsByConnectionId.has(connection.id))
@@ -286,26 +282,12 @@ export function createTemplatesRouter(dbOverride?: DbOverride) {
             is_completed: 0,
             completed_at: null,
             position: nextPosition,
-            parent_todo_id: null,
-            planning_level: todo.planning_level,
             deleted_at: null,
             created_at: now,
             updated_at: now,
           })
           .run();
         nextPosition += 1;
-      }
-
-      for (const todo of payload.snapshot.todos) {
-        if (!todo.parent_original_id) continue;
-        const nextId = idMap.get(todo.original_id);
-        const parentId = idMap.get(todo.parent_original_id);
-        if (!nextId || !parentId) continue;
-        drizzleDb
-          .update(todos)
-          .set({ parent_todo_id: parentId, updated_at: now })
-          .where(eq(todos.id, nextId))
-          .run();
       }
 
       for (const connection of payload.snapshot.connections) {

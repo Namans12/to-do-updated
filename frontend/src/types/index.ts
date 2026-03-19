@@ -33,9 +33,6 @@ export interface Todo {
   is_completed: number;
   completed_at: string | null;
   position: number;
-  parent_todo_id: string | null;
-  parent_todo_title?: string | null;
-  planning_level: number;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
