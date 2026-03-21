@@ -256,6 +256,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
+      if (todoIds.length > 7) {
+        return c.json(
+          { error: "Connections can have at most 7 items" },
+          400
+        );
+      }
 
       const now = new Date().toISOString();
       const connectionId = uuidv4();

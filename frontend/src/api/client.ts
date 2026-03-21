@@ -23,6 +23,11 @@ import {
 
 const BASE = "/api";
 
+function ensureRestOnlyFeatureAvailable(featureName: string) {
+  if (!isSupabaseSyncEnabled) return;
+  throw new Error(`${featureName} is currently available only in local REST mode.`);
+}
+
 async function request<T>(
   path: string,
   options?: RequestInit
@@ -266,37 +271,56 @@ export const trashApi = isSupabaseSyncEnabled ? syncedTrashApi : restTrashApi;
 export const activityApi = isSupabaseSyncEnabled ? syncedActivityApi : restActivityApi;
 
 export const backupsApi = {
-  list: () => request<BackupSnapshot[]>("/backups"),
-  create: (label?: string) =>
-    request<BackupSnapshot>("/backups", {
+  list: () => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<BackupSnapshot[]>("/backups");
+  },
+  create: (label?: string) => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<BackupSnapshot>("/backups", {
       method: "POST",
       body: JSON.stringify({ label }),
-    }),
-  restore: (id: string) =>
-    request<BackupSnapshot>(`/backups/${id}/restore`, {
+    });
+  },
+  restore: (id: string) => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<BackupSnapshot>(`/backups/${id}/restore`, {
       method: "POST",
-    }),
-  previewTask: (backupId: string, todoId: string) =>
-    request<BackupTaskPreview>(`/backups/${backupId}/todos/${todoId}`),
-  restoreTask: (backupId: string, todoId: string) =>
-    request<Todo>(`/backups/${backupId}/todos/${todoId}/restore`, {
+    });
+  },
+  previewTask: (backupId: string, todoId: string) => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<BackupTaskPreview>(`/backups/${backupId}/todos/${todoId}`);
+  },
+  restoreTask: (backupId: string, todoId: string) => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<Todo>(`/backups/${backupId}/todos/${todoId}/restore`, {
       method: "POST",
-    }),
-  delete: (id: string) =>
-    request<void>(`/backups/${id}`, {
+    });
+  },
+  delete: (id: string) => {
+    ensureRestOnlyFeatureAvailable("Backups");
+    return request<void>(`/backups/${id}`, {
       method: "DELETE",
-    }),
+    });
+  },
 };
 
 export const templatesApi = {
-  list: () => request<TemplateSummary[]>("/templates"),
-  create: (payload: { source_group_id: string; name?: string; description?: string | null }) =>
-    request<TemplateSummary>("/templates", {
+  list: () => {
+    ensureRestOnlyFeatureAvailable("Templates");
+    return request<TemplateSummary[]>("/templates");
+  },
+  create: (payload: { source_group_id: string; name?: string; description?: string | null }) => {
+    ensureRestOnlyFeatureAvailable("Templates");
+    return request<TemplateSummary>("/templates", {
       method: "POST",
       body: JSON.stringify(payload),
-    }),
-  apply: (id: string, groupId: string) =>
-    request<{
+    });
+  },
+  apply: (id: string, groupId: string) => {
+    ensureRestOnlyFeatureAvailable("Templates");
+    return request<{
       group_id: string;
       template_id: string;
       created_todo_count: number;
@@ -304,20 +328,26 @@ export const templatesApi = {
     }>(`/templates/${id}/apply`, {
       method: "POST",
       body: JSON.stringify({ group_id: groupId }),
-    }),
-  delete: (id: string) =>
-    request<void>(`/templates/${id}`, {
+    });
+  },
+  delete: (id: string) => {
+    ensureRestOnlyFeatureAvailable("Templates");
+    return request<void>(`/templates/${id}`, {
       method: "DELETE",
-    }),
+    });
+  },
 };
 
 export const syncApi = {
-  exportPackage: (deviceName?: string) =>
-    request<SyncPackage>(
+  exportPackage: (deviceName?: string) => {
+    ensureRestOnlyFeatureAvailable("Manual sync package export/import");
+    return request<SyncPackage>(
       `/sync/export${deviceName ? `?device_name=${encodeURIComponent(deviceName)}` : ""}`
-    ),
-  importPackage: (payload: SyncPackage) =>
-    request<{
+    );
+  },
+  importPackage: (payload: SyncPackage) => {
+    ensureRestOnlyFeatureAvailable("Manual sync package export/import");
+    return request<{
       version: 1;
       exported_at: string;
       device_name: string | null;
@@ -331,5 +361,6 @@ export const syncApi = {
     }>("/sync/import", {
       method: "POST",
       body: JSON.stringify(payload),
-    }),
+    });
+  },
 };

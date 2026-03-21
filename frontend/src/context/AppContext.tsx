@@ -130,10 +130,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   passcodeLockEnabled: false,
   deviceAuthEnabled: false,
   syncDeviceName: "My device",
-  graphDefaultLayout: "smart",
+  graphDefaultLayout: "planning",
   shortcutBindings: DEFAULT_SHORTCUT_BINDINGS,
 };
 const E2E_MODE = import.meta.env.VITE_E2E === "true";
+const SYNC_HYDRATION_DEBOUNCE_MS = 180;
 
 function debugSyncLog(...args: unknown[]) {
   if (!syncDebugEnabled) return;
@@ -159,7 +160,7 @@ function readSettings(): AppSettings {
     const raw = localStorage.getItem(APP_SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return {
+    const merged: AppSettings = {
       ...DEFAULT_SETTINGS,
       ...parsed,
       shortcutBindings: {
@@ -167,6 +168,10 @@ function readSettings(): AppSettings {
         ...(parsed.shortcutBindings ?? {}),
       },
     };
+    if (merged.graphDefaultLayout === "smart") {
+      merged.graphDefaultLayout = "planning";
+    }
+    return merged;
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -265,6 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
   const snapshotHydrationPromiseRef = useRef<Promise<void> | null>(null);
+  const syncHydrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queuedBootstrapRef = useRef<{ reason: string; session?: Session | null } | null>(null);
   const appShell = Capacitor.isNativePlatform() || (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
@@ -498,15 +504,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [hydrateFromSyncSnapshot]
   );
 
-  const scheduleSyncHydration = useCallback(async () => {
+  const scheduleSyncHydration = useCallback(() => {
     if (!isSupabaseSyncEnabled || !stateRef.current.session) return;
-    if (snapshotHydrationPromiseRef.current) return snapshotHydrationPromiseRef.current;
-    snapshotHydrationPromiseRef.current = (async () => {
-      await hydrateFromSyncSnapshot();
-    })().finally(() => {
-      snapshotHydrationPromiseRef.current = null;
-    });
-    return snapshotHydrationPromiseRef.current;
+    if (syncHydrationTimerRef.current) return;
+
+    syncHydrationTimerRef.current = setTimeout(() => {
+      syncHydrationTimerRef.current = null;
+      if (!isSupabaseSyncEnabled || !stateRef.current.session) return;
+      if (snapshotHydrationPromiseRef.current) return;
+      snapshotHydrationPromiseRef.current = (async () => {
+        await hydrateFromSyncSnapshot();
+      })().finally(() => {
+        snapshotHydrationPromiseRef.current = null;
+      });
+    }, SYNC_HYDRATION_DEBOUNCE_MS);
   }, [hydrateFromSyncSnapshot]);
 
   const selectGroup = useCallback((id: string | null) => {
@@ -1080,9 +1091,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isSupabaseSyncEnabled || !state.authReady || state.loading || !state.session) return;
     return subscribeToRealtime(() => {
-      void scheduleSyncHydration();
+      scheduleSyncHydration();
     });
   }, [state.authReady, state.loading, state.session, scheduleSyncHydration]);
+
+  useEffect(() => {
+    return () => {
+      if (syncHydrationTimerRef.current) {
+        clearTimeout(syncHydrationTimerRef.current);
+        syncHydrationTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isSupabaseSyncEnabled) return;

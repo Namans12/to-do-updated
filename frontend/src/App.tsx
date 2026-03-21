@@ -1,18 +1,19 @@
 import { useApp } from "./context/AppContext";
-import Sidebar from "./components/Sidebar";
-import TodoList from "./components/TodoList";
-import TrashView from "./components/TrashView";
-import ConnectionView from "./components/ConnectionView";
-import SearchView from "./components/SearchView";
-import GraphView from "./components/GraphView";
-import ReminderView from "./components/ReminderView";
-import ReminderAlarmModal from "./components/ReminderAlarmModal";
-import SettingsView from "./components/SettingsView";
 import AuthScreen from "./components/AuthScreen";
 import PasscodeLockScreen from "./components/PasscodeLockScreen";
 import { Keyboard, Menu } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo } from "react";
 import { formatShortcutBinding, shortcutMatchesEvent } from "./utils/shortcuts";
+
+const Sidebar = lazy(() => import("./components/Sidebar"));
+const TodoList = lazy(() => import("./components/TodoList"));
+const TrashView = lazy(() => import("./components/TrashView"));
+const ConnectionView = lazy(() => import("./components/ConnectionView"));
+const SearchView = lazy(() => import("./components/SearchView"));
+const GraphView = lazy(() => import("./components/GraphView"));
+const ReminderView = lazy(() => import("./components/ReminderView"));
+const ReminderAlarmModal = lazy(() => import("./components/ReminderAlarmModal"));
+const SettingsView = lazy(() => import("./components/SettingsView"));
 
 const SHORTCUT_ACTIONS = [
   ["search", "Open Search"],
@@ -215,7 +216,21 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden relative">
+    <Suspense
+      fallback={
+        <div className="h-screen flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4 animate-pulse-soft">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 flex items-center justify-center">
+              <div className="w-6 h-6 rounded-lg bg-indigo-500 animate-check-bounce" />
+            </div>
+            <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
+              Loading workspace...
+            </p>
+          </div>
+        </div>
+      }
+    >
+      <div className="h-screen flex overflow-hidden relative">
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div
@@ -347,6 +362,7 @@ export default function App() {
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </Suspense>
   );
 }

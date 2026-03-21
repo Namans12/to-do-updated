@@ -32,6 +32,12 @@ interface DragState {
   currentY: number;
 }
 
+interface SelectedConnectionEdge {
+  connectionId: string;
+  fromId: string;
+  toId: string;
+}
+
 type PortSide = "left" | "right" | "top" | "bottom";
 type AdjPair = { a: string; b: string; axis: "x" | "y"; };
 type GraphEdge = {
@@ -46,18 +52,25 @@ type GraphEdge = {
 const NODE_W = 180;
 const NODE_H = 60;
 const GRID = 20;          // matches background dot grid
+const NODE_MIN_GAP = GRID * 2;
 const BASE_CANVAS_W = 2400;   // virtual canvas width
 const BASE_CANVAS_H = 1600;   // virtual canvas height
 const NORMAL_VIEW_EXTRA_W = 360;
 const NORMAL_VIEW_EXTRA_H = 240;
 const MAX_CANVAS_W = 4200;   // hard right boundary — dragging past this is blocked
 const MAX_CANVAS_H = 3000;   // hard bottom boundary
+const FULLSCREEN_MAX_CANVAS_W = 3200;
+const FULLSCREEN_MAX_CANVAS_H = 2200;
+const FULLSCREEN_BORDER_DOWN_SHIFT = GRID;
 const SNAP_PX = 12;
-const PORT_CONNECT_THRESHOLD = 4;
+const PORT_CONNECT_THRESHOLD = 8;
+const PORT_CONNECT_THRESHOLD_MAX = 24;
 const PORT_SIDES: PortSide[] = ["left", "right", "top", "bottom"];
 const OVERLAP_EPS = 0.1;
 const LEFT_TOP_BOUNDARY = 20;
 const RIGHT_BOTTOM_BOUNDARY = GRID; // one grid line gap before the right/bottom wall
+const FULLSCREEN_BOTTOM_EXTEND = GRID;
+const AUTO_LAYOUT_MARGIN = GRID * 2;
 const MIN_ZOOM = 0.4;
 const MAX_ZOOM = 2.0;
 const ZOOM_STEP = 0.1;
@@ -102,7 +115,7 @@ const canonicalPairKey = (a: string, b: string) =>
   a < b ? `${a}|${b}` : `${b}|${a}`;
 
 const layoutLabelMap: Record<GraphLayoutMode, string> = {
-  smart: "Smart",
+  smart: "Manual",
   horizontal: "Horizontal",
   vertical: "Vertical",
   radial: "Radial",
@@ -237,7 +250,7 @@ function buildAutoLayout(
     conn.items.some((item) => todoById.has(item.todo_id))
   );
   const placed = new Set<string>();
-  let laneY = 80;
+  let laneY = AUTO_LAYOUT_MARGIN;
 
   const place = (todoId: string, x: number, y: number) => {
     if (placed.has(todoId)) return;
@@ -248,11 +261,20 @@ function buildAutoLayout(
     while (
       Object.entries(fresh).some(([otherId, pos]) => {
         const otherNodeH = getNodeHeightForId(otherId);
+        const gapHalf = NODE_MIN_GAP / 2;
+        const nextLeft = nextX - gapHalf;
+        const nextRight = nextX + NODE_W + gapHalf;
+        const nextTop = nextY - gapHalf;
+        const nextBottom = nextY + nextNodeH + gapHalf;
+        const otherLeft = pos.x - gapHalf;
+        const otherRight = pos.x + NODE_W + gapHalf;
+        const otherTop = pos.y - gapHalf;
+        const otherBottom = pos.y + otherNodeH + gapHalf;
         return (
-          nextX < pos.x + NODE_W &&
-          nextX + NODE_W > pos.x &&
-          nextY < pos.y + otherNodeH &&
-          nextY + nextNodeH > pos.y
+          nextLeft < otherRight &&
+          nextRight > otherLeft &&
+          nextTop < otherBottom &&
+          nextBottom > otherTop
         );
       }) &&
       guard < 20
@@ -280,7 +302,7 @@ function buildAutoLayout(
     if (items.length === 0) continue;
 
     if (layoutMode === "horizontal") {
-      const baseX = 120;
+      const baseX = AUTO_LAYOUT_MARGIN;
       items.forEach((item, index) => {
         place(item.todo_id, baseX + index * 220, laneY);
       });
@@ -289,7 +311,7 @@ function buildAutoLayout(
     }
 
     if (layoutMode === "vertical") {
-      const baseX = 180;
+      const baseX = AUTO_LAYOUT_MARGIN;
       items.forEach((item, index) => {
         place(item.todo_id, baseX, laneY + index * 140);
       });
@@ -298,7 +320,7 @@ function buildAutoLayout(
     }
 
     if (layoutMode === "radial") {
-      const centerX = 360 + (laneY % 2 === 0 ? 0 : 220);
+      const centerX = AUTO_LAYOUT_MARGIN + 180 + (laneY % 2 === 0 ? 0 : 220);
       const centerY = laneY + 110;
       items.forEach((item, index) => {
         const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
@@ -314,7 +336,11 @@ function buildAutoLayout(
 
     if (layoutMode === "planning") {
       items.forEach((item, index) => {
-        place(item.todo_id, 90 + (index % 4) * 220, laneY + Math.floor(index / 4) * 140);
+        place(
+          item.todo_id,
+          AUTO_LAYOUT_MARGIN + (index % 4) * 220,
+          laneY + Math.floor(index / 4) * 140
+        );
       });
       laneY += Math.max(220, Math.ceil(items.length / 4) * 160);
       continue;
@@ -323,7 +349,7 @@ function buildAutoLayout(
     if (conn.kind === "branch") {
       const root = items[0];
       if (!root) continue;
-      const baseX = 140;
+      const baseX = AUTO_LAYOUT_MARGIN;
       const baseY = laneY + 70;
       place(root.todo_id, baseX, baseY);
       const branchOffsets = items.length <= 2 ? [0] : [-140, 140];
@@ -335,7 +361,7 @@ function buildAutoLayout(
     }
 
     if (conn.kind === "dependency") {
-      const baseX = 140;
+      const baseX = AUTO_LAYOUT_MARGIN;
       items.forEach((item, index) => {
         place(item.todo_id, baseX + (index % 2 === 0 ? 0 : 120), laneY + index * 120);
       });
@@ -344,7 +370,7 @@ function buildAutoLayout(
     }
 
     if (conn.kind === "related") {
-      const centerX = 180;
+      const centerX = AUTO_LAYOUT_MARGIN + 140;
       const centerY = laneY + 110;
       items.forEach((item, index) => {
         const angle = (Math.PI * 2 * index) / Math.max(items.length, 1);
@@ -358,7 +384,7 @@ function buildAutoLayout(
       continue;
     }
 
-    const baseX = 120;
+    const baseX = AUTO_LAYOUT_MARGIN;
     items.forEach((item, index) => {
       place(item.todo_id, baseX + index * 220, laneY);
     });
@@ -367,26 +393,51 @@ function buildAutoLayout(
 
   const leftovers = todos.filter((todo) => !placed.has(todo.id));
 
-  const usedPositions = Object.values(fresh);
-  const maxPlacedX =
-    usedPositions.length > 0
-      ? Math.max(...usedPositions.map((pos) => pos.x))
-      : 80;
-  const fallbackBaseX = snapGrid(
-    Math.min(
-      maxPlacedX + NODE_W + 80,
-      canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY - 440
-    ),
-    canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
-    LEFT_TOP_BOUNDARY
-  );
-  let fallbackRow = 0;
+  const fallbackBaseX = AUTO_LAYOUT_MARGIN;
+  if (layoutMode === "horizontal") {
+    leftovers.forEach((todo, index) => {
+      place(todo.id, fallbackBaseX + index * 220, AUTO_LAYOUT_MARGIN);
+    });
+    return fresh;
+  }
+
+  if (layoutMode === "vertical") {
+    leftovers.forEach((todo, index) => {
+      place(todo.id, fallbackBaseX, AUTO_LAYOUT_MARGIN + index * 140);
+    });
+    return fresh;
+  }
+
+  if (layoutMode === "radial") {
+    const centerX = fallbackBaseX + 220;
+    const centerY = AUTO_LAYOUT_MARGIN + 180;
+    leftovers.forEach((todo, index) => {
+      const angle = (Math.PI * 2 * index) / Math.max(leftovers.length, 1);
+      place(
+        todo.id,
+        centerX + Math.cos(angle) * 180,
+        centerY + Math.sin(angle) * 120
+      );
+    });
+    return fresh;
+  }
+
+  if (layoutMode === "planning") {
+    leftovers.forEach((todo, index) => {
+      place(
+        todo.id,
+        fallbackBaseX + (index % 4) * 220,
+        AUTO_LAYOUT_MARGIN + Math.floor(index / 4) * 160
+      );
+    });
+    return fresh;
+  }
 
   leftovers.forEach((todo, index) => {
     place(
       todo.id,
       fallbackBaseX + (index % 3) * 220,
-      80 + (fallbackRow + Math.floor(index / 3)) * 120
+      AUTO_LAYOUT_MARGIN + Math.floor(index / 3) * 120
     );
   });
 
@@ -412,6 +463,7 @@ export default function GraphView() {
   const [isCutMode, setIsCutMode] = useState(false);
   const [hoverEdgeKey, setHoverEdgeKey] = useState<string | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [selectedConnectionEdge, setSelectedConnectionEdge] = useState<SelectedConnectionEdge | null>(null);
   const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
   const [draftConnectionName, setDraftConnectionName] = useState("");
   const [draftConnectionKind, setDraftConnectionKind] = useState<ConnectionKind>("sequence");
@@ -425,6 +477,7 @@ export default function GraphView() {
   const [nearBoundary, setNearBoundary] = useState({ right: false, bottom: false });
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTargetRef = useRef<string | null>(null);
+  const dragStartPositionRef = useRef<NodePosition | null>(null);
   const graphCreateLockRef = useRef<string | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({
@@ -452,6 +505,9 @@ export default function GraphView() {
     (todoId: string) => nodeHeightById.get(todoId) ?? NODE_H,
     [nodeHeightById]
   );
+  const graphLeftTopBoundary = isFullscreen ? GRID : LEFT_TOP_BOUNDARY;
+  const graphRightBoundary = isFullscreen ? GRID : RIGHT_BOTTOM_BOUNDARY;
+  const graphBottomBoundary = isFullscreen ? -FULLSCREEN_BOTTOM_EXTEND : RIGHT_BOTTOM_BOUNDARY;
 
   // Keep graph group selection valid as groups are deleted/restored in real time.
   useEffect(() => {
@@ -478,6 +534,11 @@ export default function GraphView() {
   useEffect(() => {
     if (!draggingNode) setNearBoundary({ right: false, bottom: false });
   }, [draggingNode]);
+  useEffect(() => {
+    if (!selectedConnectionId) {
+      setSelectedConnectionEdge(null);
+    }
+  }, [selectedConnectionId]);
 
   /* ── Load todos ─────────────────────────────────── */
 
@@ -525,13 +586,13 @@ export default function GraphView() {
             updated[t.id] = {
               x: snapGrid(
                 60 + (i % cols) * (NODE_W + 40),
-                canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
-                LEFT_TOP_BOUNDARY
+                canvasSize.w - NODE_W - graphRightBoundary,
+                graphLeftTopBoundary
               ),
               y: snapGrid(
                 60 + Math.floor(i / cols) * (NODE_H + 60),
-                canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY,
-                LEFT_TOP_BOUNDARY
+                canvasSize.h - nodeHeight - graphBottomBoundary,
+                graphLeftTopBoundary
               ),
             };
             dirty = true;
@@ -539,13 +600,13 @@ export default function GraphView() {
             const current = updated[t.id] as NodePosition;
             const clampedX = snapGrid(
               current.x,
-              canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY,
-              LEFT_TOP_BOUNDARY
+              canvasSize.w - NODE_W - graphRightBoundary,
+              graphLeftTopBoundary
             );
             const clampedY = snapGrid(
               current.y,
-              canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY,
-              LEFT_TOP_BOUNDARY
+              canvasSize.h - nodeHeight - graphBottomBoundary,
+              graphLeftTopBoundary
             );
             if (clampedX !== current.x || clampedY !== current.y) {
               updated[t.id] = { x: clampedX, y: clampedY };
@@ -563,7 +624,18 @@ export default function GraphView() {
     const fresh = buildAutoLayout(todos, connections, canvasSize, layoutMode);
     setPositions(fresh);
     localStorage.setItem(key, JSON.stringify(fresh));
-  }, [todos, groupId, canvasSize.w, canvasSize.h, connections, layoutMode, getNodeHeightForId]);
+  }, [
+    todos,
+    groupId,
+    canvasSize.w,
+    canvasSize.h,
+    connections,
+    layoutMode,
+    getNodeHeightForId,
+    graphRightBoundary,
+    graphBottomBoundary,
+    graphLeftTopBoundary,
+  ]);
 
   const savePositions = useCallback(
     (pos: Record<string, NodePosition>) => {
@@ -581,7 +653,6 @@ export default function GraphView() {
   const selectedConnection =
     groupConnections.find((conn) => conn.id === selectedConnectionId) ?? null;
   const selectedTodo = todos.find((todo) => todo.id === selectedTodoId) ?? null;
-  const activeTodoInspectorTitle = selectedTodo?.title ?? "New graph task";
   const nextAvailableTodoIds = useMemo(() => {
     const ids = new Set<string>();
     groupConnections.forEach((conn) => {
@@ -1280,6 +1351,7 @@ export default function GraphView() {
     }
     const p = positions[id];
     if (!p) return;
+    dragStartPositionRef.current = { x: p.x, y: p.y };
     const rect = canvasRef.current?.getBoundingClientRect();
     const scrollLeft = canvasRef.current?.scrollLeft ?? 0;
     const scrollTop = canvasRef.current?.scrollTop ?? 0;
@@ -1329,10 +1401,10 @@ export default function GraphView() {
 
   const getDragBounds = useCallback((todoId: string) => {
     const nodeHeight = getNodeHeightForId(todoId);
-    const minX = LEFT_TOP_BOUNDARY;
-    const minY = LEFT_TOP_BOUNDARY;
-    const maxX = canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY;
-    const maxY = canvasSize.h - nodeHeight - RIGHT_BOTTOM_BOUNDARY;
+    const minX = graphLeftTopBoundary;
+    const minY = graphLeftTopBoundary;
+    const maxX = canvasSize.w - NODE_W - graphRightBoundary;
+    const maxY = canvasSize.h - nodeHeight - graphBottomBoundary;
 
     return {
       minX,
@@ -1340,7 +1412,7 @@ export default function GraphView() {
       maxX: Math.max(minX, maxX),
       maxY: Math.max(minY, maxY),
     };
-  }, [canvasSize.w, canvasSize.h, getNodeHeightForId]);
+  }, [canvasSize.w, canvasSize.h, getNodeHeightForId, graphBottomBoundary, graphLeftTopBoundary, graphRightBoundary]);
 
   const clampScrollAtMaxZoomOut = useCallback(() => {
     const el = canvasRef.current;
@@ -1370,6 +1442,10 @@ export default function GraphView() {
       const scrollTop = canvasRef.current?.scrollTop ?? 0;
       const pointerX = (pointerClientX - (rect?.left ?? 0) + scrollLeft) / zoomScale;
       const pointerY = (pointerClientY - (rect?.top ?? 0) + scrollTop) / zoomScale;
+      const connectThreshold = Math.min(
+        PORT_CONNECT_THRESHOLD_MAX,
+        Math.max(PORT_CONNECT_THRESHOLD, PORT_CONNECT_THRESHOLD / Math.max(zoomScale, 0.45))
+      );
 
       let bestTodoId: string | null = null;
       let bestDist = Number.POSITIVE_INFINITY;
@@ -1380,7 +1456,7 @@ export default function GraphView() {
           const port = getPortAt(positions, todo.id, side, getNodeHeightForId);
           if (!port) continue;
           const dist = Math.hypot(port.x - pointerX, port.y - pointerY);
-          if (dist <= PORT_CONNECT_THRESHOLD && dist < bestDist) {
+          if (dist <= connectThreshold && dist < bestDist) {
             bestDist = dist;
             bestTodoId = todo.id;
           }
@@ -1416,8 +1492,8 @@ export default function GraphView() {
         const prevPos = prev[draggingNode];
         if (!prevPos) return prev;
         const movingIds = new Set(fused);
-        const nextX = snapGrid(clampedX, maxNodeX, LEFT_TOP_BOUNDARY);
-        const nextY = snapGrid(clampedY, maxNodeY, LEFT_TOP_BOUNDARY);
+        const nextX = snapGrid(clampedX, maxNodeX, graphLeftTopBoundary);
+        const nextY = snapGrid(clampedY, maxNodeY, graphLeftTopBoundary);
         const deltaX = nextX - prevPos.x;
         const deltaY = nextY - prevPos.y;
         if (deltaX === 0 && deltaY === 0) return prev;
@@ -1426,10 +1502,10 @@ export default function GraphView() {
         for (const id of fused) {
           const p = prev[id];
           if (!p) continue;
-          const nodeMaxY = canvasSize.h - getNodeHeightForId(id) - RIGHT_BOTTOM_BOUNDARY;
+          const nodeMaxY = canvasSize.h - getNodeHeightForId(id) - graphBottomBoundary;
           updated[id] = {
-            x: snapGrid(p.x + deltaX, maxNodeX, LEFT_TOP_BOUNDARY),
-            y: snapGrid(p.y + deltaY, nodeMaxY, LEFT_TOP_BOUNDARY),
+            x: snapGrid(p.x + deltaX, maxNodeX, graphLeftTopBoundary),
+            y: snapGrid(p.y + deltaY, nodeMaxY, graphLeftTopBoundary),
           };
         }
         const prevOverlap = movingOverlapArea(prev, movingIds);
@@ -1460,6 +1536,8 @@ export default function GraphView() {
       movingOverlapArea,
       canvasSize.h,
       zoomScale,
+      graphBottomBoundary,
+      graphLeftTopBoundary,
     ]
   );
 
@@ -1469,10 +1547,17 @@ export default function GraphView() {
       const moved = draggingNode;
       const fused = getFusedComponent(moved);
       const fusedSet = new Set(fused);
+      const startPosition = dragStartPositionRef.current;
+      const endPosition = positions[moved];
+      const didNodeMove =
+        !!startPosition &&
+        !!endPosition &&
+        (startPosition.x !== endPosition.x || startPosition.y !== endPosition.y);
 
-      // Check if any port of the dragged node (or its fused group) truly overlaps
-      // another node port. Nearby is not enough.
-      const CONNECT_THRESHOLD = PORT_CONNECT_THRESHOLD;
+      const connectThreshold = Math.min(
+        PORT_CONNECT_THRESHOLD_MAX,
+        Math.max(PORT_CONNECT_THRESHOLD, PORT_CONNECT_THRESHOLD / Math.max(zoomScale, 0.45))
+      );
       let portTouchFrom: string | null = null;
       let portTouchTo: string | null = null;
       let portTouchBestDist = Number.POSITIVE_INFINITY;
@@ -1485,7 +1570,7 @@ export default function GraphView() {
             positions,
             fromId,
             toId,
-            CONNECT_THRESHOLD,
+            connectThreshold,
             getNodeHeightForId
           );
           if (!touch) continue;
@@ -1501,6 +1586,11 @@ export default function GraphView() {
       savePositions(positions);
       setNearBoundary({ right: false, bottom: false });
       setDraggingNode(null);
+      dragStartPositionRef.current = null;
+
+      if (didNodeMove) {
+        setLayoutMode("smart");
+      }
 
       // Connect if ports overlapped — createConnection handles "already connected" silently
       if (portTouchFrom && portTouchTo) {
@@ -1532,6 +1622,8 @@ export default function GraphView() {
     getFusedComponent,
     getNodeHeightForId,
     todos,
+    zoomScale,
+    setLayoutMode,
   ]);
 
   useEffect(() => {
@@ -1582,11 +1674,11 @@ export default function GraphView() {
       : BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H;
 
     const nextW = snapGrid(
-      Math.min(MAX_CANVAS_W, Math.max(minCanvasW, viewW + 220, maxX)),
+      Math.min(isFullscreen ? FULLSCREEN_MAX_CANVAS_W : MAX_CANVAS_W, Math.max(minCanvasW, viewW + 220, maxX)),
       Number.MAX_SAFE_INTEGER
     );
     const nextH = snapGrid(
-      Math.min(MAX_CANVAS_H, Math.max(minCanvasH, viewH + 220, maxY)),
+      Math.min(isFullscreen ? FULLSCREEN_MAX_CANVAS_H : MAX_CANVAS_H, Math.max(minCanvasH, viewH + 220, maxY)),
       Number.MAX_SAFE_INTEGER
     );
 
@@ -1618,28 +1710,28 @@ export default function GraphView() {
 
       if (fromConn && !toConn) {
         await connectionsApi.addItem(fromConn.id, toId);
-        await refreshConnections();
+        queueGraphRefresh({ connections: true });
         toast.success("Connected!");
         return;
       }
 
       if (!fromConn && toConn) {
         await connectionsApi.addItem(toConn.id, fromId);
-        await refreshConnections();
+        queueGraphRefresh({ connections: true });
         toast.success("Connected!");
         return;
       }
 
       if (!fromConn && !toConn) {
         await connectionsApi.create([fromId, toId]);
-        await refreshConnections();
+        queueGraphRefresh({ connections: true });
         toast.success("Connected!");
         return;
       }
 
       if (fromConn && toConn && fromConn.id !== toConn.id) {
         await connectionsApi.merge(fromId, toId);
-        await refreshConnections();
+        queueGraphRefresh({ connections: true });
         toast.success("Connections merged");
         return;
       }
@@ -1658,7 +1750,7 @@ export default function GraphView() {
       if (selectedConnectionId === connectionId) {
         setSelectedConnectionId(null);
       }
-      await refreshConnections();
+      queueGraphRefresh({ connections: true });
       toast.success("Connection cut");
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed to cut connection");
@@ -1709,18 +1801,22 @@ export default function GraphView() {
         name: draftConnectionName.trim() || null,
         kind: draftConnectionKind,
       });
-      await refreshConnections();
+      queueGraphRefresh({ connections: true });
       toast.success("Connection updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update connection");
     }
   };
 
-  const openConnectionInspector = useCallback((connectionId: string) => {
-    setIsCreatingTodo(false);
-    setSelectedTodoId(null);
-    setSelectedConnectionId(connectionId);
-  }, []);
+  const openConnectionEdgeInspector = useCallback(
+    (connectionId: string, fromId: string, toId: string) => {
+      setIsCreatingTodo(false);
+      setSelectedTodoId(null);
+      setSelectedConnectionId(connectionId);
+      setSelectedConnectionEdge({ connectionId, fromId, toId });
+    },
+    []
+  );
 
   const openTodoInspector = useCallback((todoId: string) => {
     setIsCreatingTodo(false);
@@ -1731,10 +1827,35 @@ export default function GraphView() {
   const handleDeleteSelectedConnection = async () => {
     if (!selectedConnection) return;
     try {
-      await connectionsApi.delete(selectedConnection.id);
+      if (!selectedConnectionEdge || selectedConnectionEdge.connectionId !== selectedConnection.id) {
+        throw new Error("Select a specific edge first, then use Delete connection.");
+      }
+
+      const { fromId, toId } = selectedConnectionEdge;
+      const fromIndex = selectedConnection.items.findIndex((item) => item.todo_id === fromId);
+      const toIndex = selectedConnection.items.findIndex((item) => item.todo_id === toId);
+      const isAdjacent = fromIndex !== -1 && toIndex !== -1 && Math.abs(fromIndex - toIndex) === 1;
+
+      if (isAdjacent) {
+        await connectionsApi.cut(selectedConnection.id, fromId, toId);
+      } else if (selectedConnection.kind === "branch") {
+        const rootTodoId = selectedConnection.items[0]?.todo_id;
+        if (!rootTodoId) {
+          throw new Error("Invalid branch connection.");
+        }
+        const branchTodoId = fromId === rootTodoId ? toId : toId === rootTodoId ? fromId : null;
+        if (!branchTodoId) {
+          throw new Error("Select a branch edge connected to the root.");
+        }
+        await connectionsApi.removeItem(selectedConnection.id, branchTodoId);
+      } else {
+        throw new Error("This edge cannot be removed directly. Try cut mode on an adjacent edge.");
+      }
+
       setSelectedConnectionId(null);
-      await refreshConnections();
-      toast.success("Connection deleted");
+      setSelectedConnectionEdge(null);
+      queueGraphRefresh({ connections: true });
+      toast.success("Selected edge deleted");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete connection");
     }
@@ -1749,7 +1870,8 @@ export default function GraphView() {
         .map((conn) => conn.id);
       await Promise.all(connectionIds.map((connectionId) => connectionsApi.delete(connectionId)));
       setSelectedConnectionId(null);
-      await refreshConnections();
+      setSelectedConnectionEdge(null);
+      queueGraphRefresh({ connections: true });
       toast.success("Connected group deleted");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete connected group");
@@ -1792,11 +1914,15 @@ export default function GraphView() {
         queueGraphRefresh({ todos: true });
         const createdNodeHeight = getTodoNodeHeight(created);
         const nextPos = {
-          x: snapGrid(120 + (todos.length % 4) * 220, canvasSize.w - NODE_W - RIGHT_BOTTOM_BOUNDARY, LEFT_TOP_BOUNDARY),
+          x: snapGrid(
+            120 + (todos.length % 4) * 220,
+            canvasSize.w - NODE_W - graphRightBoundary,
+            graphLeftTopBoundary
+          ),
           y: snapGrid(
             100 + Math.floor(todos.length / 4) * 120,
-            canvasSize.h - createdNodeHeight - RIGHT_BOTTOM_BOUNDARY,
-            LEFT_TOP_BOUNDARY
+            canvasSize.h - createdNodeHeight - graphBottomBoundary,
+            graphLeftTopBoundary
           ),
         };
         setPositions((prev) => {
@@ -1852,7 +1978,7 @@ export default function GraphView() {
     setIsCreatingTodo(true);
     setSelectedTodoId(null);
     setSelectedConnectionId(null);
-    setDraftTodoTitle("New graph task");
+    setDraftTodoTitle("");
     setDraftTodoDescription("");
     setDraftTodoHighPriority(false);
     setDraftTodoRecurrenceRule("");
@@ -2077,7 +2203,10 @@ export default function GraphView() {
         />
       ) : (
         /* ── Canvas ────────────────────────────────── */
-        <div ref={graphRef} className={`relative ${isFullscreen ? "" : "pb-2"}`}>
+        <div
+          ref={graphRef}
+          className={`relative ${isFullscreen ? "pt-5" : "pb-2"}`}
+        >
           <GraphToolbar
             showPanel={showPanel}
             isCutMode={isCutMode}
@@ -2114,12 +2243,12 @@ export default function GraphView() {
               onClose={() => {
                 setIsCreatingTodo(false);
                 setSelectedConnectionId(null);
+                setSelectedConnectionEdge(null);
               }}
             />
           )}
           {(selectedTodo || isCreatingTodo) && !isCutMode && (
             <GraphTodoInspector
-              title={activeTodoInspectorTitle}
               draftTitle={draftTodoTitle}
               draftDescription={draftTodoDescription}
               draftHighPriority={draftTodoHighPriority}
@@ -2150,7 +2279,9 @@ export default function GraphView() {
             style={{
               width: "100%",
               minHeight: isFullscreen ? 0 : 520,
-              height: isFullscreen ? "calc(100vh - 40px)" : "calc(100vh - 210px)",
+              height: isFullscreen
+                ? `calc(100vh - ${40 + FULLSCREEN_BORDER_DOWN_SHIFT}px)`
+                : "calc(100vh - 210px)",
               background:
                 "radial-gradient(circle at 1px 1px, rgba(148,163,184,0.12) 1px, transparent 0)",
               backgroundSize: `${GRID}px ${GRID}px`,
@@ -2160,14 +2291,14 @@ export default function GraphView() {
           <div
             style={{
               width: canvasSize.w * zoomScale,
-              height: canvasSize.h * zoomScale,
+              height: (canvasSize.h + (isFullscreen ? FULLSCREEN_BOTTOM_EXTEND : 0)) * zoomScale,
               position: "relative",
             }}
           >
           {settings.showGraphBoundaryHint && (
             <GraphBoundaryOverlay
               canvasWidth={canvasSize.w * zoomScale}
-              canvasHeight={canvasSize.h * zoomScale}
+              canvasHeight={(canvasSize.h + (isFullscreen ? FULLSCREEN_BOTTOM_EXTEND : 0)) * zoomScale}
               draggingNode={draggingNode}
               nearBoundary={nearBoundary}
             />
@@ -2388,7 +2519,7 @@ export default function GraphView() {
                           fill="transparent"
                           style={{ pointerEvents: "all", cursor: "pointer" }}
                           onClick={() => {
-                            openConnectionInspector(conn.id);
+                            openConnectionEdgeInspector(conn.id, edge.fromId, edge.toId);
                           }}
                         />
                         <circle
@@ -2548,7 +2679,7 @@ export default function GraphView() {
                         strokeLinecap="round"
                         style={{ pointerEvents: "stroke", cursor: "pointer" }}
                         onClick={() => {
-                          openConnectionInspector(conn.id);
+                          openConnectionEdgeInspector(conn.id, edge.fromId, edge.toId);
                         }}
                       />
                     )}
@@ -2674,7 +2805,7 @@ export default function GraphView() {
                     width: NODE_W,
                     height: nodeHeight,
                     zIndex: nodeLayer,
-                    transition: isDragging ? "none" : "box-shadow 0.2s, transform 0.15s",
+                    transition: isDragging ? "none" : "box-shadow 0.14s ease-out",
                   }}
                 >
                   {/* Glow ring when targeted */}
@@ -2702,7 +2833,7 @@ export default function GraphView() {
                         openTodoInspector(todo.id);
                       }
                     }}
-                    className={`relative h-full rounded-xl border-2 transition-all duration-200 ${
+                    className={`relative h-full rounded-xl border-2 transition-shadow duration-150 ${
                       todo.high_priority === 1 ? "priority-warning" : ""
                     } ${
                       isDragging
@@ -2737,7 +2868,7 @@ export default function GraphView() {
                           e.stopPropagation();
                           void handleToggle(todo.id);
                         }}
-                        className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-all duration-300 ${
+                        className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors duration-150 ${
                           isCompleted
                             ? "bg-emerald-500 border-emerald-500 text-white"
                             : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
@@ -2944,14 +3075,14 @@ function Port({
       style={{ zIndex: 30 }}
     >
       <div
-        className={`rounded-full flex items-center justify-center transition-all duration-200 ${
+        className={`rounded-full flex items-center justify-center transition-colors duration-150 ${
           isActive
             ? "w-5 h-5 bg-indigo-500/30 ring-2 ring-indigo-400/60 scale-125"
             : "w-3.5 h-3.5 bg-white dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 group-hover/port:border-indigo-400 group-hover/port:bg-indigo-500/10 group-hover/port:scale-125"
         }`}
       >
         <div
-          className={`rounded-full transition-all duration-200 ${
+          className={`rounded-full transition-colors duration-150 ${
             isActive
               ? "w-2.5 h-2.5 bg-indigo-500"
               : "w-1.5 h-1.5 bg-slate-300 dark:bg-slate-600 group-hover/port:bg-indigo-500"

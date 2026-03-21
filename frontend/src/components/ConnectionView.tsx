@@ -16,12 +16,13 @@ import {
   ArrowUpDown,
   GripVertical,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import toast from "react-hot-toast";
 import EmptyState from "./EmptyState";
 import { getActionErrorMessage } from "../utils/errors";
 import type { ConnectionKind } from "../types";
 import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
+import { PROGRESS_BAR_WIDTH_TRANSITION_MS, REORDER_LAYOUT_TRANSITION } from "../utils/motion";
 
 export default function ConnectionView() {
   const { refreshTodos, refreshConnections, connections, loading: appLoading } = useApp();
@@ -118,30 +119,28 @@ export default function ConnectionView() {
         />
       ) : (
         <div className="space-y-4 md:space-y-6">
-          <AnimatePresence>
-            {connections.map((conn) => (
-              <MemoizedConnectionCard
-                key={conn.id}
-                connection={conn}
-                isEditing={editingId === conn.id}
-                editName={editName}
-                refreshConnections={refreshConnections}
-                onStartEdit={() => {
-                  setEditName(conn.name ?? "");
-                  setEditKind(conn.kind);
-                  setEditingId(conn.id);
-                }}
-                onCancelEdit={() => setEditingId(null)}
-                onSaveEdit={() => handleRename(conn.id)}
-                onEditNameChange={setEditName}
-                editKind={editKind}
-                onEditKindChange={setEditKind}
-                onDelete={() => handleDelete(conn.id)}
-                onToggleTodo={handleToggleTodo}
-                onRemoveItem={(todoId) => handleRemoveItem(conn.id, todoId)}
-              />
-            ))}
-          </AnimatePresence>
+          {connections.map((conn) => (
+            <MemoizedConnectionCard
+              key={conn.id}
+              connection={conn}
+              isEditing={editingId === conn.id}
+              editName={editName}
+              refreshConnections={refreshConnections}
+              onStartEdit={() => {
+                setEditName(conn.name ?? "");
+                setEditKind(conn.kind);
+                setEditingId(conn.id);
+              }}
+              onCancelEdit={() => setEditingId(null)}
+              onSaveEdit={() => handleRename(conn.id)}
+              onEditNameChange={setEditName}
+              editKind={editKind}
+              onEditKindChange={setEditKind}
+              onDelete={() => handleDelete(conn.id)}
+              onToggleTodo={handleToggleTodo}
+              onRemoveItem={(todoId) => handleRemoveItem(conn.id, todoId)}
+            />
+          ))}
         </div>
       )}
 
@@ -193,6 +192,8 @@ function ConnectionCard({
   const [reorderItems, setReorderItems] = useState<string[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
   const reorderItemsRef = useRef<string[]>([]);
+  const reorderRafRef = useRef<number | null>(null);
+  const latestPointerYRef = useRef<number>(0);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const itemByTodoId = useMemo(() => {
@@ -245,13 +246,14 @@ function ConnectionCard({
   const moveDraggedToIndex = (targetIndex: number) => {
     if (!dragId) return;
     setReorderItems((items) => {
+      const from = items.findIndex((id) => id === dragId);
+      if (from === -1) return items;
+      const adjustedTo = from < targetIndex ? targetIndex - 1 : targetIndex;
+      if (adjustedTo === from) return items;
+
       const next = [...items];
-      const from = next.findIndex((id) => id === dragId);
-      if (from === -1) return next;
-      let to = targetIndex;
       const [moved] = next.splice(from, 1);
-      if (from < to) to -= 1;
-      next.splice(to, 0, moved);
+      next.splice(adjustedTo, 0, moved);
       reorderItemsRef.current = next;
       return next;
     });
@@ -267,7 +269,11 @@ function ConnectionCard({
 
   useEffect(() => {
     if (!reorderMode || !dragId) return;
-    const onMove = (e: PointerEvent) => {
+    let isPointerActive = true;
+
+    const processMove = () => {
+      reorderRafRef.current = null;
+      if (!isPointerActive) return;
       const currentItems = reorderItemsRef.current;
       if (currentItems.length === 0) return;
       const positions = currentItems.map((id) => {
@@ -278,7 +284,7 @@ function ConnectionCard({
       });
       let targetIndex = 0;
       for (let i = 0; i < positions.length; i++) {
-        if (e.clientY > positions[i]!.mid) targetIndex = i + 1;
+        if (latestPointerYRef.current > positions[i]!.mid) targetIndex = i + 1;
       }
       let globalIndex: number;
       if (targetIndex >= currentItems.length) {
@@ -290,22 +296,38 @@ function ConnectionCard({
       }
       moveDraggedToIndex(globalIndex);
     };
+
+    const onMove = (e: PointerEvent) => {
+      if (!isPointerActive) return;
+      latestPointerYRef.current = e.clientY;
+      if (reorderRafRef.current !== null) return;
+      reorderRafRef.current = window.requestAnimationFrame(processMove);
+    };
     const onUp = () => {
+      isPointerActive = false;
+      if (reorderRafRef.current !== null) {
+        window.cancelAnimationFrame(reorderRafRef.current);
+        reorderRafRef.current = null;
+      }
       handleDragEnd();
+      window.removeEventListener("pointermove", onMove);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
     return () => {
+      isPointerActive = false;
       window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointercancel", onUp);
+      if (reorderRafRef.current !== null) {
+        window.cancelAnimationFrame(reorderRafRef.current);
+        reorderRafRef.current = null;
+      }
     };
   }, [reorderMode, dragId]);
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
+    <div
       className={`glass rounded-2xl overflow-hidden transition-all duration-500 group ${
         is_fully_complete ? "opacity-60" : ""
       }`}
@@ -432,15 +454,16 @@ function ConnectionCard({
           </div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
-          <motion.div
+          <div
             className={`h-full rounded-full transition-colors duration-500 ${
               is_fully_complete
                 ? "bg-gradient-to-r from-emerald-500 to-teal-400"
                 : "bg-gradient-to-r from-indigo-500 to-violet-500"
             }`}
-            initial={{ width: 0 }}
-            animate={{ width: `${progress.percentage}%` }}
-            transition={{ duration: 0.6, ease: "easeOut" }}
+            style={{
+              width: `${progress.percentage}%`,
+              transition: `width ${PROGRESS_BAR_WIDTH_TRANSITION_MS}ms ease-out`,
+            }}
           />
         </div>
       </div>
@@ -457,11 +480,121 @@ function ConnectionCard({
             const isDone = item.is_completed === 1;
             const isNextDone = nextItem?.is_completed === 1;
 
-            return (
-              <motion.div
-                key={item.id}
-                layout="position"
-                transition={{ type: "spring", stiffness: 520, damping: 36 }}
+            if (!reorderMode) {
+              return (
+                <div
+                  key={item.id}
+                  className={`flex items-stretch ${dragId === item.todo_id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                  ref={(el) => {
+                    if (!el) return;
+                    itemRefs.current.set(item.todo_id, el);
+                  }}
+                >
+                  {/* Node connector line */}
+                  <div className="flex flex-col items-center mr-3 w-5">
+                    {/* Dot */}
+                    <button
+                      onClick={() => onToggleTodo(item.todo_id)}
+                      className={`w-4 h-4 rounded-full border-2 flex-shrink-0 z-10 transition-all duration-300 cursor-pointer hover:scale-125 relative ${
+                        item.is_completed
+                          ? "bg-emerald-500 border-emerald-500 shadow-lg shadow-emerald-500/30"
+                          : isNext
+                          ? "border-indigo-400 dark:border-indigo-500 bg-indigo-500/20 ring-2 ring-indigo-400/30 animate-pulse-soft"
+                          : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
+                      }`}
+                    >
+                      {item.is_completed === 1 && (
+                        <Check size={8} className="absolute inset-0 m-auto text-white" strokeWidth={3} />
+                      )}
+                    </button>
+                    {/* Line */}
+                    {index < connection.items.length - 1 && (
+                      <div
+                        className={`w-0.5 flex-1 min-h-[28px] transition-all duration-500 ${
+                          !isDone && !isNextDone
+                            ? isNext
+                            ? "bg-indigo-400/20"
+                            : "bg-slate-200 dark:bg-slate-700"
+                            : ""
+                        }`}
+                        style={
+                          isDone && isNextDone
+                            ? { backgroundColor: "rgba(16,185,129,0.55)" }
+                            : isDone || isNextDone
+                            ? {
+                                backgroundImage: isDone
+                                  ? "linear-gradient(to bottom, rgba(16,185,129,0.7) 0%, rgba(16,185,129,0.7) 35%, rgba(99,102,241,0.45) 65%, rgba(99,102,241,0.45) 100%)"
+                                  : "linear-gradient(to bottom, rgba(99,102,241,0.45) 0%, rgba(99,102,241,0.45) 35%, rgba(16,185,129,0.7) 65%, rgba(16,185,129,0.7) 100%)",
+                              }
+                            : undefined
+                        }
+                      />
+                    )}
+                  </div>
+
+                  {/* Item content */}
+                  <div className="flex-1 pb-3">
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-sm transition-all duration-300 ${
+                              item.is_completed
+                                ? item.high_priority === 1
+                                  ? "line-through text-amber-500/70 dark:text-amber-300/60"
+                                  : "line-through text-slate-400 dark:text-slate-500"
+                                : isNext
+                                ? item.high_priority === 1
+                                  ? "font-medium text-amber-700 dark:text-amber-300"
+                                  : "font-medium text-slate-900 dark:text-slate-100"
+                                : item.high_priority === 1
+                                ? "text-amber-700 dark:text-amber-300"
+                                : "text-slate-700 dark:text-slate-300"
+                            }`}
+                          >
+                            {item.title}
+                          </span>
+                          <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                            {getConnectionSequenceLabel(connection, index, item)}
+                          </span>
+                          {isNext && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-500/10 text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                              <Zap size={10} />
+                              NEXT
+                            </span>
+                          )}
+                          <button
+                            onClick={() => onRemoveItem(item.todo_id)}
+                            className="ml-auto p-1 rounded hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                            title="Remove from connection"
+                          >
+                            <X size={12} className="text-slate-400 hover:text-red-500" />
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1 mt-1 opacity-60">
+                          <FolderOpen size={10} className="text-slate-400 dark:text-slate-500" />
+                          <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                            {connection.kind === "branch"
+                              ? index === 0
+                                ? "Root task"
+                                : `Branch ${index} of ${Math.max(reorderList.length - 1, 1)}`
+                              : `Step ${index + 1} of ${reorderList.length}`}
+                          </span>
+                        </div>
+                        {connection.kind === "dependency" && progress.blocked_titles?.length ? (
+                          <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-300">
+                            Blocked chain: {progress.blocked_titles.join(" -> ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            const row = (
+              <div
                 className={`flex items-stretch ${dragId === item.todo_id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
                 ref={(el) => {
                   if (!el) return;
@@ -580,12 +713,21 @@ function ConnectionCard({
                     </div>
                   </div>
                 </div>
+              </div>
+            );
+            return (
+              <motion.div
+                key={item.id}
+                layout="position"
+                transition={REORDER_LAYOUT_TRANSITION}
+              >
+                {row}
               </motion.div>
             );
           })}
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 }
 

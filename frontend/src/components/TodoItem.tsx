@@ -312,14 +312,9 @@ function TodoItem({
   const showStrike = isCompleted || isChecking;
 
   return (
-    <motion.div
+    <div
       ref={cardRef}
-      layout
-      layoutId={layoutId}
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -24, transition: { duration: 0.2 } }}
-      transition={{ duration: 0.25 }}
+      data-layout-id={layoutId}
       className={`group/todo glass rounded-xl overflow-hidden ${
         todo.high_priority === 1 ? "priority-warning" : ""
       } ${
@@ -692,7 +687,7 @@ function TodoItem({
           await refreshConnections();
         }}
       />
-    </motion.div>
+    </div>
   );
 }
 

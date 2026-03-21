@@ -94,8 +94,8 @@ export default function SettingsView() {
     try {
       const [activityEntries, backupEntries, templateEntries] = await Promise.all([
         activityApi.list(25),
-        backupsApi.list(),
-        templatesApi.list(),
+        syncEnabled ? Promise.resolve([]) : backupsApi.list(),
+        syncEnabled ? Promise.resolve([]) : templatesApi.list(),
       ]);
       setActivity(activityEntries);
       setBackups(backupEntries);
@@ -522,7 +522,6 @@ export default function SettingsView() {
               className="input-base !py-2.5 text-sm sm:max-w-[14rem]"
               aria-label="Default graph layout"
             >
-              <option value="smart">Smart</option>
               <option value="horizontal">Horizontal</option>
               <option value="vertical">Vertical</option>
               <option value="radial">Radial</option>

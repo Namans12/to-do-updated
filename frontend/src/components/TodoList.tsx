@@ -4,11 +4,12 @@ import { todosApi } from "../api/client";
 import TodoItem from "./TodoItem";
 import ConnectionInline from "./ConnectionInline";
 import { Plus, ListChecks, CalendarDays, Clock3, GripVertical } from "lucide-react";
-import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
 import type { Todo } from "../types";
 import EmptyState from "./EmptyState";
 import { getActionErrorMessage } from "../utils/errors";
+import { REORDER_LAYOUT_TRANSITION } from "../utils/motion";
 import {
   compareTodosForGroupOrder,
   isHighPriorityConnection,
@@ -45,6 +46,8 @@ export default function TodoList() {
   const orderedActiveIdsRef = useRef<Array<{ type: "conn" | "todo"; id: string }>>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const reorderRafRef = useRef<number | null>(null);
+  const latestPointerYRef = useRef<number>(0);
   const addFormRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const descRef = useRef<HTMLTextAreaElement>(null);
@@ -269,13 +272,14 @@ export default function TodoList() {
   const moveDraggedToIndex = (targetIndex: number) => {
     if (!dragId) return;
     setReorderItems((items) => {
+      const from = items.findIndex((i) => i.id === dragId);
+      if (from === -1) return items;
+      const adjustedTo = from < targetIndex ? targetIndex - 1 : targetIndex;
+      if (adjustedTo === from) return items;
+
       const next = [...items];
-      const from = next.findIndex((i) => i.id === dragId);
-      if (from === -1) return next;
-      let to = targetIndex;
       const [moved] = next.splice(from, 1);
-      if (from < to) to -= 1;
-      next.splice(to, 0, moved);
+      next.splice(adjustedTo, 0, moved);
       reorderItemsRef.current = next;
       return next;
     });
@@ -326,7 +330,11 @@ export default function TodoList() {
 
   useEffect(() => {
     if (!reorderMode || !dragId) return;
-    const onMove = (e: PointerEvent) => {
+    let isPointerActive = true;
+
+    const processMove = () => {
+      reorderRafRef.current = null;
+      if (!isPointerActive) return;
       const container = containerRef.current;
       if (!container) return;
       const currentItems = reorderItemsRef.current;
@@ -343,7 +351,7 @@ export default function TodoList() {
       });
       let targetIndex = 0;
       for (let i = 0; i < positions.length; i++) {
-        if (e.clientY > positions[i]!.mid) targetIndex = i + 1;
+        if (latestPointerYRef.current > positions[i]!.mid) targetIndex = i + 1;
       }
       let globalIndex: number;
       if (targetIndex >= eligible.length) {
@@ -358,13 +366,33 @@ export default function TodoList() {
       }
       moveDraggedToIndex(globalIndex);
     };
+
+    const onMove = (e: PointerEvent) => {
+      if (!isPointerActive) return;
+      latestPointerYRef.current = e.clientY;
+      if (reorderRafRef.current !== null) return;
+      reorderRafRef.current = window.requestAnimationFrame(processMove);
+    };
     const onUp = () => {
+      isPointerActive = false;
+      if (reorderRafRef.current !== null) {
+        window.cancelAnimationFrame(reorderRafRef.current);
+        reorderRafRef.current = null;
+      }
       handleDragEnd();
+      window.removeEventListener("pointermove", onMove);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
     return () => {
+      isPointerActive = false;
       window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointercancel", onUp);
+      if (reorderRafRef.current !== null) {
+        window.cancelAnimationFrame(reorderRafRef.current);
+        reorderRafRef.current = null;
+      }
     };
   }, [reorderMode, dragId]);
 
@@ -538,8 +566,7 @@ export default function TodoList() {
         )}
       </div>
 
-      <LayoutGroup>
-        {activeTodos.length === 0 && !isAdding && (
+      {activeTodos.length === 0 && !isAdding && (
           <EmptyState
             icon={<ListChecks size={28} className="text-slate-300 dark:text-slate-600" />}
             title={`Nothing in ${selectedGroup.name} yet`}
@@ -547,43 +574,59 @@ export default function TodoList() {
             actionLabel="Add First Task"
             onAction={() => setIsAdding(true)}
           />
-        )}
+      )}
         {/* Connections + solo todos in placement order */}
         <div
           ref={containerRef}
           className={`relative mb-4 space-y-2 ${reorderMode ? "cursor-grab select-none touch-none" : ""}`}
         >
-          <AnimatePresence mode="popLayout">
-            {visibleReorderList.map((item) => {
+          {visibleReorderList.map((item) => {
             if (item.type === "conn") {
               const conn = activeConnById.get(item.id);
               if (!conn) return null;
-              return (
-                <motion.div
-                  key={`conn-${item.id}`}
-                  layout="position"
-                  transition={{ type: "spring", stiffness: 520, damping: 36 }}
-                >
+              if (!reorderMode) {
+                return (
                   <div
-                    className={`${reorderMode ? "relative" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                    key={`conn-${item.id}`}
+                    className={`${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
                     ref={(el) => {
                       if (!el) return;
                       itemRefs.current.set(item.id, el);
                     }}
                   >
-                    {reorderMode && (
-                      <button
-                        type="button"
-                        onPointerDown={(e) => {
-                          e.preventDefault();
-                          e.currentTarget.setPointerCapture?.(e.pointerId);
-                          handleDragStart(item.id);
-                        }}
-                        className="absolute -left-10 top-1/2 -translate-y-1/2 text-slate-400 p-1.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-grab"
-                      >
-                        <GripVertical size={16} />
-                      </button>
-                    )}
+                    <ConnectionInline
+                      connection={conn}
+                      highlightTodoId={highlightTodoId}
+                      refreshTodos={refreshTodos}
+                      refreshConnections={refreshConnections}
+                    />
+                  </div>
+                );
+              }
+              return (
+                <motion.div
+                  key={`conn-${item.id}`}
+                  layout="position"
+                  transition={REORDER_LAYOUT_TRANSITION}
+                >
+                  <div
+                    className={`relative ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                    ref={(el) => {
+                      if (!el) return;
+                      itemRefs.current.set(item.id, el);
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.setPointerCapture?.(e.pointerId);
+                        handleDragStart(item.id);
+                      }}
+                      className="absolute -left-10 top-1/2 -translate-y-1/2 text-slate-400 p-1.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-grab"
+                    >
+                      <GripVertical size={16} />
+                    </button>
                     <ConnectionInline
                       connection={conn}
                       highlightTodoId={highlightTodoId}
@@ -594,50 +637,71 @@ export default function TodoList() {
                 </motion.div>
               );
             }
+
             const todo = activeTodoById.get(item.id);
             if (!todo) return null;
+            if (!reorderMode) {
+              return (
+                <div
+                  key={`todo-${item.id}`}
+                  className={`${todo.high_priority === 1 ? "mt-1" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                  ref={(el) => {
+                    if (!el) return;
+                    itemRefs.current.set(item.id, el);
+                  }}
+                >
+                  <TodoItem
+                    todo={todo}
+                    connections={connections}
+                    settings={settings}
+                    refreshTodos={refreshTodos}
+                    refreshConnections={refreshConnections}
+                    isHighlighted={highlightTodoId === todo.id}
+                    nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
+                    layoutId={`todo-${todo.id}`}
+                  />
+                </div>
+              );
+            }
             return (
               <motion.div
                 key={`todo-${item.id}`}
                 layout="position"
-                transition={{ type: "spring", stiffness: 520, damping: 36 }}
+                transition={REORDER_LAYOUT_TRANSITION}
+              >
+                <div
+                  className={`relative ${todo.high_priority === 1 ? "mt-1" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
+                  ref={(el) => {
+                    if (!el) return;
+                    itemRefs.current.set(item.id, el);
+                  }}
                 >
-                  <div
-                    className={`${reorderMode ? "relative" : ""} ${todo.high_priority === 1 ? "mt-1" : ""} ${dragId === item.id ? "opacity-30 pointer-events-none" : ""} transition-opacity duration-75`}
-                    ref={(el) => {
-                      if (!el) return;
-                      itemRefs.current.set(item.id, el);
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      e.currentTarget.setPointerCapture?.(e.pointerId);
+                      handleDragStart(item.id);
                     }}
+                    className="absolute -left-10 top-1/2 -translate-y-1/2 text-slate-400 p-1.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-grab"
                   >
-                    {reorderMode && (
-                      <button
-                        type="button"
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        e.currentTarget.setPointerCapture?.(e.pointerId);
-                        handleDragStart(item.id);
-                      }}
-                      className="absolute -left-10 top-1/2 -translate-y-1/2 text-slate-400 p-1.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-grab"
-                    >
-                        <GripVertical size={16} />
-                      </button>
-                    )}
-                    <TodoItem
-                      todo={todo}
-                      connections={connections}
-                      settings={settings}
-                      refreshTodos={refreshTodos}
-                      refreshConnections={refreshConnections}
-                      isHighlighted={highlightTodoId === todo.id}
-                      nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
-                      layoutId={`todo-${todo.id}`}
-                    />
-                  </div>
-                </motion.div>
+                    <GripVertical size={16} />
+                  </button>
+                  <TodoItem
+                    todo={todo}
+                    connections={connections}
+                    settings={settings}
+                    refreshTodos={refreshTodos}
+                    refreshConnections={refreshConnections}
+                    isHighlighted={highlightTodoId === todo.id}
+                    nextTodoId={nextSoloTodoIdById.get(todo.id) ?? null}
+                    layoutId={`todo-${todo.id}`}
+                  />
+                </div>
+              </motion.div>
             );
           })}
-        </AnimatePresence>
-      </div>
+        </div>
 
       {!reorderMode && visibleActiveCount < reorderList.length && (
         <div className="mb-6 flex justify-center">
@@ -873,7 +937,6 @@ export default function TodoList() {
           </motion.div>
         )}
       </AnimatePresence>
-      </LayoutGroup>
 
     </motion.div>
   );

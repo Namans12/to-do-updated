@@ -5,6 +5,7 @@ import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-re
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
 import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
+import { PROGRESS_BAR_WIDTH_TRANSITION_MS } from "../utils/motion";
 
 interface ConnectionInlineProps {
   connection: Connection;
@@ -73,12 +74,7 @@ function ConnectionInline({
   };
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -24, transition: { duration: 0.2 } }}
-      transition={{ duration: 0.25 }}
+    <div
       className={`glass rounded-xl overflow-hidden border-l-4 group/conn ${
         is_fully_complete
           ? "border-l-emerald-500 dark:border-l-emerald-400"
@@ -176,15 +172,16 @@ function ConnectionInline({
 
         {/* Progress bar mini */}
         <div className="mt-2 h-1 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
-          <motion.div
+          <div
             className={`h-full rounded-full ${
               is_fully_complete
                 ? "bg-gradient-to-r from-emerald-500 to-teal-400"
                 : "bg-gradient-to-r from-indigo-500 to-violet-500"
             }`}
-            initial={{ width: 0 }}
-            animate={{ width: `${progress.percentage}%` }}
-            transition={{ duration: 0.6, ease: "easeOut" }}
+            style={{
+              width: `${progress.percentage}%`,
+              transition: `width ${PROGRESS_BAR_WIDTH_TRANSITION_MS}ms ease-out`,
+            }}
           />
         </div>
       </div>
@@ -317,7 +314,7 @@ function ConnectionInline({
           </motion.div>
         )}
       </AnimatePresence>
-    </motion.div>
+    </div>
   );
 }
 

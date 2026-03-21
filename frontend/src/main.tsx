@@ -12,6 +12,11 @@ const isNativeShell =
   typeof window !== "undefined" &&
   (Capacitor.isNativePlatform() || "__TAURI_INTERNALS__" in window);
 
+const enableStrictMode =
+  import.meta.env.DEV &&
+  !isNativeShell &&
+  import.meta.env.VITE_ENABLE_STRICT_MODE === "true";
+
 async function clearLocalDevServiceWorkers() {
   if (
     typeof window === "undefined" ||
@@ -51,7 +56,7 @@ if (import.meta.env.PROD && !isNativeShell) {
 }
 
 createRoot(document.getElementById("root")!).render(
-  import.meta.env.DEV && !isNativeShell ? <StrictMode>
+  enableStrictMode ? <StrictMode>
     <ThemeProvider>
       <AppProvider>
         <App />

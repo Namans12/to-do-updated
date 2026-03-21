@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { activityApi, backupsApi } from "../api/client";
+import { isSupabaseSyncEnabled } from "../sync/config";
 import type { ActivityLog, BackupSnapshot, BackupTaskPreview, Todo } from "../types";
 import { ArrowRight, Clock3, History, RotateCcw, Sparkles, X } from "lucide-react";
 import toast from "react-hot-toast";
@@ -56,7 +57,7 @@ export default function TodoHistoryModal({
       try {
         const [historyEntries, backupEntries] = await Promise.all([
           activityApi.entityHistory("todo", todo.id),
-          backupsApi.list(),
+          isSupabaseSyncEnabled ? Promise.resolve([]) : backupsApi.list(),
         ]);
         if (cancelled) return;
         setHistory(normalizeActivityEntries(historyEntries));
@@ -80,6 +81,7 @@ export default function TodoHistoryModal({
   if (!open) return null;
 
   const loadPreview = async (backupId: string) => {
+    if (isSupabaseSyncEnabled) return;
     try {
       const nextPreview = await backupsApi.previewTask(backupId, todo.id);
       setPreview(nextPreview);
@@ -90,6 +92,7 @@ export default function TodoHistoryModal({
   };
 
   const restorePreview = async () => {
+    if (isSupabaseSyncEnabled) return;
     if (!previewBackupId) return;
     try {
       await backupsApi.restoreTask(previewBackupId, todo.id);
@@ -180,7 +183,7 @@ export default function TodoHistoryModal({
               </div>
             </div>
 
-            <div className="space-y-3">
+            {!isSupabaseSyncEnabled && <div className="space-y-3">
               <div className="rounded-2xl border border-slate-200 px-4 py-3 dark:border-slate-800">
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
                   <Clock3 size={13} />
@@ -231,7 +234,7 @@ export default function TodoHistoryModal({
                   </button>
                 </div>
               )}
-            </div>
+            </div>}
           </div>
         )}
       </div>

@@ -116,7 +116,7 @@ export default function GraphConnectionInspector({
               className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10 sm:w-auto"
             >
               <Unlink size={12} />
-              Delete connection
+              Delete selected edge
             </button>
             <button
               type="button"
@@ -124,7 +124,7 @@ export default function GraphConnectionInspector({
               className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 px-3 py-1.5 text-[11px] font-medium text-red-500 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:hover:bg-red-500/10 sm:w-auto"
             >
               <Trash2 size={12} />
-              Delete whole connection
+              Delete connected group
             </button>
           </div>
         </div>

@@ -90,6 +90,9 @@ let activeSession: Session | null = null;
 let realtimeChannel: RealtimeChannel | null = null;
 let flushPromise: Promise<void> | null = null;
 let remoteSnapshotPromise: Promise<SyncCacheSnapshot> | null = null;
+const REALTIME_REFRESH_DEBOUNCE_MS = 180;
+const MAX_CONNECTION_ITEMS = 7;
+const MAX_BRANCH_ITEMS = 3;
 
 function debugSyncLog(...args: unknown[]) {
   if (!syncDebugEnabled) return;
@@ -432,15 +435,30 @@ async function fetchRemoteSnapshot() {
   const todos = (todosRes.data as TodoRow[]).map(({ user_id: _userId, ...todo }) => todo);
   let connections: Connection[] = [];
   try {
-    const [connectionsRes, itemsRes] = await Promise.all([
-      supabase.from("connections").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
-      supabase.from("connection_items").select("*").order("position", { ascending: true }),
-    ]);
+    const connectionsRes = await supabase
+      .from("connections")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: true });
     if (connectionsRes.error) throw connectionsRes.error;
-    if (itemsRes.error) throw itemsRes.error;
+
+    const connectionRows = connectionsRes.data as ConnectionRow[];
+    const connectionIds = connectionRows.map((connection) => connection.id);
+
+    let itemRows: ConnectionItemRow[] = [];
+    if (connectionIds.length > 0) {
+      const itemsRes = await supabase
+        .from("connection_items")
+        .select("*")
+        .in("connection_id", connectionIds)
+        .order("position", { ascending: true });
+      if (itemsRes.error) throw itemsRes.error;
+      itemRows = itemsRes.data as ConnectionItemRow[];
+    }
+
     connections = buildConnections(
-      connectionsRes.data as ConnectionRow[],
-      itemsRes.data as ConnectionItemRow[],
+      connectionRows,
+      itemRows,
       todos
     );
   } catch (error) {
@@ -637,6 +655,75 @@ async function findConnectionRowByTodoId(todoId: string) {
     .maybeSingle();
   if (error) throw error;
   return data?.connection_id as string | undefined;
+}
+
+async function listConnectionRowIdsByTodoId(todoId: string) {
+  if (!supabase) throw new Error("Supabase sync is not configured.");
+  const { data, error } = await supabase
+    .from("connection_items")
+    .select("connection_id")
+    .eq("todo_id", todoId);
+  if (error) throw error;
+  return (data ?? []).map((row) => row.connection_id as string);
+}
+
+function buildMergedTodoIds(
+  fromIds: string[],
+  toIds: string[],
+  fromTodoId: string,
+  toTodoId: string,
+  mergedKind: ConnectionKind
+) {
+  if (fromIds.length < 1 || toIds.length < 1) {
+    throw new Error("Cannot merge empty connections.");
+  }
+
+  const orientFrom = () => {
+    if (fromIds[fromIds.length - 1] === fromTodoId) return fromIds;
+    if (fromIds[0] === fromTodoId) return [...fromIds].reverse();
+    return null;
+  };
+
+  const orientTo = () => {
+    if (toIds[0] === toTodoId) return toIds;
+    if (toIds[toIds.length - 1] === toTodoId) return [...toIds].reverse();
+    return null;
+  };
+
+  const fromChain = orientFrom();
+  const toChain = orientTo();
+  if (!fromChain || !toChain) {
+    throw new Error(
+      "Merge requires linking chain endpoints. Select an endpoint task from each connection."
+    );
+  }
+
+  const overlap = fromChain.some((id) => toChain.includes(id));
+  if (overlap) {
+    throw new Error("Cannot merge connections that share tasks.");
+  }
+
+  const mergedTodoIds = [...fromChain, ...toChain];
+  if (mergedTodoIds.length > MAX_CONNECTION_ITEMS) {
+    throw new Error("Merged connection exceeds max depth of 7 items.");
+  }
+  if (mergedKind === "branch" && mergedTodoIds.length > MAX_BRANCH_ITEMS) {
+    throw new Error("Branch connections can include at most 3 items (1 root + 2 branches).");
+  }
+  if (new Set(mergedTodoIds).size !== mergedTodoIds.length) {
+    throw new Error("Merged chain produced duplicate tasks.");
+  }
+
+  return mergedTodoIds;
+}
+
+function ensureConnectionSizeAllowed(kind: ConnectionKind, itemCount: number) {
+  if (itemCount > MAX_CONNECTION_ITEMS) {
+    throw new Error("Connections can have at most 7 items.");
+  }
+  if (kind === "branch" && itemCount > MAX_BRANCH_ITEMS) {
+    throw new Error("Branch connections can include at most 3 items (1 root + 2 branches).");
+  }
 }
 
 async function remoteCleanupConnection(connectionId: string) {
@@ -964,6 +1051,7 @@ async function createConnectionRemote(
   id: string = crypto.randomUUID()
 ) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
+  ensureConnectionSizeAllowed(kind, todoIds.length);
   const userId = await requireUserId();
   const existing = await Promise.all(todoIds.map((todoId) => findConnectionRowByTodoId(todoId)));
   if (existing.some(Boolean)) {
@@ -1015,6 +1103,13 @@ async function addConnectionItemRemote(connectionId: string, todoId: string) {
   if (existingConnectionId) {
     throw new Error("This task is already in another connection.");
   }
+  const { data: connectionRow, error: connectionError } = await supabase
+    .from("connections")
+    .select("kind")
+    .eq("id", connectionId)
+    .maybeSingle();
+  if (connectionError) throw connectionError;
+  if (!connectionRow) throw new Error("Connection not found.");
   const { data, error } = await supabase
     .from("connection_items")
     .select("position")
@@ -1023,6 +1118,7 @@ async function addConnectionItemRemote(connectionId: string, todoId: string) {
     .limit(1);
   if (error) throw error;
   const nextPosition = ((data?.[0]?.position as number | undefined) ?? -1) + 1;
+  ensureConnectionSizeAllowed(connectionRow.kind as ConnectionKind, nextPosition + 1);
   const { error: insertError } = await supabase.from("connection_items").insert({
     id: crypto.randomUUID(),
     connection_id: connectionId,
@@ -1038,8 +1134,18 @@ async function addConnectionItemRemote(connectionId: string, todoId: string) {
 
 async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
-  const fromConnectionId = await findConnectionRowByTodoId(fromTodoId);
-  const toConnectionId = await findConnectionRowByTodoId(toTodoId);
+  const sourceMatches = await listConnectionRowIdsByTodoId(fromTodoId);
+  const targetMatches = await listConnectionRowIdsByTodoId(toTodoId);
+
+  if (sourceMatches.length > 1) {
+    throw new Error("Selected source task belongs to multiple connections. Choose a chain endpoint.");
+  }
+  if (targetMatches.length > 1) {
+    throw new Error("Selected target task belongs to multiple connections. Choose a chain endpoint.");
+  }
+
+  const fromConnectionId = sourceMatches[0];
+  const toConnectionId = targetMatches[0];
   if (!fromConnectionId || !toConnectionId) {
     throw new Error("Both tasks must already belong to a connection to merge them.");
   }
@@ -1047,23 +1153,35 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
     return remoteBuildConnection(fromConnectionId);
   }
 
-  const { data: sourceItems, error: sourceError } = await supabase
+  const { data: sourceConnection, error: sourceConnectionError } = await supabase
+    .from("connections")
+    .select("kind")
+    .eq("id", fromConnectionId)
+    .maybeSingle();
+  if (sourceConnectionError) throw sourceConnectionError;
+  if (!sourceConnection) throw new Error("Source connection not found.");
+
+  const { data: sourceItems, error: sourceItemsError } = await supabase
     .from("connection_items")
-    .select("*")
+    .select("todo_id")
     .eq("connection_id", fromConnectionId)
     .order("position", { ascending: true });
-  if (sourceError) throw sourceError;
-  const { data: targetItems, error: targetError } = await supabase
+  if (sourceItemsError) throw sourceItemsError;
+
+  const { data: targetItems, error: targetItemsError } = await supabase
     .from("connection_items")
-    .select("*")
+    .select("todo_id")
     .eq("connection_id", toConnectionId)
     .order("position", { ascending: true });
-  if (targetError) throw targetError;
+  if (targetItemsError) throw targetItemsError;
 
-  const allTodoIds = [
-    ...(sourceItems as ConnectionItemRow[]).map((item) => item.todo_id),
-    ...(targetItems as ConnectionItemRow[]).map((item) => item.todo_id),
-  ];
+  const allTodoIds = buildMergedTodoIds(
+    (sourceItems ?? []).map((item) => item.todo_id as string),
+    (targetItems ?? []).map((item) => item.todo_id as string),
+    fromTodoId,
+    toTodoId,
+    sourceConnection.kind as ConnectionKind
+  );
 
   await supabase.from("connection_items").delete().eq("connection_id", fromConnectionId);
   await supabase.from("connection_items").delete().eq("connection_id", toConnectionId);
@@ -1274,7 +1392,9 @@ export async function flushPendingOperations() {
       await applyQueuedOperation(operation);
       await deletePendingOperation(operation.id);
     }
-    await refreshRemoteSnapshot();
+    if (operations.length > 0) {
+      await refreshRemoteSnapshot();
+    }
   })().finally(() => {
     flushPromise = null;
   });
@@ -1303,28 +1423,40 @@ export async function primeSyncState(session: Session | null) {
 
 export function subscribeToRealtime(onInvalidate: () => void) {
   if (!supabase || !activeSession) return () => {};
+  let realtimeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let realtimeRefreshPromise: Promise<void> | null = null;
+
+  const scheduleRealtimeRefresh = () => {
+    if (realtimeRefreshTimer) return;
+    realtimeRefreshTimer = setTimeout(() => {
+      realtimeRefreshTimer = null;
+      if (realtimeRefreshPromise) return;
+      realtimeRefreshPromise = (async () => {
+        await refreshRemoteSnapshot();
+        onInvalidate();
+      })().finally(() => {
+        realtimeRefreshPromise = null;
+      });
+    }, REALTIME_REFRESH_DEBOUNCE_MS);
+  };
+
   realtimeChannel?.unsubscribe();
   realtimeChannel = supabase
     .channel(`nodes-sync-${activeSession.user.id}`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "groups" }, async () => {
-      await refreshRemoteSnapshot();
-      onInvalidate();
+    .on("postgres_changes", { event: "*", schema: "public", table: "groups" }, () => {
+      scheduleRealtimeRefresh();
     })
-    .on("postgres_changes", { event: "*", schema: "public", table: "todos" }, async () => {
-      await refreshRemoteSnapshot();
-      onInvalidate();
+    .on("postgres_changes", { event: "*", schema: "public", table: "todos" }, () => {
+      scheduleRealtimeRefresh();
     })
-    .on("postgres_changes", { event: "*", schema: "public", table: "connections" }, async () => {
-      await refreshRemoteSnapshot();
-      onInvalidate();
+    .on("postgres_changes", { event: "*", schema: "public", table: "connections" }, () => {
+      scheduleRealtimeRefresh();
     })
-    .on("postgres_changes", { event: "*", schema: "public", table: "connection_items" }, async () => {
-      await refreshRemoteSnapshot();
-      onInvalidate();
+    .on("postgres_changes", { event: "*", schema: "public", table: "connection_items" }, () => {
+      scheduleRealtimeRefresh();
     })
-    .on("postgres_changes", { event: "*", schema: "public", table: "activity_logs" }, async () => {
-      await refreshRemoteSnapshot();
-      onInvalidate();
+    .on("postgres_changes", { event: "*", schema: "public", table: "activity_logs" }, () => {
+      scheduleRealtimeRefresh();
     });
   realtimeChannel.subscribe();
 
@@ -1337,6 +1469,10 @@ export function subscribeToRealtime(onInvalidate: () => void) {
   return () => {
     realtimeChannel?.unsubscribe();
     realtimeChannel = null;
+    if (realtimeRefreshTimer) {
+      clearTimeout(realtimeRefreshTimer);
+      realtimeRefreshTimer = null;
+    }
     window.removeEventListener("online", onOnline);
   };
 }
@@ -1883,6 +2019,8 @@ export const syncedConnectionsApi = {
       },
       async () => {
         const snapshot = await getSnapshot();
+        const normalizedKind = kind ?? "sequence";
+        ensureConnectionSizeAllowed(normalizedKind, todoIds.length);
         const todoById = new Map(snapshot.todos.map((todo) => [todo.id, todo]));
         for (const todoId of todoIds) {
           if (snapshot.connections.some((connection) => connection.items.some((item) => item.todo_id === todoId))) {
@@ -1892,7 +2030,7 @@ export const syncedConnectionsApi = {
         const connection: Connection = {
           id: crypto.randomUUID(),
           name: name ?? null,
-          kind: kind ?? "sequence",
+          kind: normalizedKind,
           items: todoIds.map((todoId, index) => {
             const todo = todoById.get(todoId);
             if (!todo) throw new Error("Task not found.");
@@ -1907,7 +2045,7 @@ export const syncedConnectionsApi = {
               position: index,
             };
           }),
-          progress: buildConnectionProgress(kind ?? "sequence", []),
+          progress: buildConnectionProgress(normalizedKind, []),
           is_fully_complete: false,
           created_at: nowIso(),
         };
@@ -1925,6 +2063,12 @@ export const syncedConnectionsApi = {
   update: async (id: string, data: { name?: string | null; kind?: ConnectionKind }) =>
     withOfflineFallback(
       async () => {
+        if (data.kind === "branch") {
+          const snapshot = await getSnapshot();
+          const current = snapshot.connections.find((connection) => connection.id === id);
+          if (!current) throw new Error("Connection not found.");
+          ensureConnectionSizeAllowed("branch", current.items.length);
+        }
         await updateConnectionRemote(id, data);
         const snapshot = await getSnapshot();
         const current = snapshot.connections.find((connection) => connection.id === id);
@@ -1945,6 +2089,9 @@ export const syncedConnectionsApi = {
         const snapshot = await getSnapshot();
         const current = snapshot.connections.find((connection) => connection.id === id);
         if (!current) throw new Error("Connection not found.");
+        if (data.kind === "branch") {
+          ensureConnectionSizeAllowed("branch", current.items.length);
+        }
         const next: Connection = { ...current, ...data };
         await mutateSnapshot((draft) => {
           draft.connections = draft.connections.map((connection) =>
@@ -1968,6 +2115,7 @@ export const syncedConnectionsApi = {
         await mutateSnapshot((draft) => {
           draft.connections = draft.connections.map((connection) => {
             if (connection.id !== connectionId) return connection;
+            ensureConnectionSizeAllowed(connection.kind, connection.items.length + 1);
             const items = [
               ...connection.items,
               {
@@ -2000,6 +2148,7 @@ export const syncedConnectionsApi = {
         await mutateSnapshot((draft) => {
           draft.connections = draft.connections.map((connection) => {
             if (connection.id !== connectionId) return connection;
+            ensureConnectionSizeAllowed(connection.kind, connection.items.length + 1);
             const items = [
               ...connection.items,
               {
@@ -2053,14 +2202,45 @@ export const syncedConnectionsApi = {
         const toConnection = snapshot.connections.find((connection) =>
           connection.items.some((item) => item.todo_id === toTodoId)
         );
+
+        const fromMatches = snapshot.connections.filter((connection) =>
+          connection.items.some((item) => item.todo_id === fromTodoId)
+        );
+        const toMatches = snapshot.connections.filter((connection) =>
+          connection.items.some((item) => item.todo_id === toTodoId)
+        );
+        if (fromMatches.length > 1) {
+          throw new Error("Selected source task belongs to multiple connections. Choose a chain endpoint.");
+        }
+        if (toMatches.length > 1) {
+          throw new Error("Selected target task belongs to multiple connections. Choose a chain endpoint.");
+        }
+
         if (!fromConnection || !toConnection) {
           throw new Error("Both tasks must already belong to a connection.");
         }
         if (fromConnection.id === toConnection.id) return fromConnection;
-        const mergedItems = [...fromConnection.items, ...toConnection.items].map((item, index) => ({
-          ...item,
-          position: index,
-        }));
+
+        const mergedTodoIds = buildMergedTodoIds(
+          fromConnection.items.map((item) => item.todo_id),
+          toConnection.items.map((item) => item.todo_id),
+          fromTodoId,
+          toTodoId,
+          fromConnection.kind
+        );
+
+        const connectionItems = [...fromConnection.items, ...toConnection.items];
+        const mergedItems = mergedTodoIds.map((todoId, index) => {
+          const item = connectionItems.find((connectionItem) => connectionItem.todo_id === todoId);
+          if (!item) {
+            throw new Error("Failed to assemble merged connection.");
+          }
+          return {
+            ...item,
+            position: index,
+          };
+        });
+
         const merged = {
           ...fromConnection,
           items: mergedItems,

@@ -14,8 +14,8 @@ The frontend now supports two runtimes:
 ## Setup
 
 1. Create a Supabase project.
-2. Run [`supabase/schema.sql`](/Users/naman/Desktop/nodes-todo-master/supabase/schema.sql) in the Supabase SQL editor.
-3. Copy [`frontend/.env.example`](/Users/naman/Desktop/nodes-todo-master/frontend/.env.example) to `.env.local`.
+2. Run `supabase/schema.sql` in the Supabase SQL editor.
+3. Copy `frontend/.env.example` to `.env.local`.
 4. Fill:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
@@ -57,6 +57,14 @@ The frontend now builds with `vite-plugin-pwa` and emits:
 - installable metadata
 
 Installability still depends on the browser and deployment environment using HTTPS or localhost.
+
+## Supabase E2E
+
+Use the hosted-backend Playwright profile (frontend only):
+
+- set `VITE_SUPABASE_URL`
+- set `VITE_SUPABASE_ANON_KEY`
+- run `cd frontend && npm run test:e2e:supabase`
 
 ## Legacy/local-only helpers
 

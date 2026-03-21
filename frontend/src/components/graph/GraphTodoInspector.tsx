@@ -1,7 +1,7 @@
-import { CheckSquare, Repeat, Trash2, X } from "lucide-react";
+import { CheckSquare, Repeat, X } from "lucide-react";
+import { useRef } from "react";
 
 export default function GraphTodoInspector({
-  title,
   draftTitle,
   draftDescription,
   draftHighPriority,
@@ -15,7 +15,6 @@ export default function GraphTodoInspector({
   onClose,
   showDelete = true,
 }: {
-  title: string;
   draftTitle: string;
   draftDescription: string;
   draftHighPriority: boolean;
@@ -29,9 +28,15 @@ export default function GraphTodoInspector({
   onClose: () => void;
   showDelete?: boolean;
 }) {
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+
   const handleTitleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
+    if (event.shiftKey) {
+      descriptionRef.current?.focus();
+      return;
+    }
     onSave();
   };
   const handleDescriptionKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -43,17 +48,14 @@ export default function GraphTodoInspector({
 
   return (
     <aside className="absolute inset-x-2 bottom-2 z-30 max-h-[min(72vh,36rem)] overflow-y-auto rounded-3xl border border-slate-700/80 bg-slate-900/95 p-3.5 text-slate-100 shadow-xl backdrop-blur-md sm:inset-x-3 sm:bottom-3 sm:p-4 lg:inset-x-auto lg:left-3 lg:top-0 lg:bottom-auto lg:max-h-none lg:w-[min(26rem,calc(100%-1.5rem))] lg:overflow-visible">
-      <div className="flex items-start gap-3">
+      <div className="flex items-center gap-3">
         <div className="rounded-2xl bg-indigo-500/10 p-3 text-indigo-500">
           <CheckSquare size={18} />
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+        <div className="min-w-0 flex-1 text-left">
+          <p className="text-lg font-semibold tracking-wide text-slate-100">
             GraphPlan Task
           </p>
-          <h3 className="mt-1 text-base font-semibold text-slate-50">
-            {title}
-          </h3>
         </div>
         <button
           type="button"
@@ -74,6 +76,7 @@ export default function GraphTodoInspector({
           placeholder="Task title"
         />
         <textarea
+          ref={descriptionRef}
           value={draftDescription}
           onChange={(event) => onDraftDescriptionChange(event.target.value)}
           onKeyDown={handleDescriptionKeyDown}
@@ -110,8 +113,11 @@ export default function GraphTodoInspector({
             Save task
           </button>
           {showDelete && (
-            <button type="button" onClick={onDelete} className="btn-ghost w-full !px-3 !py-2 text-xs text-red-500 sm:w-auto">
-              <Trash2 size={12} />
+            <button
+              type="button"
+              onClick={onDelete}
+              className="w-full rounded-2xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-400 sm:w-auto"
+            >
               Delete task
             </button>
           )}

@@ -11,6 +11,8 @@
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
+    "test:e2e:supabase": "playwright test -c playwright.supabase.config.ts",
+    "test:e2e:supabase:headed": "playwright test -c playwright.supabase.config.ts --headed",
     "desktop:dev": "tauri dev",
     "desktop:check": "cargo check --manifest-path src-tauri\\Cargo.toml",
     "desktop:build": "tauri build",
