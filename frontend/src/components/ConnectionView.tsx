@@ -1,6 +1,6 @@
 import { memo, useState, useMemo, useRef, useEffect } from "react";
 import { connectionsApi, todosApi } from "../api/client";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import type { Connection } from "../types";
 import ConnectionModal from "./ConnectionModal";
 import {

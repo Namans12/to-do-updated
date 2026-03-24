@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type InputHTMLAttributes, type ReactNode } from "react";
 import { activityApi, backupsApi, syncApi, templatesApi } from "../api/client";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import type {
   ActivityLog,
   AppSettings,

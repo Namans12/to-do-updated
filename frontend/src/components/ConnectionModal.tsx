@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import { connectionsApi } from "../api/client";
 import type { Todo, ConnectionKind } from "../types";
 import { X, Plus, Share2, FolderOpen } from "lucide-react";

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { trashApi } from "../api/client";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import type { TrashItem, TrashGroup } from "../types";
 import {
   Trash2,

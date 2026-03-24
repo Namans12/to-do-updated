@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, type ReactNode } from "react";
 import { searchApi } from "../api/client";
 import type { SearchResult } from "../api/client";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import { Search, X, FolderOpen, AlertCircle, Bell, GitBranch, ChevronDown, SlidersHorizontal } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import EmptyState from "./EmptyState";

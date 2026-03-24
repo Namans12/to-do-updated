@@ -379,6 +379,8 @@ function buildConnectionsFromSnapshotDraft(snapshot: SyncCacheSnapshot): Connect
   return snapshot.connections
     .map((connection) => {
       const items = connection.items
+        .slice()
+        .sort((a, b) => (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER))
         .map((item, index) => {
           const todo = todoById.get(item.todo_id);
           if (!todo || todo.deleted_at) return null;
@@ -389,7 +391,7 @@ function buildConnectionsFromSnapshotDraft(snapshot: SyncCacheSnapshot): Connect
             high_priority: todo.high_priority,
             completed_at: todo.completed_at,
             created_at: todo.created_at,
-            position: item.position ?? index,
+            position: index,
           };
         })
         .filter(Boolean) as ConnectionItem[];
@@ -1153,13 +1155,17 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
     return remoteBuildConnection(fromConnectionId);
   }
 
-  const { data: sourceConnection, error: sourceConnectionError } = await supabase
+  const { data: connectionRows, error: connectionRowsError } = await supabase
     .from("connections")
-    .select("kind")
-    .eq("id", fromConnectionId)
-    .maybeSingle();
-  if (sourceConnectionError) throw sourceConnectionError;
-  if (!sourceConnection) throw new Error("Source connection not found.");
+    .select("id,kind,created_at")
+    .in("id", [fromConnectionId, toConnectionId]);
+  if (connectionRowsError) throw connectionRowsError;
+
+  const sourceConnection = (connectionRows ?? []).find((row) => row.id === fromConnectionId);
+  const targetConnection = (connectionRows ?? []).find((row) => row.id === toConnectionId);
+  if (!sourceConnection || !targetConnection) {
+    throw new Error("One of the connections was not found.");
+  }
 
   const { data: sourceItems, error: sourceItemsError } = await supabase
     .from("connection_items")
@@ -1175,35 +1181,59 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
     .order("position", { ascending: true });
   if (targetItemsError) throw targetItemsError;
 
+  const mergeInputs = [
+    {
+      id: sourceConnection.id,
+      kind: sourceConnection.kind as ConnectionKind,
+      created_at: sourceConnection.created_at as string,
+      anchorTodoId: fromTodoId,
+      todoIds: (sourceItems ?? []).map((item) => item.todo_id as string),
+    },
+    {
+      id: targetConnection.id,
+      kind: targetConnection.kind as ConnectionKind,
+      created_at: targetConnection.created_at as string,
+      anchorTodoId: toTodoId,
+      todoIds: (targetItems ?? []).map((item) => item.todo_id as string),
+    },
+  ].sort((a, b) => {
+    const createdAtCompare = a.created_at.localeCompare(b.created_at);
+    if (createdAtCompare !== 0) return createdAtCompare;
+    return a.id.localeCompare(b.id);
+  });
+
+  const primary = mergeInputs[0]!;
+  const secondary = mergeInputs[1]!;
+
   const allTodoIds = buildMergedTodoIds(
-    (sourceItems ?? []).map((item) => item.todo_id as string),
-    (targetItems ?? []).map((item) => item.todo_id as string),
-    fromTodoId,
-    toTodoId,
-    sourceConnection.kind as ConnectionKind
+    primary.todoIds,
+    secondary.todoIds,
+    primary.anchorTodoId,
+    secondary.anchorTodoId,
+    primary.kind
   );
 
-  await supabase.from("connection_items").delete().eq("connection_id", fromConnectionId);
-  await supabase.from("connection_items").delete().eq("connection_id", toConnectionId);
+  await supabase.from("connection_items").delete().eq("connection_id", primary.id);
+  await supabase.from("connection_items").delete().eq("connection_id", secondary.id);
   await supabase
     .from("connections")
     .update({ deleted_at: nowIso(), updated_at: nowIso() })
-    .eq("id", toConnectionId);
+    .eq("id", secondary.id);
 
   const rows: ConnectionItemRow[] = allTodoIds.map((todoId, index) => ({
     id: crypto.randomUUID(),
-    connection_id: fromConnectionId,
+    connection_id: primary.id,
     todo_id: todoId,
     position: index,
     created_at: nowIso(),
   }));
   const { error: insertError } = await supabase.from("connection_items").insert(rows);
   if (insertError) throw insertError;
-  await writeRemoteActivity("connection", fromConnectionId, "merged", "Merged two connections.", {
+  await writeRemoteActivity("connection", primary.id, "merged", "Merged two connections.", {
     fromTodoId,
     toTodoId,
   });
-  return remoteBuildConnection(fromConnectionId);
+  return remoteBuildConnection(primary.id);
 }
 
 async function cutConnectionRemote(connectionId: string, fromTodoId: string, toTodoId: string) {
@@ -2178,20 +2208,13 @@ export const syncedConnectionsApi = {
   merge: async (fromTodoId: string, toTodoId: string) =>
     withOfflineFallback(
       async () => {
-        const connection = await mergeConnectionsRemote(fromTodoId, toTodoId);
-        const snapshot = await getSnapshot();
-        const fromConnection = snapshot.connections.find((item) =>
-          item.items.some((connectionItem) => connectionItem.todo_id === fromTodoId)
+        await mergeConnectionsRemote(fromTodoId, toTodoId);
+        // Refresh entire snapshot from Supabase to ensure all connections are rebuilt with correct ordering
+        await fetchRemoteSnapshot();
+        const connection = (await getSnapshot()).connections.find(
+          (c) => c.items.some((item) => item.todo_id === fromTodoId) && c.items.some((item) => item.todo_id === toTodoId)
         );
-        const toConnection = snapshot.connections.find((item) =>
-          item.items.some((connectionItem) => connectionItem.todo_id === toTodoId)
-        );
-        if (!fromConnection || !toConnection) return connection;
-        await mutateSnapshot((draft) => {
-          draft.connections = draft.connections
-            .filter((item) => item.id !== toConnection.id)
-            .map((item) => (item.id === fromConnection.id ? connection : item));
-        });
+        if (!connection) throw new Error("Merged connection not found after refresh.");
         return connection;
       },
       async () => {
@@ -2221,15 +2244,35 @@ export const syncedConnectionsApi = {
         }
         if (fromConnection.id === toConnection.id) return fromConnection;
 
+        const mergeInputs = [
+          {
+            connection: fromConnection,
+            anchorTodoId: fromTodoId,
+            todoIds: fromConnection.items.map((item) => item.todo_id),
+          },
+          {
+            connection: toConnection,
+            anchorTodoId: toTodoId,
+            todoIds: toConnection.items.map((item) => item.todo_id),
+          },
+        ].sort((a, b) => {
+          const createdAtCompare = a.connection.created_at.localeCompare(b.connection.created_at);
+          if (createdAtCompare !== 0) return createdAtCompare;
+          return a.connection.id.localeCompare(b.connection.id);
+        });
+
+        const primary = mergeInputs[0]!;
+        const secondary = mergeInputs[1]!;
+
         const mergedTodoIds = buildMergedTodoIds(
-          fromConnection.items.map((item) => item.todo_id),
-          toConnection.items.map((item) => item.todo_id),
-          fromTodoId,
-          toTodoId,
-          fromConnection.kind
+          primary.todoIds,
+          secondary.todoIds,
+          primary.anchorTodoId,
+          secondary.anchorTodoId,
+          primary.connection.kind
         );
 
-        const connectionItems = [...fromConnection.items, ...toConnection.items];
+        const connectionItems = [...primary.connection.items, ...secondary.connection.items];
         const mergedItems = mergedTodoIds.map((todoId, index) => {
           const item = connectionItems.find((connectionItem) => connectionItem.todo_id === todoId);
           if (!item) {
@@ -2242,14 +2285,14 @@ export const syncedConnectionsApi = {
         });
 
         const merged = {
-          ...fromConnection,
+          ...primary.connection,
           items: mergedItems,
-          progress: buildConnectionProgress(fromConnection.kind, mergedItems),
+          progress: buildConnectionProgress(primary.connection.kind, mergedItems),
         };
         await mutateSnapshot((draft) => {
           draft.connections = draft.connections
-            .filter((connection) => connection.id !== toConnection.id)
-            .map((connection) => (connection.id === fromConnection.id ? merged : connection));
+            .filter((connection) => connection.id !== secondary.connection.id)
+            .map((connection) => (connection.id === primary.connection.id ? merged : connection));
         });
         await queueOperation({
           kind: "connection.merge",

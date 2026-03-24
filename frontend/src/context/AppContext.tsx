@@ -1,6 +1,5 @@
 import {
   createContext,
-  useContext,
   useState,
   useEffect,
   useCallback,
@@ -106,7 +105,7 @@ interface AppContextType extends AppState {
   clearLocalDeviceAuth: () => void;
 }
 
-const AppContext = createContext<AppContextType | null>(null);
+export const AppContext = createContext<AppContextType | null>(null);
 const REMINDER_ACK_KEY = "nodes-todo-reminder-ack";
 const APP_SETTINGS_KEY = "nodes-todo-settings";
 const DEFAULT_SHORTCUT_BINDINGS: AppSettings["shortcutBindings"] = {
@@ -1175,10 +1174,4 @@ export function AppProvider({ children }: { children: ReactNode }) {
       {children}
     </AppContext.Provider>
   );
-}
-
-export function useApp() {
-  const ctx = useContext(AppContext);
-  if (!ctx) throw new Error("useApp must be used within AppProvider");
-  return ctx;
 }

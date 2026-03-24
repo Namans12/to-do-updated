@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import { useTheme } from "../context/ThemeContext";
 import { groupsApi } from "../api/client";
 import {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlarmClock, Bell, CalendarDays, Clock3, FolderOpen, Milestone } from "lucide-react";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import EmptyState from "./EmptyState";
 
 type ReminderBucketKey = "overdue" | "today" | "upcoming";

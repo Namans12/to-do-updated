@@ -1,4 +1,4 @@
-import { useApp } from "./context/AppContext";
+import { useApp } from "./context/useApp";
 import AuthScreen from "./components/AuthScreen";
 import PasscodeLockScreen from "./components/PasscodeLockScreen";
 import { Keyboard, Menu } from "lucide-react";

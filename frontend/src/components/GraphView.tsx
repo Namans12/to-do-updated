@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type PointerEvent as ReactPointerEvent } from "react";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 import { todosApi, connectionsApi } from "../api/client";
 import type { Connection, Todo, ConnectionKind, GraphLayoutMode } from "../types";
 import {
@@ -7,6 +7,8 @@ import {
   FolderOpen,
   Check,
   Zap,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import GraphToolbar from "./graph/GraphToolbar";
@@ -77,11 +79,8 @@ const ZOOM_STEP = 0.1;
 const CUT_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f43f5e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cpath d='M20 4 8.12 15.88'/%3E%3Cpath d='M14.47 14.48 20 20'/%3E%3Cpath d='M8.12 8.12 12 12'/%3E%3C/svg%3E\") 6 6, crosshair";
 
-const NODE_MAX_H = 120;
-const TITLE_MAX_LINES = 2;
-const DESCRIPTION_MAX_LINES = 3;
-const TITLE_CHARS_PER_LINE = 18;
-const DESCRIPTION_CHARS_PER_LINE = 24;
+const TITLE_CHARS_PER_LINE = 16;
+const DESCRIPTION_CHARS_PER_LINE = 22;
 
 const estimateWrappedLines = (value: string, charsPerLine: number) => {
   if (!value) return 0;
@@ -95,17 +94,24 @@ const estimateWrappedLines = (value: string, charsPerLine: number) => {
     .reduce((sum, lines) => sum + lines, 0);
 };
 
-const getTodoNodeHeight = (todo?: Pick<Todo, "title" | "description"> | null) => {
+const getTodoNodeHeight = (
+  todo?: Pick<Todo, "title" | "description"> | null,
+  options?: { isExpanded?: boolean; isNext?: boolean }
+) => {
   if (!todo) return NODE_H;
-  const titleLines = Math.min(
-    TITLE_MAX_LINES,
-    Math.max(1, estimateWrappedLines((todo.title ?? "").trim(), TITLE_CHARS_PER_LINE))
-  );
-  const descriptionLines = todo.description
-    ? Math.min(DESCRIPTION_MAX_LINES, estimateWrappedLines(todo.description.trim(), DESCRIPTION_CHARS_PER_LINE))
-    : 0;
-  const computed = 36 + titleLines * 14 + descriptionLines * 11;
-  return Math.max(NODE_H, Math.min(NODE_MAX_H, computed));
+  const TITLE_LINE_HEIGHT = 16;
+  const DESCRIPTION_LINE_HEIGHT = 14;
+  const HEADER_BASE_HEIGHT = 40;
+  const NEXT_ROW_HEIGHT = options?.isNext ? 20 : 0;
+  const titleLines = Math.max(1, estimateWrappedLines((todo.title ?? "").trim(), TITLE_CHARS_PER_LINE));
+  const hasDescription = Boolean(todo.description?.trim());
+  const descriptionLines =
+    hasDescription && options?.isExpanded
+      ? estimateWrappedLines(todo.description!.trim(), DESCRIPTION_CHARS_PER_LINE)
+      : 0;
+  const descriptionHeight = descriptionLines > 0 ? 28 + descriptionLines * DESCRIPTION_LINE_HEIGHT : 0;
+  const computed = HEADER_BASE_HEIGHT + titleLines * TITLE_LINE_HEIGHT + NEXT_ROW_HEIGHT + descriptionHeight;
+  return Math.max(NODE_H, computed);
 };
 
 const snapGrid = (v: number, max: number, min = 0) =>
@@ -465,6 +471,7 @@ export default function GraphView() {
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
   const [selectedConnectionEdge, setSelectedConnectionEdge] = useState<SelectedConnectionEdge | null>(null);
   const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
+  const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(() => new Set());
   const [draftConnectionName, setDraftConnectionName] = useState("");
   const [draftConnectionKind, setDraftConnectionKind] = useState<ConnectionKind>("sequence");
   const [draftTodoTitle, setDraftTodoTitle] = useState("");
@@ -480,6 +487,9 @@ export default function GraphView() {
   const dragStartPositionRef = useRef<NodePosition | null>(null);
   const graphCreateLockRef = useRef<string | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
+  const previousNodeHeightsRef = useRef<Map<string, number> | null>(null);
+  const previousConnectedAdjacentsRef = useRef<Map<string, AdjPair>>(new Map());
+  const previousPositionsRef = useRef<Record<string, NodePosition>>({});
   const [canvasSize, setCanvasSize] = useState({
     w: BASE_CANVAS_W + NORMAL_VIEW_EXTRA_W,
     h: BASE_CANVAS_H + NORMAL_VIEW_EXTRA_H,
@@ -494,13 +504,30 @@ export default function GraphView() {
     });
     return [...map.values()];
   }, []);
+  const todoIdSet = useMemo(() => new Set(todos.map((todo) => todo.id)), [todos]);
+  const nextAvailableTodoIds = useMemo(() => {
+    const ids = new Set<string>();
+    connections.forEach((connection) => {
+      const nextId = connection.progress.next_available_item_id;
+      if (nextId && todoIdSet.has(nextId)) {
+        ids.add(nextId);
+      }
+    });
+    return ids;
+  }, [connections, todoIdSet]);
   const nodeHeightById = useMemo(() => {
     const map = new Map<string, number>();
     todos.forEach((todo) => {
-      map.set(todo.id, getTodoNodeHeight(todo));
+      map.set(
+        todo.id,
+        getTodoNodeHeight(todo, {
+          isExpanded: expandedDescriptionIds.has(todo.id),
+          isNext: todo.is_completed !== 1 && nextAvailableTodoIds.has(todo.id),
+        })
+      );
     });
     return map;
-  }, [todos]);
+  }, [expandedDescriptionIds, nextAvailableTodoIds, todos]);
   const getNodeHeightForId = useCallback(
     (todoId: string) => nodeHeightById.get(todoId) ?? NODE_H,
     [nodeHeightById]
@@ -539,6 +566,18 @@ export default function GraphView() {
       setSelectedConnectionEdge(null);
     }
   }, [selectedConnectionId]);
+  useEffect(() => {
+    setExpandedDescriptionIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        const todo = todos.find((item) => item.id === id);
+        if (todo?.description?.trim()) {
+          next.add(id);
+        }
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [todos]);
 
   /* ── Load todos ─────────────────────────────────── */
 
@@ -648,20 +687,25 @@ export default function GraphView() {
 
   const groupConnections = useMemo(() => {
     const ids = new Set(todos.map((t) => t.id));
-    return connections.filter((c) => c.items.some((i) => ids.has(i.todo_id)));
+    return connections
+      .filter((c) => c.items.some((i) => ids.has(i.todo_id)))
+      .map((connection) => {
+        const sortedItems = connection.items
+          .slice()
+          .sort((a, b) => (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER))
+          .map((item, index) => ({
+            ...item,
+            position: index,
+          }));
+        return {
+          ...connection,
+          items: sortedItems,
+        };
+      });
   }, [connections, todos]);
   const selectedConnection =
     groupConnections.find((conn) => conn.id === selectedConnectionId) ?? null;
   const selectedTodo = todos.find((todo) => todo.id === selectedTodoId) ?? null;
-  const nextAvailableTodoIds = useMemo(() => {
-    const ids = new Set<string>();
-    groupConnections.forEach((conn) => {
-      if (conn.progress.next_available_item_id) {
-        ids.add(conn.progress.next_available_item_id);
-      }
-    });
-    return ids;
-  }, [groupConnections]);
 
   useEffect(() => {
     if (!selectedConnection) {
@@ -724,6 +768,175 @@ export default function GraphView() {
 
     return pairs;
   }, [getNodeHeightForId, groupEdges, positions]);
+  useEffect(() => {
+    const previousHeights = previousNodeHeightsRef.current;
+    const previousAdjacents = previousConnectedAdjacentsRef.current;
+    const previousPositions = previousPositionsRef.current;
+
+    if (!previousHeights || draggingNode || previousAdjacents.size === 0) {
+      return;
+    }
+
+    let hasHeightChange = false;
+    for (const todo of todos) {
+      if ((previousHeights.get(todo.id) ?? NODE_H) !== getNodeHeightForId(todo.id)) {
+        hasHeightChange = true;
+        break;
+      }
+    }
+    if (!hasHeightChange) {
+      return;
+    }
+
+    const next = { ...positions };
+    let changed = false;
+
+    const verticalPairs = [...previousAdjacents.values()]
+      .filter((pair) => pair.axis === "y")
+      .sort((first, second) => {
+        const firstTop = Math.min(previousPositions[first.a]?.y ?? 0, previousPositions[first.b]?.y ?? 0);
+        const secondTop = Math.min(previousPositions[second.a]?.y ?? 0, previousPositions[second.b]?.y ?? 0);
+        return firstTop - secondTop;
+      });
+
+    for (const pair of verticalPairs) {
+      const prevA = previousPositions[pair.a];
+      const prevB = previousPositions[pair.b];
+      const currentA = next[pair.a];
+      const currentB = next[pair.b];
+      if (!prevA || !prevB || !currentA || !currentB) continue;
+
+      const topId = prevA.y <= prevB.y ? pair.a : pair.b;
+      const bottomId = topId === pair.a ? pair.b : pair.a;
+      const top = next[topId];
+      const bottom = next[bottomId];
+      if (!top || !bottom) continue;
+
+      const prevTop = previousPositions[topId];
+      const prevBottom = previousPositions[bottomId];
+      if (!prevTop || !prevBottom) continue;
+
+      const preservedXOffset = prevBottom.x - prevTop.x;
+      const desiredBottomY = top.y + getNodeHeightForId(topId);
+      const desiredBottomX = top.x + preservedXOffset;
+
+      if (Math.abs(bottom.y - desiredBottomY) > 0.5) {
+        next[bottomId] = { ...bottom, y: desiredBottomY };
+        changed = true;
+      }
+
+      const alignedBottom = next[bottomId]!;
+      if (Math.abs(alignedBottom.x - desiredBottomX) > 0.5) {
+        next[bottomId] = { ...alignedBottom, x: desiredBottomX };
+        changed = true;
+      }
+    }
+
+    const horizontalPairs = [...previousAdjacents.values()]
+      .filter((pair) => pair.axis === "x")
+      .sort((first, second) => {
+        const firstLeft = Math.min(previousPositions[first.a]?.x ?? 0, previousPositions[first.b]?.x ?? 0);
+        const secondLeft = Math.min(previousPositions[second.a]?.x ?? 0, previousPositions[second.b]?.x ?? 0);
+        return firstLeft - secondLeft;
+      });
+
+    for (const pair of horizontalPairs) {
+      const prevA = previousPositions[pair.a];
+      const prevB = previousPositions[pair.b];
+      const currentA = next[pair.a];
+      const currentB = next[pair.b];
+      if (!prevA || !prevB || !currentA || !currentB) continue;
+
+      const leftId = prevA.x <= prevB.x ? pair.a : pair.b;
+      const rightId = leftId === pair.a ? pair.b : pair.a;
+      const left = next[leftId];
+      const right = next[rightId];
+      if (!left || !right) continue;
+
+      const prevLeft = previousPositions[leftId];
+      const prevRight = previousPositions[rightId];
+      if (!prevLeft || !prevRight) continue;
+
+      const preservedYOffset = prevRight.y - prevLeft.y;
+      const desiredRightX = left.x + NODE_W;
+      const desiredRightY = left.y + preservedYOffset;
+
+      if (Math.abs(right.x - desiredRightX) > 0.5) {
+        next[rightId] = { ...right, x: desiredRightX };
+        changed = true;
+      }
+
+      const alignedRight = next[rightId]!;
+      if (Math.abs(alignedRight.y - desiredRightY) > 0.5) {
+        next[rightId] = { ...alignedRight, y: desiredRightY };
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    setPositions(next);
+    savePositions(next);
+  }, [draggingNode, getNodeHeightForId, positions, savePositions, todos]);
+  useEffect(() => {
+    if (draggingNode || connectedAdjacents.size === 0) return;
+
+    const next = { ...positions };
+    let changed = false;
+
+    for (const [, pair] of connectedAdjacents.entries()) {
+      const a = next[pair.a];
+      const b = next[pair.b];
+      if (!a || !b) continue;
+
+      if (pair.axis === "y") {
+        const topId = a.y <= b.y ? pair.a : pair.b;
+        const bottomId = topId === pair.a ? pair.b : pair.a;
+        const top = next[topId]!;
+        const bottom = next[bottomId]!;
+        const desiredBottomY = top.y + getNodeHeightForId(topId);
+
+        if (Math.abs(bottom.y - desiredBottomY) <= SNAP_PX && Math.abs(bottom.y - desiredBottomY) > 0.5) {
+          next[bottomId] = { ...bottom, y: desiredBottomY };
+          changed = true;
+        }
+
+        const alignedBottom = next[bottomId]!;
+        if (Math.abs(alignedBottom.x - top.x) <= SNAP_PX && Math.abs(alignedBottom.x - top.x) > 0.5) {
+          next[bottomId] = { ...alignedBottom, x: top.x };
+          changed = true;
+        }
+      } else {
+        const leftId = a.x <= b.x ? pair.a : pair.b;
+        const rightId = leftId === pair.a ? pair.b : pair.a;
+        const left = next[leftId]!;
+        const right = next[rightId]!;
+        const desiredRightX = left.x + NODE_W;
+
+        if (Math.abs(right.x - desiredRightX) <= SNAP_PX && Math.abs(right.x - desiredRightX) > 0.5) {
+          next[rightId] = { ...right, x: desiredRightX };
+          changed = true;
+        }
+
+        const alignedRight = next[rightId]!;
+        if (Math.abs(alignedRight.y - left.y) <= SNAP_PX && Math.abs(alignedRight.y - left.y) > 0.5) {
+          next[rightId] = { ...alignedRight, y: left.y };
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) return;
+    setPositions(next);
+    savePositions(next);
+  }, [connectedAdjacents, draggingNode, getNodeHeightForId, positions, savePositions]);
+  useEffect(() => {
+    previousNodeHeightsRef.current = new Map(nodeHeightById);
+    previousConnectedAdjacentsRef.current = new Map(connectedAdjacents);
+    previousPositionsRef.current = { ...positions };
+  }, [connectedAdjacents, nodeHeightById, positions]);
 
   const fusedGraph = useMemo(() => {
     const graph = new Map<string, Set<string>>();
@@ -1823,6 +2036,17 @@ export default function GraphView() {
     setSelectedConnectionId(null);
     setSelectedTodoId(todoId);
   }, []);
+  const toggleDescription = useCallback((todoId: string) => {
+    setExpandedDescriptionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(todoId)) {
+        next.delete(todoId);
+      } else {
+        next.add(todoId);
+      }
+      return next;
+    });
+  }, []);
 
   const handleDeleteSelectedConnection = async () => {
     if (!selectedConnection) return;
@@ -2363,7 +2587,45 @@ export default function GraphView() {
                 if (!item || !next) return null;
                 const edgeKey = edge.key;
                 const adjKey = canonicalPairKey(edge.fromId, edge.toId);
-                if (connectedAdjacents.has(adjKey)) return null; // Skip adjacent nodes here
+                if (connectedAdjacents.has(adjKey)) {
+                  const touch = getClosestOppositePortsAt(
+                    positions,
+                    edge.fromId,
+                    edge.toId,
+                    Number.POSITIVE_INFINITY,
+                    getNodeHeightForId
+                  );
+                  if (!touch) return null;
+
+                  const itemDone = item.is_completed === 1;
+                  const nextDone = next.is_completed === 1;
+                  const bothDone = itemDone && nextDone;
+                  const edgeMeta = connectionKindMeta[conn.kind];
+                  const edgeSolid = bothDone ? "rgb(16,185,129)" : edgeMeta.graphStroke;
+                  const path = `M ${touch.from.x} ${touch.from.y} L ${touch.to.x} ${touch.to.y}`;
+
+                  return (
+                    <g key={`${conn.id}-${item.id}-adj-line`}>
+                      <path
+                        d={path}
+                        fill="none"
+                        strokeWidth={5}
+                        strokeOpacity={0.14}
+                        strokeLinecap="round"
+                        stroke={edgeMeta.graphGlow}
+                      />
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke={edgeSolid}
+                        strokeWidth={3}
+                        strokeOpacity={1}
+                        strokeLinecap="round"
+                        strokeDasharray={!bothDone ? edgeMeta.dashArray : undefined}
+                      />
+                    </g>
+                  );
+                }
                 
                 const ports = edgePortMap.get(edgeKey);
                 if (!ports) return null;
@@ -2781,6 +3043,8 @@ export default function GraphView() {
                 sharedAdjacentPorts.hidden.has(`${todo.id}:${side}`);
 
               const isNext = nextAvailableTodoIds.has(todo.id);
+              const hasDescription = Boolean(todo.description?.trim());
+              const isExpanded = hasDescription && expandedDescriptionIds.has(todo.id);
 
               const isConnected = conns > 0;
               const badgeNumber = isCompleted
@@ -2788,6 +3052,8 @@ export default function GraphView() {
                 : connectionOrder[todo.id] ?? 1;
               const nodeLayer = isDragging
                 ? 80
+                : isExpanded
+                ? 70
                 : hidePort("right") || hidePort("bottom")
                 ? 40
                 : hidePort("left") || hidePort("top")
@@ -2805,7 +3071,7 @@ export default function GraphView() {
                     width: NODE_W,
                     height: nodeHeight,
                     zIndex: nodeLayer,
-                    transition: isDragging ? "none" : "box-shadow 0.14s ease-out",
+                    transition: isDragging ? "none" : "height 0.16s ease-out, box-shadow 0.14s ease-out",
                   }}
                 >
                   {/* Glow ring when targeted */}
@@ -2854,54 +3120,85 @@ export default function GraphView() {
                     }`}
                   >
                     {/* Drag handle + toggle */}
-                    <div
-                      onPointerDown={(e) => onNodeDown(e, todo.id)}
-                      className="flex items-center gap-2 rounded-t-[10px] px-3 py-2.5 cursor-grab active:cursor-grabbing touch-none transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40"
-                    >
-                      <button
-                        onPointerDown={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                        }}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleToggle(todo.id);
-                        }}
-                        className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors duration-150 ${
-                          isCompleted
-                            ? "bg-emerald-500 border-emerald-500 text-white"
-                            : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
+                    <div className="flex flex-col h-full">
+                      <div
+                        onPointerDown={(e) => onNodeDown(e, todo.id)}
+                        className={`flex gap-2 px-3 py-2.5 cursor-grab active:cursor-grabbing touch-none transition-colors ${
+                          isExpanded
+                            ? "items-start rounded-t-[10px] hover:bg-slate-50 dark:hover:bg-slate-700/40"
+                            : "h-full items-center rounded-[10px]"
                         }`}
-                        title="Toggle completion"
                       >
-                        {isCompleted && <Check size={9} strokeWidth={3} />}
-                      </button>
-                      <div className="flex-1 min-w-0">
-                        <p
-                          className={`text-[13px] font-medium leading-tight line-clamp-2 break-words ${
+                        <button
+                          onPointerDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleToggle(todo.id);
+                          }}
+                          className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors duration-150 ${
                             isCompleted
-                              ? "line-through text-slate-400 dark:text-slate-500"
-                              : "text-slate-800 dark:text-slate-100"
+                              ? "bg-emerald-500 border-emerald-500 text-white"
+                              : "border-slate-300 dark:border-slate-600 hover:border-indigo-400"
                           }`}
+                          title="Toggle completion"
                         >
-                          {todo.title}
-                        </p>
-                        {todo.description && (
-                          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5 leading-tight whitespace-pre-line line-clamp-3 break-words">
-                            {todo.description}
+                          {isCompleted && <Check size={9} strokeWidth={3} />}
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={`text-[13px] font-medium leading-tight whitespace-pre-wrap break-words ${
+                              isCompleted
+                                ? "line-through text-slate-400 dark:text-slate-500"
+                                : "text-slate-800 dark:text-slate-100"
+                            }`}
+                          >
+                            {todo.title}
                           </p>
-                        )}
-                      </div>
-                      {isCompleted && (
-                        <div className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center flex-shrink-0 shadow-sm shadow-emerald-500/30">
-                          <Check size={9} strokeWidth={3} className="text-white" />
+                          {isNext && !isCompleted && (
+                            <span className="mt-1 inline-flex items-center gap-0.5 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[9px] font-bold text-indigo-600 dark:text-indigo-400 animate-pulse">
+                              <Zap size={8} /> NEXT
+                            </span>
+                          )}
                         </div>
-                      )}
-                      {isNext && !isCompleted && (
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-[9px] font-bold text-indigo-600 dark:text-indigo-400 flex-shrink-0 animate-pulse">
-                          <Zap size={8} /> NEXT
-                        </span>
+                        <div className="flex flex-col items-end gap-1 self-start">
+                          {isCompleted && (
+                            <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/30">
+                              <Check size={9} strokeWidth={3} className="text-white" />
+                            </div>
+                          )}
+                          {hasDescription && (
+                            <button
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                              }}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleDescription(todo.id);
+                              }}
+                              className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-slate-200 bg-white/80 text-slate-500 transition-colors hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-600 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400"
+                              title={isExpanded ? "Hide description" : "Show description"}
+                            >
+                              {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {isExpanded && hasDescription && (
+                        <div className="px-3 pb-3 pt-0">
+                          <div className="border-t border-slate-200/70 pl-6 pr-8 pt-3 dark:border-slate-700/70">
+                            <p className="text-[10px] leading-[1.35] whitespace-pre-line break-words text-slate-500 dark:text-slate-400">
+                              {todo.description}
+                            </p>
+                          </div>
+                        </div>
                       )}
                     </div>
 

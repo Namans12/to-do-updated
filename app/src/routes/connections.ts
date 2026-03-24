@@ -581,20 +581,46 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         return c.json({ error: "Cannot merge empty connections" }, 400);
       }
 
-      const orientFrom = () => {
-        if (fromIds[fromIds.length - 1] === fromTodoId) return fromIds;
-        if (fromIds[0] === fromTodoId) return [...fromIds].reverse();
+      const mergeInputs = [
+        {
+          id: fromConnection.id,
+          kind: fromConnection.kind,
+          created_at: fromConnection.created_at,
+          anchorTodoId: fromTodoId,
+          todoIds: fromIds,
+        },
+        {
+          id: toConnection.id,
+          kind: toConnection.kind,
+          created_at: toConnection.created_at,
+          anchorTodoId: toTodoId,
+          todoIds: toIds,
+        },
+      ].sort((a, b) => {
+        const createdAtCompare = a.created_at.localeCompare(b.created_at);
+        if (createdAtCompare !== 0) return createdAtCompare;
+        return a.id.localeCompare(b.id);
+      });
+
+      const primary = mergeInputs[0]!;
+      const secondary = mergeInputs[1]!;
+
+      const orientPrimary = () => {
+        if (primary.todoIds[primary.todoIds.length - 1] === primary.anchorTodoId) return primary.todoIds;
+        if (primary.todoIds[0] === primary.anchorTodoId) return [...primary.todoIds].reverse();
         return null;
       };
-      const orientTo = () => {
-        if (toIds[0] === toTodoId) return toIds;
-        if (toIds[toIds.length - 1] === toTodoId) return [...toIds].reverse();
+      const orientSecondary = () => {
+        if (secondary.todoIds[0] === secondary.anchorTodoId) return secondary.todoIds;
+        if (secondary.todoIds[secondary.todoIds.length - 1] === secondary.anchorTodoId) {
+          return [...secondary.todoIds].reverse();
+        }
         return null;
       };
 
-      const fromChain = orientFrom();
-      const toChain = orientTo();
-      if (!fromChain || !toChain) {
+      const primaryChain = orientPrimary();
+      const secondaryChain = orientSecondary();
+      if (!primaryChain || !secondaryChain) {
         return c.json(
           {
             error:
@@ -604,19 +630,19 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
 
-      const overlap = fromChain.some((id) => toChain.includes(id));
+      const overlap = primaryChain.some((id) => secondaryChain.includes(id));
       if (overlap) {
         return c.json({ error: "Cannot merge connections that share todos" }, 400);
       }
 
-      const mergedTodoIds = [...fromChain, ...toChain];
+      const mergedTodoIds = [...primaryChain, ...secondaryChain];
       if (mergedTodoIds.length > 7) {
         return c.json(
           { error: "Merged connection exceeds max depth of 7 items" },
           400
         );
       }
-      const mergedKind = fromConnection.kind;
+      const mergedKind = primary.kind;
       if (mergedKind === "branch" && mergedTodoIds.length > 3) {
         return c.json(
           { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
@@ -633,8 +659,8 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           .delete(connectionItems)
           .where(
             inArray(connectionItems.connection_id, [
-              fromConnectionId,
-              toConnectionId,
+              primary.id,
+              secondary.id,
             ])
           )
           .run();
@@ -644,7 +670,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
             .insert(connectionItems)
             .values({
               id: uuidv4(),
-              connection_id: fromConnectionId,
+              connection_id: primary.id,
               todo_id: mergedTodoIds[i]!,
               position: i,
             })
@@ -653,7 +679,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
         drizzleDb
           .delete(connections)
-          .where(eq(connections.id, toConnectionId))
+          .where(eq(connections.id, secondary.id))
           .run();
       });
       transaction();
@@ -661,18 +687,18 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       const updated = drizzleDb
         .select()
         .from(connections)
-        .where(eq(connections.id, fromConnectionId))
+        .where(eq(connections.id, primary.id))
         .get()!;
-      const updatedItems = getConnectionItems(drizzleDb, fromConnectionId);
+      const updatedItems = getConnectionItems(drizzleDb, primary.id);
       const response = buildConnectionResponse(updated, updatedItems);
       logActivity(drizzleDb, {
         entity_type: "connection",
-        entity_id: fromConnectionId,
+        entity_id: primary.id,
         action: "merged",
         summary: `Merged two connections into ${updated.name ?? "a shared chain"}`,
         payload: {
           todo_ids: mergedTodoIds,
-          merged_connection_id: toConnectionId,
+          merged_connection_id: secondary.id,
         },
       });
 

@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Cloud, LockKeyhole, Mail, Smartphone } from "lucide-react";
 import toast from "react-hot-toast";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 
 type AuthMode = "signin" | "signup";
 

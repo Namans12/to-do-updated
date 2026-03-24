@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Fingerprint, LockKeyhole } from "lucide-react";
 import toast from "react-hot-toast";
-import { useApp } from "../context/AppContext";
+import { useApp } from "../context/useApp";
 
 export default function PasscodeLockScreen() {
   const { unlockWithPasscode, unlockWithDeviceAuth, deviceAuthAvailable, deviceAuthConfigured } =
