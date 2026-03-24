@@ -47,6 +47,7 @@ export function runMigrations(dbPath?: string): void {
       id TEXT PRIMARY KEY,
       connection_id TEXT NOT NULL REFERENCES connections(id),
       todo_id TEXT NOT NULL REFERENCES todos(id),
+      parent_todo_id TEXT,
       position INTEGER NOT NULL DEFAULT 0
     );
 
@@ -89,6 +90,10 @@ export function runMigrations(dbPath?: string): void {
   const connectionColumns = sqlite.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
   if (!connectionColumns.some((col) => col.name === "kind")) {
     sqlite.exec("ALTER TABLE connections ADD COLUMN kind TEXT NOT NULL DEFAULT 'sequence'");
+  }
+  const connectionItemColumns = sqlite.prepare("PRAGMA table_info(connection_items)").all() as { name: string }[];
+  if (!connectionItemColumns.some((col) => col.name === "parent_todo_id")) {
+    sqlite.exec("ALTER TABLE connection_items ADD COLUMN parent_todo_id TEXT");
   }
 
   // Normalize legacy connection memberships so one todo can belong to only one connection.

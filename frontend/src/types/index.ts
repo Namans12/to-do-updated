@@ -59,6 +59,7 @@ export interface TrashPayload {
 export interface ConnectionItem {
   id: string;
   todo_id: string;
+  parent_todo_id: string | null;
   title: string;
   is_completed: number;
   high_priority: number;
@@ -142,6 +143,7 @@ export interface SyncPackage {
       id: string;
       connection_id: string;
       todo_id: string;
+      parent_todo_id: string | null;
       position: number;
     }>;
     activity_logs: ActivityLog[];

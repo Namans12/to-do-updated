@@ -21,7 +21,13 @@ import toast from "react-hot-toast";
 import EmptyState from "./EmptyState";
 import { getActionErrorMessage } from "../utils/errors";
 import type { ConnectionKind } from "../types";
-import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
+import {
+  connectionKindMeta,
+  getBranchDepthByTodoId,
+  getBranchItemsPreorder,
+  getConnectionNextItem,
+  getConnectionSequenceLabel,
+} from "../utils/connectionKinds";
 import { PROGRESS_BAR_WIDTH_TRANSITION_MS, REORDER_LAYOUT_TRANSITION } from "../utils/motion";
 
 export default function ConnectionView() {
@@ -201,6 +207,14 @@ function ConnectionCard({
     connection.items.forEach((item) => map.set(item.todo_id, item));
     return map;
   }, [connection.items]);
+  const orderedItems = useMemo(
+    () => (connection.kind === "branch" ? getBranchItemsPreorder(connection) : connection.items),
+    [connection]
+  );
+  const branchDepths = useMemo(
+    () => (connection.kind === "branch" ? getBranchDepthByTodoId(connection) : new Map<string, number>()),
+    [connection]
+  );
 
   useEffect(() => {
     reorderItemsRef.current = reorderItems;
@@ -209,15 +223,15 @@ function ConnectionCard({
   useEffect(() => {
     if (!reorderMode) return;
     if (dragId) return;
-    const next = connection.items.map((item) => item.todo_id);
+    const next = orderedItems.map((item) => item.todo_id);
     setReorderItems(next);
     reorderItemsRef.current = next;
-  }, [reorderMode, connection.items, dragId]);
+  }, [reorderMode, orderedItems, dragId]);
 
   const reorderList =
     reorderMode && reorderItems.length > 0
       ? reorderItems
-      : connection.items.map((item) => item.todo_id);
+      : orderedItems.map((item) => item.todo_id);
 
   // Find the first incomplete task (the "next" one)
   const nextTask = getConnectionNextItem(connection);
@@ -236,7 +250,7 @@ function ConnectionCard({
   const handleDragStart = (todoId: string) => {
     if (!reorderMode) return;
     if (reorderItemsRef.current.length === 0) {
-      const next = connection.items.map((item) => item.todo_id);
+      const next = orderedItems.map((item) => item.todo_id);
       setReorderItems(next);
       reorderItemsRef.current = next;
     }
@@ -479,6 +493,8 @@ function ConnectionCard({
             const nextItem = nextItemId ? itemByTodoId.get(nextItemId) : undefined;
             const isDone = item.is_completed === 1;
             const isNextDone = nextItem?.is_completed === 1;
+            const depth = branchDepths.get(item.todo_id) ?? 0;
+            const rowIndent = connection.kind === "branch" ? depth * 16 : 0;
 
             if (!reorderMode) {
               return (
@@ -508,7 +524,7 @@ function ConnectionCard({
                       )}
                     </button>
                     {/* Line */}
-                    {index < connection.items.length - 1 && (
+                    {connection.kind !== "branch" && index < reorderList.length - 1 && (
                       <div
                         className={`w-0.5 flex-1 min-h-[28px] transition-all duration-500 ${
                           !isDone && !isNextDone
@@ -533,7 +549,7 @@ function ConnectionCard({
                   </div>
 
                   {/* Item content */}
-                  <div className="flex-1 pb-3">
+                  <div className="flex-1 pb-3" style={{ paddingLeft: rowIndent }}>
                     <div className="flex items-start gap-2">
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
@@ -575,9 +591,9 @@ function ConnectionCard({
                           <FolderOpen size={10} className="text-slate-400 dark:text-slate-500" />
                           <span className="text-[10px] text-slate-400 dark:text-slate-500">
                             {connection.kind === "branch"
-                              ? index === 0
+                              ? depth === 0
                                 ? "Root task"
-                                : `Branch ${index} of ${Math.max(reorderList.length - 1, 1)}`
+                                : `Nested branch at depth ${depth}`
                               : `Step ${index + 1} of ${reorderList.length}`}
                           </span>
                         </div>
@@ -619,7 +635,7 @@ function ConnectionCard({
                     )}
                   </button>
                   {/* Line */}
-                  {index < connection.items.length - 1 && (
+                  {connection.kind !== "branch" && index < reorderList.length - 1 && (
                     <div
                       className={`w-0.5 flex-1 min-h-[28px] transition-all duration-500 ${
                         !isDone && !isNextDone
@@ -644,7 +660,7 @@ function ConnectionCard({
                 </div>
 
                 {/* Item content */}
-                <div className="flex-1 pb-3">
+                <div className="flex-1 pb-3" style={{ paddingLeft: rowIndent }}>
                   <div className="flex items-start gap-2">
                     {reorderMode && (
                       <button
@@ -699,9 +715,9 @@ function ConnectionCard({
                         <FolderOpen size={10} className="text-slate-400 dark:text-slate-500" />
                         <span className="text-[10px] text-slate-400 dark:text-slate-500">
                           {connection.kind === "branch"
-                            ? index === 0
+                            ? depth === 0
                               ? "Root task"
-                              : `Branch ${index} of ${Math.max(reorderList.length - 1, 1)}`
+                              : `Nested branch at depth ${depth}`
                             : `Step ${index + 1} of ${reorderList.length}`}
                         </span>
                       </div>

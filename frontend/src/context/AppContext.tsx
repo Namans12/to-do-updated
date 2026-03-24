@@ -140,6 +140,18 @@ function debugSyncLog(...args: unknown[]) {
   console.info("[nodes-sync][app]", ...args);
 }
 
+function isTransientSyncBootstrapError(error: unknown) {
+  if (error instanceof TypeError) return true;
+  if (error instanceof Error) {
+    return /failed to fetch|network|connection closed|quic/i.test(error.message);
+  }
+  if (typeof error === "object" && error && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    return typeof message === "string" && /failed to fetch|network|connection closed|quic/i.test(message);
+  }
+  return false;
+}
+
 function readReminderAcks(): Record<string, string> {
   try {
     const raw = localStorage.getItem(REMINDER_ACK_KEY);
@@ -485,7 +497,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
             debugSyncLog("bootstrap:done", { reason: request.reason });
           } catch (error) {
             console.error(error);
-            toast.error(getActionErrorMessage("start live sync", error));
+            if (isTransientSyncBootstrapError(error)) {
+              console.warn("Live sync bootstrap failed over to the cached snapshot.", error);
+              await hydrateFromSyncSnapshot().catch(() => undefined);
+            } else {
+              toast.error(getActionErrorMessage("start live sync", error));
+            }
             setState((s) => ({
               ...s,
               session: session ?? null,

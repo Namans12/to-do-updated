@@ -71,6 +71,15 @@ describe("Node Connections API", () => {
     return { res, body: await res.json() };
   }
 
+  async function addConnectionItem(connectionId: string, todoId: string, parentTodoId?: string) {
+    const res = await ctx.app.request(`/api/connections/${connectionId}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(parentTodoId ? { todoId, parentTodoId } : { todoId }),
+    });
+    return { res, body: await res.json() };
+  }
+
   // ─── POST /api/connections ─────────────────────────
 
   describe("POST /api/connections", () => {
@@ -574,6 +583,26 @@ describe("Node Connections API", () => {
       expect(res.status).toBe(400);
       expect(body.error).toContain("endpoint");
     });
+
+    it("should reject merging an existing branch tree", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const branch = await createTodo(testGroupId, "branch");
+      const seqA = await createTodo(testGroupId, "seq a");
+      const seqB = await createTodo(testGroupId, "seq b");
+
+      await createConnection([root.id, branch.id], "Branch Tree", "branch");
+      await createConnection([seqA.id, seqB.id], "Sequence");
+
+      const res = await ctx.app.request("/api/connections/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromTodoId: branch.id, toTodoId: seqA.id }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("branch trees");
+    });
   });
 
   // ─── POST /api/connections/:id/cut ─────────────────────────
@@ -602,6 +631,24 @@ describe("Node Connections API", () => {
       const listRes = await ctx.app.request("/api/connections");
       const listBody = await listRes.json();
       expect(listBody.data).toHaveLength(2);
+    });
+
+    it("should reject cutting a branch tree", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const child = await createTodo(testGroupId, "child");
+
+      const { body: createBody } = await createConnection([root.id, child.id], "Branch Tree", "branch");
+      const connectionId = createBody.data.id;
+
+      const res = await ctx.app.request(`/api/connections/${connectionId}/cut`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromTodoId: root.id, toTodoId: child.id }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("not supported for branch trees");
     });
   });
 
@@ -753,6 +800,83 @@ describe("Node Connections API", () => {
       expect(res.status).toBe(404);
       expect(body.error).toContain("not found or is deleted");
     });
+
+    it("should add a nested branch child and preserve preorder", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const child = await createTodo(testGroupId, "child");
+      const grandchild = await createTodo(testGroupId, "grandchild");
+
+      const { body: createBody } = await createConnection([root.id, child.id], "Branch Tree", "branch");
+      const connectionId = createBody.data.id;
+
+      const { res, body } = await addConnectionItem(connectionId, grandchild.id, child.id);
+
+      expect(res.status).toBe(200);
+      expect(body.data.items.map((item: any) => item.todo_id)).toEqual([root.id, child.id, grandchild.id]);
+      expect(body.data.items[0].parent_todo_id).toBeNull();
+      expect(body.data.items[1].parent_todo_id).toBe(root.id);
+      expect(body.data.items[2].parent_todo_id).toBe(child.id);
+      expect(body.data.progress.available_count).toBe(1);
+      expect(body.data.progress.blocked_count).toBe(2);
+      expect(body.data.progress.next_available_item_id).toBe(root.id);
+
+      await completeTodo(root.id);
+
+      const detailRes = await ctx.app.request(`/api/connections/${connectionId}`);
+      const detailBody = await detailRes.json();
+      expect(detailBody.data.progress.available_count).toBe(1);
+      expect(detailBody.data.progress.blocked_count).toBe(1);
+      expect(detailBody.data.progress.next_available_item_id).toBe(child.id);
+    });
+
+    it("should reject adding a third child under the same branch parent", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const childA = await createTodo(testGroupId, "child a");
+      const childB = await createTodo(testGroupId, "child b");
+      const childC = await createTodo(testGroupId, "child c");
+
+      const { body: createBody } = await createConnection(
+        [root.id, childA.id, childB.id],
+        "Wide Branch",
+        "branch"
+      );
+      const connectionId = createBody.data.id;
+
+      const { res, body } = await addConnectionItem(connectionId, childC.id, root.id);
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("at most 2 children");
+    });
+
+    it("should allow a branch chain up to depth 7 and reject an eighth node", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const level2 = await createTodo(testGroupId, "level 2");
+      const level3 = await createTodo(testGroupId, "level 3");
+      const level4 = await createTodo(testGroupId, "level 4");
+      const level5 = await createTodo(testGroupId, "level 5");
+      const level6 = await createTodo(testGroupId, "level 6");
+      const level7 = await createTodo(testGroupId, "level 7");
+      const level8 = await createTodo(testGroupId, "level 8");
+
+      const { body: createBody } = await createConnection([root.id, level2.id], "Deep Branch", "branch");
+      const connectionId = createBody.data.id;
+
+      let addResult = await addConnectionItem(connectionId, level3.id, level2.id);
+      expect(addResult.res.status).toBe(200);
+      addResult = await addConnectionItem(connectionId, level4.id, level3.id);
+      expect(addResult.res.status).toBe(200);
+      addResult = await addConnectionItem(connectionId, level5.id, level4.id);
+      expect(addResult.res.status).toBe(200);
+      addResult = await addConnectionItem(connectionId, level6.id, level5.id);
+      expect(addResult.res.status).toBe(200);
+      addResult = await addConnectionItem(connectionId, level7.id, level6.id);
+      expect(addResult.res.status).toBe(200);
+
+      const { res, body } = await addConnectionItem(connectionId, level8.id, level7.id);
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("at most 7 items");
+    });
   });
 
   // ─── DELETE /api/connections/:id/items/:todoId ─────────────────────────
@@ -864,6 +988,42 @@ describe("Node Connections API", () => {
 
       expect(res.status).toBe(404);
       expect(body.error).toContain("not part of this connection");
+    });
+
+    it("should reject removing the root of a branch tree", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const child = await createTodo(testGroupId, "child");
+
+      const { body: createBody } = await createConnection([root.id, child.id], "Branch Tree", "branch");
+      const connectionId = createBody.data.id;
+
+      const res = await ctx.app.request(
+        `/api/connections/${connectionId}/items/${root.id}`,
+        { method: "DELETE" }
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Cannot remove the root");
+    });
+
+    it("should reject removing a non-leaf branch node", async () => {
+      const root = await createTodo(testGroupId, "root");
+      const child = await createTodo(testGroupId, "child");
+      const grandchild = await createTodo(testGroupId, "grandchild");
+
+      const { body: createBody } = await createConnection([root.id, child.id], "Branch Tree", "branch");
+      const connectionId = createBody.data.id;
+      await addConnectionItem(connectionId, grandchild.id, child.id);
+
+      const res = await ctx.app.request(
+        `/api/connections/${connectionId}/items/${child.id}`,
+        { method: "DELETE" }
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Only leaf branch nodes can be removed");
     });
   });
 
@@ -1128,20 +1288,24 @@ describe("Node Connections API", () => {
   });
 
   describe("Branch rules", () => {
-    it("should reject branch connections with more than 3 items", async () => {
+    it("should create flat legacy branch items with root parent links", async () => {
       const todo1 = await createTodo(testGroupId, "root");
       const todo2 = await createTodo(testGroupId, "branch a");
       const todo3 = await createTodo(testGroupId, "branch b");
-      const todo4 = await createTodo(testGroupId, "branch c");
 
       const { res, body } = await createConnection(
-        [todo1.id, todo2.id, todo3.id, todo4.id],
-        "Too Wide",
+        [todo1.id, todo2.id, todo3.id],
+        "Flat Branch",
         "branch"
       );
 
-      expect(res.status).toBe(400);
-      expect(body.error).toContain("at most 3 items");
+      expect(res.status).toBe(201);
+      expect(body.data.items[0].parent_todo_id).toBeNull();
+      expect(body.data.items[1].parent_todo_id).toBe(todo1.id);
+      expect(body.data.items[2].parent_todo_id).toBe(todo1.id);
+      expect(body.data.progress.available_count).toBe(1);
+      expect(body.data.progress.blocked_count).toBe(2);
+      expect(body.data.progress.next_available_item_id).toBe(todo1.id);
     });
   });
 

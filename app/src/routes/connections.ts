@@ -9,6 +9,20 @@ import { logActivity } from "../lib/activity.js";
 type DbOverride = ReturnType<typeof getDb>;
 const CONNECTION_KINDS = ["sequence", "dependency", "branch", "related"] as const;
 type ConnectionKind = (typeof CONNECTION_KINDS)[number];
+const MAX_CONNECTION_ITEMS = 7;
+const MAX_BRANCH_CHILDREN = 2;
+const MAX_BRANCH_DEPTH = 7;
+type ConnectionResponseItem = {
+  id: string;
+  todo_id: string;
+  parent_todo_id: string | null;
+  title: string;
+  is_completed: number;
+  high_priority: number;
+  completed_at: string | null;
+  created_at: string;
+  position: number;
+};
 
 function normalizeConnectionKind(value: unknown): ConnectionKind | null {
   if (value === undefined || value === null || value === "") return "sequence";
@@ -19,22 +33,150 @@ function normalizeConnectionKind(value: unknown): ConnectionKind | null {
     : null;
 }
 
-/**
- * Helper: build the response shape for a connection with its items and progress.
- */
-function buildConnectionResponse(
-  connection: { id: string; name: string | null; kind: string; created_at: string },
-  items: Array<{
-    id: string;
-    todo_id: string;
-    title: string;
-    is_completed: number;
-    high_priority: number;
-    completed_at: string | null;
-    created_at: string;
-    position: number;
-  }>
+function normalizeBranchItems<T extends { todo_id: string; parent_todo_id: string | null; position: number }>(
+  items: T[]
 ) {
+  const ordered = [...items].sort((a, b) => a.position - b.position);
+  const root = ordered.find((item) => item.parent_todo_id == null) ?? ordered[0] ?? null;
+  return ordered.map((item) => ({
+    ...item,
+    parent_todo_id:
+      item.parent_todo_id ?? (root && item.todo_id !== root.todo_id ? root.todo_id : null),
+  }));
+}
+
+function getBranchChildren<T extends { todo_id: string; parent_todo_id: string | null; position: number }>(
+  items: T[],
+  parentTodoId: string | null
+) {
+  return items
+    .filter((item) => item.parent_todo_id === parentTodoId)
+    .sort((a, b) => a.position - b.position);
+}
+
+function getBranchItemsPreorder<T extends { todo_id: string; parent_todo_id: string | null; position: number }>(
+  items: T[]
+) {
+  const normalized = normalizeBranchItems(items);
+  const ordered: T[] = [];
+  const visit = (parentTodoId: string | null) => {
+    for (const child of getBranchChildren(normalized, parentTodoId)) {
+      ordered.push(child);
+      visit(child.todo_id);
+    }
+  };
+  visit(null);
+  return ordered;
+}
+
+function validateBranchItems<T extends { todo_id: string; parent_todo_id: string | null; position: number }>(
+  rawItems: T[]
+) {
+  if (rawItems.length > MAX_CONNECTION_ITEMS) {
+    return `Connections can have at most ${MAX_CONNECTION_ITEMS} items.`;
+  }
+
+  const items = normalizeBranchItems(rawItems);
+  const roots = items.filter((item) => item.parent_todo_id == null);
+  if (roots.length !== 1) {
+    return "Branch connections must have exactly one root task.";
+  }
+
+  const byTodoId = new Map(items.map((item) => [item.todo_id, item] as const));
+  const childrenByParent = new Map<string | null, T[]>();
+  for (const item of items) {
+    if (item.parent_todo_id && !byTodoId.has(item.parent_todo_id)) {
+      return "Branch parent must exist inside the same connection.";
+    }
+    const siblings = childrenByParent.get(item.parent_todo_id) ?? [];
+    siblings.push(item);
+    childrenByParent.set(item.parent_todo_id, siblings);
+  }
+
+  for (const [parentTodoId, children] of childrenByParent.entries()) {
+    if (parentTodoId != null && children.length > MAX_BRANCH_CHILDREN) {
+      return `Branch nodes can have at most ${MAX_BRANCH_CHILDREN} children.`;
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const root = roots[0]!;
+
+  const walk = (todoId: string, depth: number): string | null => {
+    if (depth > MAX_BRANCH_DEPTH) {
+      return `Branch connections can have at most depth ${MAX_BRANCH_DEPTH}.`;
+    }
+    if (visiting.has(todoId)) {
+      return "Branch connections cannot contain cycles.";
+    }
+    if (visited.has(todoId)) {
+      return null;
+    }
+
+    visiting.add(todoId);
+    for (const child of getBranchChildren(items, todoId)) {
+      const error = walk(child.todo_id, depth + 1);
+      if (error) return error;
+    }
+    visiting.delete(todoId);
+    visited.add(todoId);
+    return null;
+  };
+
+  const walkError = walk(root.todo_id, 1);
+  if (walkError) return walkError;
+  if (visited.size !== items.length) {
+    return "Branch connections must form a single rooted tree.";
+  }
+
+  return null;
+}
+
+function buildBranchProgress(items: ConnectionResponseItem[]) {
+  const normalized = normalizeBranchItems(items);
+  const total = normalized.length;
+  const completed = normalized.filter((item) => item.is_completed === 1).length;
+  const ordered = getBranchItemsPreorder(normalized);
+  const byTodoId = new Map(normalized.map((item) => [item.todo_id, item] as const));
+
+  const isAvailable = (item: ConnectionResponseItem) => {
+    let parentId = item.parent_todo_id;
+    while (parentId) {
+      const parent = byTodoId.get(parentId);
+      if (!parent || parent.is_completed !== 1) return false;
+      parentId = parent.parent_todo_id;
+    }
+    return item.is_completed !== 1;
+  };
+
+  const available = ordered.filter((item) => isAvailable(item));
+  const blocked = ordered.filter((item) => item.is_completed !== 1 && !available.some((candidate) => candidate.todo_id === item.todo_id));
+
+  const incompleteSet = new Set(normalized.filter((item) => item.is_completed !== 1).map((item) => item.todo_id));
+  const longestPath = (parentTodoId: string | null): number => {
+    let best = 0;
+    for (const child of getBranchChildren(normalized, parentTodoId)) {
+      const selfCost = incompleteSet.has(child.todo_id) ? 1 : 0;
+      best = Math.max(best, selfCost + longestPath(child.todo_id));
+    }
+    return best;
+  };
+
+  return {
+    total,
+    completed,
+    percentage: total > 0 ? Math.round((completed / total) * 100) : 0,
+    blocked_count: blocked.length,
+    available_count: available.length,
+    next_available_item_id: available[0]?.todo_id ?? null,
+    blocked_titles: blocked.map((item) => item.title),
+    next_unlock_title: blocked[0]?.title ?? null,
+    critical_path_length: longestPath(null),
+  };
+}
+
+function buildConnectionProgress(kind: ConnectionKind, items: ConnectionResponseItem[]) {
   const total = items.length;
   const completed = items.filter((i) => i.is_completed === 1).length;
   const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -46,7 +188,7 @@ function buildConnectionResponse(
   let nextUnlockTitle: string | null = incompleteItems[1]?.title ?? null;
   let criticalPathLength = incompleteItems.length;
 
-  if (connection.kind === "dependency") {
+  if (kind === "dependency") {
     const firstIncompleteIndex = items.findIndex((item) => item.is_completed !== 1);
     if (firstIncompleteIndex === -1) {
       availableCount = 0;
@@ -66,23 +208,41 @@ function buildConnectionResponse(
       nextUnlockTitle = blockedItems[0]?.title ?? null;
       criticalPathLength = items.slice(firstIncompleteIndex).filter((item) => item.is_completed !== 1).length;
     }
-  } else if (connection.kind === "branch") {
-    const root = items[0] ?? null;
-    const branchItems = items.slice(1);
-    const rootIncomplete = !!root && root.is_completed !== 1;
-    if (rootIncomplete) {
-      availableCount = 1;
-      blockedCount = branchItems.filter((item) => item.is_completed !== 1).length;
-      nextAvailableItemId = root.todo_id;
-    } else {
-      availableCount = incompleteItems.length;
-      blockedCount = 0;
-      nextAvailableItemId = incompleteItems[0]?.todo_id ?? null;
-      blockedTitles = [];
-      nextUnlockTitle = incompleteItems[0]?.title ?? null;
-      criticalPathLength = incompleteItems.length;
-    }
+  } else if (kind === "branch") {
+    return buildBranchProgress(items);
   }
+
+  return {
+    total,
+    completed,
+    percentage,
+    blocked_count: blockedCount,
+    available_count: availableCount,
+    next_available_item_id: nextAvailableItemId,
+    blocked_titles: blockedTitles,
+    next_unlock_title: nextUnlockTitle,
+    critical_path_length: criticalPathLength,
+  };
+}
+
+/**
+ * Helper: build the response shape for a connection with its items and progress.
+ */
+function buildConnectionResponse(
+  connection: { id: string; name: string | null; kind: string; created_at: string },
+  items: Array<{
+    id: string;
+    todo_id: string;
+    parent_todo_id: string | null;
+    title: string;
+    is_completed: number;
+    high_priority: number;
+    completed_at: string | null;
+    created_at: string;
+    position: number;
+  }>
+) {
+  const progress = buildConnectionProgress(connection.kind as ConnectionKind, items);
 
   return {
     id: connection.id,
@@ -91,6 +251,7 @@ function buildConnectionResponse(
     items: items.map((i) => ({
       id: i.id,
       todo_id: i.todo_id,
+      parent_todo_id: i.parent_todo_id,
       title: i.title,
       is_completed: i.is_completed,
       high_priority: i.high_priority,
@@ -98,18 +259,8 @@ function buildConnectionResponse(
       created_at: i.created_at,
       position: i.position,
     })),
-    progress: {
-      total,
-      completed,
-      percentage,
-      blocked_count: blockedCount,
-      available_count: availableCount,
-      next_available_item_id: nextAvailableItemId,
-      blocked_titles: blockedTitles,
-      next_unlock_title: nextUnlockTitle,
-      critical_path_length: criticalPathLength,
-    },
-    is_fully_complete: total > 0 && completed === total,
+    progress,
+    is_fully_complete: progress.total > 0 && progress.completed === progress.total,
     created_at: connection.created_at,
   };
 }
@@ -144,6 +295,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       .select({
         id: connectionItems.id,
         todo_id: connectionItems.todo_id,
+        parent_todo_id: connectionItems.parent_todo_id,
         title: todos.title,
         is_completed: todos.is_completed,
         high_priority: todos.high_priority,
@@ -178,9 +330,9 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
-      if (todoIds.length > 7) {
+      if (todoIds.length > MAX_CONNECTION_ITEMS) {
         return c.json(
-          { error: "Connections can have at most 7 items" },
+          { error: `Connections can have at most ${MAX_CONNECTION_ITEMS} items` },
           400
         );
       }
@@ -250,15 +402,9 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           400
         );
       }
-      if (normalizedKind === "branch" && todoIds.length > 3) {
+      if (todoIds.length > MAX_CONNECTION_ITEMS) {
         return c.json(
-          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
-          400
-        );
-      }
-      if (todoIds.length > 7) {
-        return c.json(
-          { error: "Connections can have at most 7 items" },
+          { error: `Connections can have at most ${MAX_CONNECTION_ITEMS} items` },
           400
         );
       }
@@ -294,6 +440,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           })
           .run();
 
+        const rootTodoId = normalizedKind === "branch" ? todoIds[0] : null;
         for (let i = 0; i < todoIds.length; i++) {
           drizzleDb
             .insert(connectionItems)
@@ -301,6 +448,8 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
               id: uuidv4(),
               connection_id: connectionId,
               todo_id: todoIds[i],
+              parent_todo_id:
+                normalizedKind === "branch" ? (i === 0 ? null : rootTodoId) : null,
               position: i,
             })
             .run();
@@ -316,6 +465,14 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         .get()!;
 
       const items = getConnectionItems(drizzleDb, connectionId);
+      if (normalizedKind === "branch") {
+        const branchError = validateBranchItems(items);
+        if (branchError) {
+          drizzleDb.delete(connectionItems).where(eq(connectionItems.connection_id, connectionId)).run();
+          drizzleDb.delete(connections).where(eq(connections.id, connectionId)).run();
+          return c.json({ error: branchError }, 400);
+        }
+      }
       const response = buildConnectionResponse(connection, items);
       logActivity(drizzleDb, {
         entity_type: "connection",
@@ -447,11 +604,11 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
       const existingItems = getConnectionItems(drizzleDb, id);
-      if (normalizedKind === "branch" && existingItems.length > 3) {
-        return c.json(
-          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
-          400
-        );
+      if (normalizedKind === "branch") {
+        const branchError = validateBranchItems(existingItems);
+        if (branchError) {
+          return c.json({ error: branchError }, 400);
+        }
       }
 
       drizzleDb
@@ -571,6 +728,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       if (!fromConnection || !toConnection) {
         return c.json({ error: "One of the connections was not found" }, 404);
       }
+      if (fromConnection.kind === "branch" || toConnection.kind === "branch") {
+        return c.json(
+          { error: "Merging existing branch trees is not supported. Attach new child tasks directly to a branch node." },
+          400
+        );
+      }
 
       const fromItems = getConnectionItems(drizzleDb, fromConnectionId);
       const toItems = getConnectionItems(drizzleDb, toConnectionId);
@@ -636,19 +799,13 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
       }
 
       const mergedTodoIds = [...primaryChain, ...secondaryChain];
-      if (mergedTodoIds.length > 7) {
+      if (mergedTodoIds.length > MAX_CONNECTION_ITEMS) {
         return c.json(
-          { error: "Merged connection exceeds max depth of 7 items" },
+          { error: `Merged connection exceeds max depth of ${MAX_CONNECTION_ITEMS} items` },
           400
         );
       }
       const mergedKind = primary.kind;
-      if (mergedKind === "branch" && mergedTodoIds.length > 3) {
-        return c.json(
-          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
-          400
-        );
-      }
       const dedup = new Set(mergedTodoIds);
       if (dedup.size !== mergedTodoIds.length) {
         return c.json({ error: "Merged chain produced duplicate todos" }, 400);
@@ -743,6 +900,12 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
 
       if (!connection) {
         return c.json({ error: "Connection not found" }, 404);
+      }
+      if (connection.kind === "branch") {
+        return c.json(
+          { error: "Cut is not supported for branch trees. Remove a leaf branch node instead." },
+          400
+        );
       }
 
       const items = getConnectionItems(drizzleDb, connectionId);
@@ -872,7 +1035,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
     try {
       const connectionId = c.req.param("id");
       const body = await c.req.json();
-      const { todoId } = body;
+      const { todoId, parentTodoId } = body;
 
       if (!todoId || typeof todoId !== "string" || todoId.trim().length === 0) {
         return c.json(
@@ -881,7 +1044,7 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
 
-      const { db: drizzleDb } = db();
+      const { db: drizzleDb, sqlite } = db();
 
       // Check connection exists
       const connection = drizzleDb
@@ -943,38 +1106,96 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         );
       }
 
-      // Get the max position within this connection
-      const maxPosResult = drizzleDb
-        .select({
-          maxPos: sql<number>`COALESCE(MAX(${connectionItems.position}), -1)`,
-        })
-        .from(connectionItems)
-        .where(eq(connectionItems.connection_id, connectionId))
-        .get();
-      const nextPosition = (maxPosResult?.maxPos ?? -1) + 1;
-      if (nextPosition >= 7) {
+      const existingItems = getConnectionItems(drizzleDb, connectionId);
+      if (existingItems.length + 1 > MAX_CONNECTION_ITEMS) {
         return c.json(
-          { error: "Connections can have at most 7 items" },
-          400
-        );
-      }
-      if (connection.kind === "branch" && nextPosition >= 3) {
-        return c.json(
-          { error: "Branch connections can include at most 3 items (1 root + 2 branches)" },
+          { error: `Connections can have at most ${MAX_CONNECTION_ITEMS} items` },
           400
         );
       }
 
-      // Insert the new connection item
-      drizzleDb
-        .insert(connectionItems)
-        .values({
-          id: uuidv4(),
-          connection_id: connectionId,
-          todo_id: todoId,
-          position: nextPosition,
-        })
-        .run();
+      let nextPosition = existingItems.length;
+      let normalizedParentTodoId: string | null = null;
+
+      if (connection.kind === "branch") {
+        if (typeof parentTodoId !== "string" || parentTodoId.trim().length === 0) {
+          return c.json({ error: "parentTodoId is required when adding to a branch tree" }, 400);
+        }
+        normalizedParentTodoId = parentTodoId;
+        const branchItems = normalizeBranchItems(existingItems);
+        const parent = branchItems.find((item) => item.todo_id === normalizedParentTodoId);
+        if (!parent) {
+          return c.json({ error: "Branch parent was not found in this connection" }, 400);
+        }
+        const directChildren = branchItems.filter((item) => item.parent_todo_id === normalizedParentTodoId);
+        if (directChildren.length >= MAX_BRANCH_CHILDREN) {
+          return c.json(
+            { error: `Branch nodes can have at most ${MAX_BRANCH_CHILDREN} children.` },
+            400
+          );
+        }
+
+        const byTodoId = new Map(branchItems.map((item) => [item.todo_id, item] as const));
+        let parentDepth = 1;
+        let cursorParentId = parent.parent_todo_id;
+        while (cursorParentId) {
+          parentDepth += 1;
+          cursorParentId = byTodoId.get(cursorParentId)?.parent_todo_id ?? null;
+        }
+        if (parentDepth + 1 > MAX_BRANCH_DEPTH) {
+          return c.json(
+            { error: `Branch connections can have at most depth ${MAX_BRANCH_DEPTH}.` },
+            400
+          );
+        }
+
+        const descendants = new Set<string>();
+        const collectDescendants = (todoIdToExpand: string) => {
+          for (const child of getBranchChildren(branchItems, todoIdToExpand)) {
+            descendants.add(child.todo_id);
+            collectDescendants(child.todo_id);
+          }
+        };
+        collectDescendants(normalizedParentTodoId);
+        const subtreePositions = branchItems
+          .filter((item) => item.todo_id === normalizedParentTodoId || descendants.has(item.todo_id))
+          .map((item) => item.position);
+        nextPosition = Math.max(...subtreePositions) + 1;
+      }
+
+      const transaction = sqlite.transaction(() => {
+        if (connection.kind === "branch") {
+          drizzleDb
+            .update(connectionItems)
+            .set({ position: sql`${connectionItems.position} + 1` })
+            .where(
+              and(
+                eq(connectionItems.connection_id, connectionId),
+                sql`${connectionItems.position} >= ${nextPosition}`
+              )
+            )
+            .run();
+        }
+
+        drizzleDb
+          .insert(connectionItems)
+          .values({
+            id: uuidv4(),
+            connection_id: connectionId,
+            todo_id: todoId,
+            parent_todo_id: normalizedParentTodoId,
+            position: nextPosition,
+          })
+          .run();
+      });
+      transaction();
+
+      if (connection.kind === "branch") {
+        const branchError = validateBranchItems(getConnectionItems(drizzleDb, connectionId));
+        if (branchError) {
+          return c.json({ error: branchError }, 400);
+        }
+      }
 
       // Return the updated connection
       const items = getConnectionItems(drizzleDb, connectionId);
@@ -1140,6 +1361,20 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
           404
         );
       }
+      if (connection.kind === "branch") {
+        const items = normalizeBranchItems(getConnectionItems(drizzleDb, connectionId));
+        const target = items.find((entry) => entry.todo_id === todoId);
+        if (!target) {
+          return c.json({ error: "Todo is not part of this connection" }, 404);
+        }
+        if (target.parent_todo_id == null) {
+          return c.json({ error: "Cannot remove the root of a branch tree." }, 400);
+        }
+        const hasChildren = items.some((entry) => entry.parent_todo_id === todoId);
+        if (hasChildren) {
+          return c.json({ error: "Remove child branches first. Only leaf branch nodes can be removed." }, 400);
+        }
+      }
 
       // Count current items in the connection
       const countResult = drizzleDb
@@ -1177,16 +1412,35 @@ export function createConnectionsRouter(dbOverride?: DbOverride) {
         });
       }
 
-      // Remove the item
-      drizzleDb
-        .delete(connectionItems)
-        .where(
-          and(
-            eq(connectionItems.connection_id, connectionId),
-            eq(connectionItems.todo_id, todoId)
+      const remainingTodoIds = getConnectionItems(drizzleDb, connectionId)
+        .filter((entry) => entry.todo_id !== todoId)
+        .map((entry) => entry.todo_id);
+
+      const transaction = sqlite.transaction(() => {
+        drizzleDb
+          .delete(connectionItems)
+          .where(
+            and(
+              eq(connectionItems.connection_id, connectionId),
+              eq(connectionItems.todo_id, todoId)
+            )
           )
-        )
-        .run();
+          .run();
+
+        for (let position = 0; position < remainingTodoIds.length; position += 1) {
+          drizzleDb
+            .update(connectionItems)
+            .set({ position })
+            .where(
+              and(
+                eq(connectionItems.connection_id, connectionId),
+                eq(connectionItems.todo_id, remainingTodoIds[position]!)
+              )
+            )
+            .run();
+        }
+      });
+      transaction();
 
       // Return updated connection
       const updatedConnection = drizzleDb

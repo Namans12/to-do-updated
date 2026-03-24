@@ -45,6 +45,7 @@ export const connectionItems = sqliteTable("connection_items", {
     .notNull()
     .references(() => todos.id)
     .unique(),
+  parent_todo_id: text("parent_todo_id"),
   position: integer("position").notNull().default(0),
 });
 

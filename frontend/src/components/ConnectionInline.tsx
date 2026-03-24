@@ -4,7 +4,13 @@ import type { Connection } from "../types";
 import { Check, Share2, Zap, ChevronDown, ChevronUp, Trash2, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
-import { connectionKindMeta, getConnectionNextItem, getConnectionSequenceLabel } from "../utils/connectionKinds";
+import {
+  connectionKindMeta,
+  getBranchDepthByTodoId,
+  getBranchItemsPreorder,
+  getConnectionNextItem,
+  getConnectionSequenceLabel,
+} from "../utils/connectionKinds";
 import { PROGRESS_BAR_WIDTH_TRANSITION_MS } from "../utils/motion";
 
 interface ConnectionInlineProps {
@@ -22,9 +28,11 @@ function ConnectionInline({
 }: ConnectionInlineProps) {
   const [expanded, setExpanded] = useState(false);
   const { progress, is_fully_complete } = connection;
+  const orderedItems = connection.kind === "branch" ? getBranchItemsPreorder(connection) : connection.items;
+  const branchDepths = connection.kind === "branch" ? getBranchDepthByTodoId(connection) : new Map<string, number>();
 
   const nextTask = getConnectionNextItem(connection);
-  const nextTaskIndex = connection.items.findIndex((item) => item.todo_id === nextTask?.todo_id);
+  const nextTaskIndex = orderedItems.findIndex((item) => item.todo_id === nextTask?.todo_id);
   const hasHighlightedTodo = !!(
     highlightTodoId && connection.items.some((item) => item.todo_id === highlightTodoId)
   );
@@ -203,11 +211,13 @@ function ConnectionInline({
                 </div>
               ) : null}
               <div className="pl-1 pt-2">
-                {connection.items.map((item, index) => {
+                {orderedItems.map((item, index) => {
                   const isNext = index === nextTaskIndex;
-                  const nextItem = connection.items[index + 1];
+                  const nextItem = orderedItems[index + 1];
                   const isDone = item.is_completed === 1;
                   const isNextDone = nextItem?.is_completed === 1;
+                  const depth = branchDepths.get(item.todo_id) ?? 0;
+                  const rowIndent = connection.kind === "branch" ? depth * 14 : 0;
 
                   return (
                     <div
@@ -239,7 +249,7 @@ function ConnectionInline({
                             />
                           )}
                         </button>
-                        {index < connection.items.length - 1 && (
+                        {connection.kind !== "branch" && index < orderedItems.length - 1 && (
                           <div
                             className={`w-0.5 flex-1 min-h-[20px] transition-all duration-500 ${
                               !isDone && !isNextDone
@@ -262,7 +272,7 @@ function ConnectionInline({
                       </div>
 
                       {/* Item text */}
-                      <div className="flex-1 pb-2 relative z-10">
+                      <div className="flex-1 pb-2 relative z-10" style={{ paddingLeft: rowIndent }}>
                         <div className="flex items-center gap-2">
                           <span
                             className={`text-[13px] transition-all duration-300 ${
@@ -300,10 +310,10 @@ function ConnectionInline({
                         </div>
                         <span className="text-[10px] text-slate-400 dark:text-slate-500">
                           {connection.kind === "branch"
-                            ? index === 0
+                            ? depth === 0
                               ? "Root task"
-                              : `Branch ${index} of ${Math.max(connection.items.length - 1, 1)}`
-                            : `Step ${index + 1} of ${connection.items.length}`}
+                              : `Nested branch at depth ${depth}`
+                            : `Step ${index + 1} of ${orderedItems.length}`}
                         </span>
                       </div>
                     </div>

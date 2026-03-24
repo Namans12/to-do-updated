@@ -46,10 +46,13 @@ create table if not exists public.connection_items (
   id text primary key,
   connection_id text not null references public.connections(id) on delete cascade,
   todo_id text not null references public.todos(id) on delete cascade,
+  parent_todo_id text,
   position integer not null default 0,
   created_at timestamptz not null default timezone('utc', now()),
   unique (todo_id)
 );
+
+alter table public.connection_items add column if not exists parent_todo_id text;
 
 create table if not exists public.activity_logs (
   id text primary key,

@@ -16,7 +16,12 @@ import GraphBoundaryOverlay from "./graph/GraphBoundaryOverlay";
 import GraphLegend from "./graph/GraphLegend";
 import GraphConnectionInspector from "./graph/GraphConnectionInspector";
 import GraphTodoInspector from "./graph/GraphTodoInspector";
-import { connectionKindMeta, getConnectionEdgePairs } from "../utils/connectionKinds";
+import {
+  connectionKindMeta,
+  getBranchChildren,
+  getBranchEdgeChildTodoId,
+  getConnectionEdgePairs,
+} from "../utils/connectionKinds";
 
 /* ─── Types ────────────────────────────────────────── */
 
@@ -353,16 +358,48 @@ function buildAutoLayout(
     }
 
     if (conn.kind === "branch") {
-      const root = items[0];
+      const branchConnection: Connection = { ...conn, items };
+      const root = getBranchChildren(branchConnection, null)[0];
       if (!root) continue;
       const baseX = AUTO_LAYOUT_MARGIN;
-      const baseY = laneY + 70;
-      place(root.todo_id, baseX, baseY);
-      const branchOffsets = items.length <= 2 ? [0] : [-140, 140];
-      items.slice(1).forEach((item, index) => {
-        place(item.todo_id, baseX + 280, baseY + (branchOffsets[index] ?? index * 120));
+      const branchColumnGap = 280;
+      const branchLeafGap = 120;
+      let nextLeafY = laneY + 40;
+      const branchTargets = new Map<string, NodePosition>();
+
+      const layoutBranchNode = (todoId: string, depth: number): number => {
+        const nodeHeight = getNodeHeightForId(todoId);
+        const children = getBranchChildren(branchConnection, todoId);
+        const x = baseX + depth * branchColumnGap;
+
+        if (children.length === 0) {
+          const y = nextLeafY;
+          nextLeafY += Math.max(branchLeafGap, nodeHeight + 60);
+          branchTargets.set(todoId, { x, y });
+          return y + nodeHeight / 2;
+        }
+
+        const childCenters = children.map((child) => layoutBranchNode(child.todo_id, depth + 1));
+        const firstCenter = childCenters[0] ?? nextLeafY;
+        const lastCenter = childCenters[childCenters.length - 1] ?? firstCenter;
+        const centerY = (firstCenter + lastCenter) / 2;
+        branchTargets.set(todoId, { x, y: centerY - nodeHeight / 2 });
+        return centerY;
+      };
+
+      layoutBranchNode(root.todo_id, 0);
+      items.forEach((item) => {
+        const target = branchTargets.get(item.todo_id);
+        if (!target) return;
+        place(item.todo_id, target.x, target.y);
       });
-      laneY += 280;
+
+      const branchBottom = items.reduce((max, item) => {
+        const target = branchTargets.get(item.todo_id);
+        if (!target) return max;
+        return Math.max(max, target.y + getNodeHeightForId(item.todo_id));
+      }, laneY + NODE_H);
+      laneY = Math.max(laneY + 200, branchBottom + 100);
       continue;
     }
 
@@ -1922,14 +1959,14 @@ export default function GraphView() {
       const toConn = toConns[0];
 
       if (fromConn && !toConn) {
-        await connectionsApi.addItem(fromConn.id, toId);
+        await connectionsApi.addItem(fromConn.id, toId, fromConn.kind === "branch" ? fromId : undefined);
         queueGraphRefresh({ connections: true });
         toast.success("Connected!");
         return;
       }
 
       if (!fromConn && toConn) {
-        await connectionsApi.addItem(toConn.id, fromId);
+        await connectionsApi.addItem(toConn.id, fromId, toConn.kind === "branch" ? toId : undefined);
         queueGraphRefresh({ connections: true });
         toast.success("Connected!");
         return;
@@ -1959,12 +1996,29 @@ export default function GraphView() {
 
   const cutEdge = async (connectionId: string, fromId: string, toId: string) => {
     try {
-      await connectionsApi.cut(connectionId, fromId, toId);
+      const connection = groupConnections.find((item) => item.id === connectionId) ?? null;
+      if (!connection) {
+        throw new Error("Connection not found");
+      }
+
+      if (connection.kind === "branch") {
+        const branchTodoId = getBranchEdgeChildTodoId(connection, fromId, toId);
+
+        if (!branchTodoId) {
+          throw new Error("Select a direct parent-child branch edge.");
+        }
+
+        await connectionsApi.removeItem(connectionId, branchTodoId);
+      } else {
+        await connectionsApi.cut(connectionId, fromId, toId);
+      }
+
       if (selectedConnectionId === connectionId) {
         setSelectedConnectionId(null);
+        setSelectedConnectionEdge(null);
       }
       queueGraphRefresh({ connections: true });
-      toast.success("Connection cut");
+      toast.success(connection.kind === "branch" ? "Branch edge removed" : "Connection cut");
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed to cut connection");
     }
@@ -2060,18 +2114,14 @@ export default function GraphView() {
       const toIndex = selectedConnection.items.findIndex((item) => item.todo_id === toId);
       const isAdjacent = fromIndex !== -1 && toIndex !== -1 && Math.abs(fromIndex - toIndex) === 1;
 
-      if (isAdjacent) {
-        await connectionsApi.cut(selectedConnection.id, fromId, toId);
-      } else if (selectedConnection.kind === "branch") {
-        const rootTodoId = selectedConnection.items[0]?.todo_id;
-        if (!rootTodoId) {
-          throw new Error("Invalid branch connection.");
-        }
-        const branchTodoId = fromId === rootTodoId ? toId : toId === rootTodoId ? fromId : null;
+      if (selectedConnection.kind === "branch") {
+        const branchTodoId = getBranchEdgeChildTodoId(selectedConnection, fromId, toId);
         if (!branchTodoId) {
-          throw new Error("Select a branch edge connected to the root.");
+          throw new Error("Select a direct parent-child branch edge.");
         }
         await connectionsApi.removeItem(selectedConnection.id, branchTodoId);
+      } else if (isAdjacent) {
+        await connectionsApi.cut(selectedConnection.id, fromId, toId);
       } else {
         throw new Error("This edge cannot be removed directly. Try cut mode on an adjacent edge.");
       }
@@ -2227,13 +2277,11 @@ export default function GraphView() {
   };
 
   const toggleCutMode = () => {
-    setIsCutMode((prev) => {
-      const next = !prev;
-      if (next) {
-        toast("Cut mode: click an edge to disconnect", { id: "cut-mode" });
-      }
-      return next;
-    });
+    const next = !isCutMode;
+    setIsCutMode(next);
+    if (next) {
+      toast("Cut mode: click an edge to disconnect", { id: "cut-mode" });
+    }
   };
 
   useEffect(() => {
@@ -2605,7 +2653,7 @@ export default function GraphView() {
                   const path = `M ${touch.from.x} ${touch.from.y} L ${touch.to.x} ${touch.to.y}`;
 
                   return (
-                    <g key={`${conn.id}-${item.id}-adj-line`}>
+                    <g key={`${edgeKey}-adj-line`}>
                       <path
                         d={path}
                         fill="none"
@@ -2651,7 +2699,7 @@ export default function GraphView() {
                 const partialGradId = `edge-partial-${conn.id}-${item.todo_id}-${next.todo_id}`;
 
                 return (
-                  <g key={`${conn.id}-${item.id}-edge`}>
+                  <g key={`${edgeKey}-edge`}>
                     {oneDone && (
                       <defs>
                         <linearGradient
@@ -2773,7 +2821,7 @@ export default function GraphView() {
                   if (!isCutMode) {
                     // Render junction dot
                     return (
-                      <g key={`${conn.id}-${item.id}-adj`}>
+                      <g key={`${edgeKey}-adj`}>
                         <circle
                           cx={cx}
                           cy={cy}
@@ -2796,7 +2844,7 @@ export default function GraphView() {
                     );
                   }
                   return (
-                    <g key={`${conn.id}-${item.id}-adj-cut`}>
+                    <g key={`${edgeKey}-adj-cut`}>
                       <circle
                         cx={cx}
                         cy={cy}
@@ -2904,7 +2952,7 @@ export default function GraphView() {
                 };
 
                 return (
-                  <g key={`${conn.id}-${item.id}-interactive`}>
+                  <g key={`${edgeKey}-interactive`}>
                     {/* Glow edge when hovering in cut mode */}
                     {isHoverCut && (
                       <path

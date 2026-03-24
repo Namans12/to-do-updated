@@ -116,6 +116,7 @@ describe("Database Setup", () => {
     expect(columnNames).toContain("id");
     expect(columnNames).toContain("connection_id");
     expect(columnNames).toContain("todo_id");
+    expect(columnNames).toContain("parent_todo_id");
     expect(columnNames).toContain("position");
   });
 

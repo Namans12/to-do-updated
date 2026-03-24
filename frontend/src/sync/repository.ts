@@ -9,6 +9,7 @@ import type {
   TrashGroup,
   TrashItem,
 } from "../types";
+import { getBranchItemsPreorder } from "../utils/connectionKinds";
 import { isBrowserOnline, syncDebugEnabled } from "./config";
 import {
   deletePendingOperation,
@@ -44,6 +45,7 @@ type ConnectionItemRow = {
   id: string;
   connection_id: string;
   todo_id: string;
+  parent_todo_id: string | null;
   position: number;
   created_at: string;
 };
@@ -92,7 +94,10 @@ let flushPromise: Promise<void> | null = null;
 let remoteSnapshotPromise: Promise<SyncCacheSnapshot> | null = null;
 const REALTIME_REFRESH_DEBOUNCE_MS = 180;
 const MAX_CONNECTION_ITEMS = 7;
-const MAX_BRANCH_ITEMS = 3;
+const MAX_BRANCH_CHILDREN = 2;
+const MAX_BRANCH_DEPTH = 7;
+const CONNECTION_ITEM_SELECT_FULL = "id,connection_id,todo_id,parent_todo_id,position,created_at";
+const CONNECTION_ITEM_SELECT_LEGACY = "id,connection_id,todo_id,position";
 
 function debugSyncLog(...args: unknown[]) {
   if (!syncDebugEnabled) return;
@@ -116,6 +121,85 @@ function isMissingColumnOrRelationError(error: unknown) {
     message.includes("relation") ||
     message.includes("does not exist")
   );
+}
+
+function normalizeConnectionItemRows(rows: Array<Record<string, unknown>> | null | undefined): ConnectionItemRow[] {
+  return (rows ?? []).map((row) => ({
+    id: String(row.id ?? ""),
+    connection_id: String(row.connection_id ?? ""),
+    todo_id: String(row.todo_id ?? ""),
+    parent_todo_id: typeof row.parent_todo_id === "string" ? row.parent_todo_id : null,
+    position: typeof row.position === "number" ? row.position : Number(row.position ?? 0),
+    created_at: typeof row.created_at === "string" ? row.created_at : "",
+  }));
+}
+
+function isLegacyCompatibleConnectionItemRows(rows: ConnectionItemRow[]) {
+  const rootTodoId = rows.find((row) => row.position === 0)?.todo_id ?? rows[0]?.todo_id ?? null;
+  return rows.every((row) => row.parent_todo_id == null || row.parent_todo_id === rootTodoId);
+}
+
+function getBranchRootTodoId(items: Array<{ todo_id: string; parent_todo_id: string | null; position: number }>) {
+  return items.find((item) => item.parent_todo_id == null)?.todo_id ?? items[0]?.todo_id ?? null;
+}
+
+function getEffectiveBranchParentTodoId(
+  items: Array<{ todo_id: string; parent_todo_id: string | null; position: number }>,
+  item: { todo_id: string; parent_todo_id: string | null }
+) {
+  if (item.parent_todo_id) return item.parent_todo_id;
+  const rootTodoId = getBranchRootTodoId(items);
+  if (!rootTodoId || rootTodoId === item.todo_id) return null;
+  return rootTodoId;
+}
+
+async function fetchConnectionItemsRows(apply: (query: any) => any) {
+  if (!supabase) throw new Error("Supabase sync is not configured.");
+  let result = await apply(supabase.from("connection_items").select(CONNECTION_ITEM_SELECT_FULL));
+  if (result.error && isMissingColumnOrRelationError(result.error)) {
+    result = await apply(supabase.from("connection_items").select(CONNECTION_ITEM_SELECT_LEGACY));
+  }
+  if (result.error) throw result.error;
+  return normalizeConnectionItemRows(result.data as Array<Record<string, unknown>> | null);
+}
+
+async function fetchConnectionItemsForConnection(connectionId: string) {
+  const rows = await fetchConnectionItemsRows((query) =>
+    query.eq("connection_id", connectionId).order("position", { ascending: true })
+  );
+  return rows;
+}
+
+async function fetchConnectionItemsForConnections(connectionIds: string[]) {
+  if (connectionIds.length === 0) return [];
+  const rows = await fetchConnectionItemsRows((query) =>
+    query.in("connection_id", connectionIds).order("position", { ascending: true })
+  );
+  return rows;
+}
+
+async function insertConnectionItemRows(rows: ConnectionItemRow[]) {
+  if (!supabase || rows.length === 0) return;
+  let error = (await supabase.from("connection_items").insert(rows)).error;
+  if (!error) return;
+  if (!isMissingColumnOrRelationError(error)) throw error;
+
+  const withoutCreatedAt = rows.map(({ created_at: _createdAt, ...row }) => row);
+  error = (await supabase.from("connection_items").insert(withoutCreatedAt)).error;
+  if (!error) return;
+  if (!isMissingColumnOrRelationError(error)) throw error;
+
+  if (!isLegacyCompatibleConnectionItemRows(rows)) {
+    throw new Error(
+      "Your Supabase connection_items table is missing parent_todo_id. Apply the latest schema before using nested branch connections."
+    );
+  }
+
+  const withoutBranchParentAndCreatedAt = rows.map(
+    ({ parent_todo_id: _parentTodoId, created_at: _createdAt, ...row }) => row
+  );
+  error = (await supabase.from("connection_items").insert(withoutBranchParentAndCreatedAt)).error;
+  if (error) throw error;
 }
 
 function isDuplicateTodoTitleConstraintError(error: unknown) {
@@ -279,23 +363,52 @@ function buildConnectionProgress(kind: ConnectionKind, items: ConnectionItem[]) 
     nextAvailableItemId = next?.todo_id ?? null;
     criticalPathLength = Math.max(0, total - completed);
   } else if (kind === "branch") {
-    const root = items[0] ?? null;
-    const children = items.slice(1);
-    if (root && root.is_completed !== 1) {
-      nextAvailableItemId = root.todo_id;
-      availableCount = 1;
-      blockedTitles = children
-        .filter((item) => item.is_completed !== 1)
-        .map((item) => item.title);
-      blockedCount = blockedTitles.length;
-      nextUnlockTitle = blockedTitles[0] ?? null;
-    } else {
-      const next = children.find((item) => item.is_completed !== 1) ?? null;
-      nextAvailableItemId = next?.todo_id ?? null;
-      blockedCount = 0;
-      availableCount = children.filter((item) => item.is_completed !== 1).length;
-      criticalPathLength = availableCount;
-    }
+    const ordered = getBranchItemsPreorder({
+      id: "branch-progress",
+      name: null,
+      kind: "branch",
+      items,
+      progress: {
+        total: 0,
+        completed: 0,
+        percentage: 0,
+        blocked_count: 0,
+        available_count: 0,
+        next_available_item_id: null,
+      },
+      is_fully_complete: false,
+      created_at: "",
+    });
+    const byTodoId = new Map(items.map((item) => [item.todo_id, item] as const));
+    const available = ordered.filter((item) => {
+      if (item.is_completed === 1) return false;
+      let parentId = item.parent_todo_id;
+      while (parentId) {
+        const parent = byTodoId.get(parentId);
+        if (!parent || parent.is_completed !== 1) return false;
+        parentId = parent.parent_todo_id;
+      }
+      return true;
+    });
+    const availableIds = new Set(available.map((item) => item.todo_id));
+    const blocked = ordered.filter((item) => item.is_completed !== 1 && !availableIds.has(item.todo_id));
+    const incompleteIds = new Set(items.filter((item) => item.is_completed !== 1).map((item) => item.todo_id));
+    const longestPath = (parentTodoId: string | null): number => {
+      let best = 0;
+      for (const child of items
+        .filter((item) => (item.parent_todo_id ?? (ordered[0]?.todo_id === item.todo_id ? null : ordered[0]?.todo_id ?? null)) === parentTodoId)
+        .sort((a, b) => a.position - b.position)) {
+        const selfCost = incompleteIds.has(child.todo_id) ? 1 : 0;
+        best = Math.max(best, selfCost + longestPath(child.todo_id));
+      }
+      return best;
+    };
+    nextAvailableItemId = available[0]?.todo_id ?? null;
+    availableCount = available.length;
+    blockedTitles = blocked.map((item) => item.title);
+    blockedCount = blockedTitles.length;
+    nextUnlockTitle = blockedTitles[0] ?? null;
+    criticalPathLength = longestPath(null);
   } else {
     const firstIncompleteIndex = items.findIndex((item) => item.is_completed !== 1);
     if (firstIncompleteIndex === -1) {
@@ -344,6 +457,7 @@ function buildConnections(
     const mapped: ConnectionItem = {
       id: item.id,
       todo_id: item.todo_id,
+      parent_todo_id: item.parent_todo_id,
       title: todo.title,
       is_completed: todo.is_completed,
       high_priority: todo.high_priority,
@@ -386,6 +500,7 @@ function buildConnectionsFromSnapshotDraft(snapshot: SyncCacheSnapshot): Connect
           if (!todo || todo.deleted_at) return null;
           return {
             ...item,
+            parent_todo_id: item.parent_todo_id ?? null,
             title: todo.title,
             is_completed: todo.is_completed,
             high_priority: todo.high_priority,
@@ -449,13 +564,7 @@ async function fetchRemoteSnapshot() {
 
     let itemRows: ConnectionItemRow[] = [];
     if (connectionIds.length > 0) {
-      const itemsRes = await supabase
-        .from("connection_items")
-        .select("*")
-        .in("connection_id", connectionIds)
-        .order("position", { ascending: true });
-      if (itemsRes.error) throw itemsRes.error;
-      itemRows = itemsRes.data as ConnectionItemRow[];
+      itemRows = await fetchConnectionItemsForConnections(connectionIds);
     }
 
     connections = buildConnections(
@@ -709,8 +818,8 @@ function buildMergedTodoIds(
   if (mergedTodoIds.length > MAX_CONNECTION_ITEMS) {
     throw new Error("Merged connection exceeds max depth of 7 items.");
   }
-  if (mergedKind === "branch" && mergedTodoIds.length > MAX_BRANCH_ITEMS) {
-    throw new Error("Branch connections can include at most 3 items (1 root + 2 branches).");
+  if (mergedKind === "branch") {
+    throw new Error("Merging existing branch trees is not supported. Attach new child tasks directly to a branch node.");
   }
   if (new Set(mergedTodoIds).size !== mergedTodoIds.length) {
     throw new Error("Merged chain produced duplicate tasks.");
@@ -719,24 +828,15 @@ function buildMergedTodoIds(
   return mergedTodoIds;
 }
 
-function ensureConnectionSizeAllowed(kind: ConnectionKind, itemCount: number) {
+function ensureConnectionSizeAllowed(_kind: ConnectionKind, itemCount: number) {
   if (itemCount > MAX_CONNECTION_ITEMS) {
     throw new Error("Connections can have at most 7 items.");
-  }
-  if (kind === "branch" && itemCount > MAX_BRANCH_ITEMS) {
-    throw new Error("Branch connections can include at most 3 items (1 root + 2 branches).");
   }
 }
 
 async function remoteCleanupConnection(connectionId: string) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
-  const { data, error } = await supabase
-    .from("connection_items")
-    .select("*")
-    .eq("connection_id", connectionId)
-    .order("position", { ascending: true });
-  if (error) throw error;
-  const items = data as ConnectionItemRow[];
+  const items = await fetchConnectionItemsForConnection(connectionId);
   if (items.length >= 2) return;
   await supabase.from("connection_items").delete().eq("connection_id", connectionId);
   await supabase
@@ -1076,11 +1176,11 @@ async function createConnectionRemote(
     id: crypto.randomUUID(),
     connection_id: id,
     todo_id: todoId,
+    parent_todo_id: kind === "branch" ? (index === 0 ? null : todoIds[0] ?? null) : null,
     position: index,
     created_at: timestamp,
   }));
-  const { error: itemError } = await supabase.from("connection_items").insert(itemRows);
-  if (itemError) throw itemError;
+  await insertConnectionItemRows(itemRows);
   await writeRemoteActivity("connection", id, "created", `Created a ${kind} connection.`, {
     todoIds,
     name: name ?? null,
@@ -1099,7 +1199,7 @@ async function updateConnectionRemote(id: string, data: Record<string, unknown>)
   await writeRemoteActivity("connection", id, "updated", "Updated connection details.", data);
 }
 
-async function addConnectionItemRemote(connectionId: string, todoId: string) {
+async function addConnectionItemRemote(connectionId: string, todoId: string, parentTodoId?: string | null) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
   const existingConnectionId = await findConnectionRowByTodoId(todoId);
   if (existingConnectionId) {
@@ -1112,23 +1212,78 @@ async function addConnectionItemRemote(connectionId: string, todoId: string) {
     .maybeSingle();
   if (connectionError) throw connectionError;
   if (!connectionRow) throw new Error("Connection not found.");
-  const { data, error } = await supabase
-    .from("connection_items")
-    .select("position")
-    .eq("connection_id", connectionId)
-    .order("position", { ascending: false })
-    .limit(1);
-  if (error) throw error;
-  const nextPosition = ((data?.[0]?.position as number | undefined) ?? -1) + 1;
-  ensureConnectionSizeAllowed(connectionRow.kind as ConnectionKind, nextPosition + 1);
-  const { error: insertError } = await supabase.from("connection_items").insert({
+  const items = (await fetchConnectionItemsForConnection(connectionId)).map((item) => ({
+    todo_id: item.todo_id,
+    parent_todo_id: item.parent_todo_id,
+    position: item.position,
+  }));
+  let nextPosition = ((items[items.length - 1]?.position as number | undefined) ?? -1) + 1;
+  let normalizedParentTodoId: string | null = null;
+
+  if ((connectionRow.kind as ConnectionKind) === "branch") {
+    if (!parentTodoId) {
+      throw new Error("parentTodoId is required when adding to a branch tree.");
+    }
+    normalizedParentTodoId = parentTodoId;
+    const parent = items.find((item) => item.todo_id === parentTodoId);
+    if (!parent) {
+      throw new Error("Branch parent was not found in this connection.");
+    }
+    const directChildren = items.filter(
+      (item) => getEffectiveBranchParentTodoId(items, item) === parentTodoId
+    );
+    if (directChildren.length >= MAX_BRANCH_CHILDREN) {
+      throw new Error(`Branch nodes can have at most ${MAX_BRANCH_CHILDREN} children.`);
+    }
+    const byTodoId = new Map(items.map((item) => [item.todo_id, item] as const));
+    let parentDepth = 1;
+    let cursorParentId = getEffectiveBranchParentTodoId(items, parent);
+    while (cursorParentId) {
+      parentDepth += 1;
+      const ancestor = byTodoId.get(cursorParentId);
+      cursorParentId = ancestor ? getEffectiveBranchParentTodoId(items, ancestor) : null;
+    }
+    if (parentDepth + 1 > MAX_BRANCH_DEPTH) {
+      throw new Error(`Branch connections can have at most depth ${MAX_BRANCH_DEPTH}.`);
+    }
+    const descendants = new Set<string>();
+    const collectDescendants = (currentTodoId: string) => {
+      for (const child of items
+        .filter((item) => getEffectiveBranchParentTodoId(items, item) === currentTodoId)
+        .sort((a, b) => a.position - b.position)) {
+        descendants.add(child.todo_id);
+        collectDescendants(child.todo_id);
+      }
+    };
+    collectDescendants(parentTodoId);
+    nextPosition =
+      Math.max(
+        parent.position,
+        ...items.filter((item) => item.todo_id === parentTodoId || descendants.has(item.todo_id)).map((item) => item.position)
+      ) + 1;
+
+    const rowsToShift = items
+      .filter((item) => item.position >= nextPosition)
+      .sort((first, second) => second.position - first.position);
+    for (const row of rowsToShift) {
+      const { error: shiftError } = await supabase
+        .from("connection_items")
+        .update({ position: row.position + 1 })
+        .eq("connection_id", connectionId)
+        .eq("todo_id", row.todo_id);
+      if (shiftError) throw shiftError;
+    }
+  }
+
+  ensureConnectionSizeAllowed(connectionRow.kind as ConnectionKind, items.length + 1);
+  await insertConnectionItemRows([{
     id: crypto.randomUUID(),
     connection_id: connectionId,
     todo_id: todoId,
+    parent_todo_id: normalizedParentTodoId,
     position: nextPosition,
     created_at: nowIso(),
-  });
-  if (insertError) throw insertError;
+  }]);
   await writeRemoteActivity("connection", connectionId, "item_added", "Added a task to the connection.", {
     todoId,
   });
@@ -1165,6 +1320,9 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
   const targetConnection = (connectionRows ?? []).find((row) => row.id === toConnectionId);
   if (!sourceConnection || !targetConnection) {
     throw new Error("One of the connections was not found.");
+  }
+  if (sourceConnection.kind === "branch" || targetConnection.kind === "branch") {
+    throw new Error("Merging existing branch trees is not supported. Attach new child tasks directly to a branch node.");
   }
 
   const { data: sourceItems, error: sourceItemsError } = await supabase
@@ -1224,11 +1382,11 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
     id: crypto.randomUUID(),
     connection_id: primary.id,
     todo_id: todoId,
+    parent_todo_id: null,
     position: index,
     created_at: nowIso(),
   }));
-  const { error: insertError } = await supabase.from("connection_items").insert(rows);
-  if (insertError) throw insertError;
+  await insertConnectionItemRows(rows);
   await writeRemoteActivity("connection", primary.id, "merged", "Merged two connections.", {
     fromTodoId,
     toTodoId,
@@ -1238,13 +1396,16 @@ async function mergeConnectionsRemote(fromTodoId: string, toTodoId: string) {
 
 async function cutConnectionRemote(connectionId: string, fromTodoId: string, toTodoId: string) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
-  const { data, error } = await supabase
-    .from("connection_items")
-    .select("*")
-    .eq("connection_id", connectionId)
-    .order("position", { ascending: true });
-  if (error) throw error;
-  const items = data as ConnectionItemRow[];
+  const { data: connectionRow, error: connectionError } = await supabase
+    .from("connections")
+    .select("kind")
+    .eq("id", connectionId)
+    .maybeSingle();
+  if (connectionError) throw connectionError;
+  if (connectionRow?.kind === "branch") {
+    throw new Error("Cut is not supported for branch trees. Remove a leaf branch node instead.");
+  }
+  const items = await fetchConnectionItemsForConnection(connectionId);
   const firstIndex = items.findIndex((item) => item.todo_id === fromTodoId);
   const secondIndex = items.findIndex((item) => item.todo_id === toTodoId);
   if (firstIndex === -1 || secondIndex === -1 || Math.abs(firstIndex - secondIndex) !== 1) {
@@ -1256,11 +1417,12 @@ async function cutConnectionRemote(connectionId: string, fromTodoId: string, toT
 
   await supabase.from("connection_items").delete().eq("connection_id", connectionId);
   if (left.length >= 2) {
-    await supabase.from("connection_items").insert(
+    await insertConnectionItemRows(
       left.map((item, index) => ({
         id: crypto.randomUUID(),
         connection_id: connectionId,
         todo_id: item.todo_id,
+        parent_todo_id: item.parent_todo_id ?? null,
         position: index,
         created_at: nowIso(),
       }))
@@ -1292,12 +1454,7 @@ async function cutConnectionRemote(connectionId: string, fromTodoId: string, toT
 
 async function reorderConnectionItemsRemote(connectionId: string, todoIds: string[]) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
-  const { data, error } = await supabase
-    .from("connection_items")
-    .select("*")
-    .eq("connection_id", connectionId);
-  if (error) throw error;
-  const rows = data as ConnectionItemRow[];
+  const rows = await fetchConnectionItemsForConnection(connectionId);
   const rowByTodoId = new Map(rows.map((row) => [row.todo_id, row]));
   for (let index = 0; index < todoIds.length; index += 1) {
     const row = rowByTodoId.get(todoIds[index]!);
@@ -1312,12 +1469,39 @@ async function reorderConnectionItemsRemote(connectionId: string, todoIds: strin
 
 async function removeConnectionItemRemote(connectionId: string, todoId: string) {
   if (!supabase) throw new Error("Supabase sync is not configured.");
-  const { error } = await supabase
+  const { data: connectionRow, error: connectionError } = await supabase
+    .from("connections")
+    .select("kind")
+    .eq("id", connectionId)
+    .maybeSingle();
+  if (connectionError) throw connectionError;
+  const items = await fetchConnectionItemsForConnection(connectionId);
+  if (connectionRow?.kind === "branch") {
+    const target = items.find((item) => item.todo_id === todoId);
+    if (!target) throw new Error("Task is not part of this connection.");
+    if (getEffectiveBranchParentTodoId(items, target) == null) {
+      throw new Error("Cannot remove the root of a branch tree.");
+    }
+    if (items.some((item) => getEffectiveBranchParentTodoId(items, item) === todoId)) {
+      throw new Error("Remove child branches first. Only leaf branch nodes can be removed.");
+    }
+  }
+  const { error: deleteError } = await supabase
     .from("connection_items")
     .delete()
     .eq("connection_id", connectionId)
     .eq("todo_id", todoId);
-  if (error) throw error;
+  if (deleteError) throw deleteError;
+
+  const remaining = items.filter((item) => item.todo_id !== todoId);
+  for (let index = 0; index < remaining.length; index += 1) {
+    const row = remaining[index]!;
+    const { error: updateError } = await supabase
+      .from("connection_items")
+      .update({ position: index })
+      .eq("id", row.id);
+    if (updateError) throw updateError;
+  }
   await remoteCleanupConnection(connectionId);
 }
 
@@ -1389,7 +1573,11 @@ async function applyQueuedOperation(operation: PendingOperation) {
       await updateConnectionRemote(operation.payload.id as string, operation.payload.data as Record<string, unknown>);
       return;
     case "connection.addItem":
-      await addConnectionItemRemote(operation.payload.connectionId as string, operation.payload.todoId as string);
+      await addConnectionItemRemote(
+        operation.payload.connectionId as string,
+        operation.payload.todoId as string,
+        (operation.payload.parentTodoId as string | null | undefined) ?? null
+      );
       return;
     case "connection.merge":
       await mergeConnectionsRemote(operation.payload.fromTodoId as string, operation.payload.toTodoId as string);
@@ -2067,6 +2255,7 @@ export const syncedConnectionsApi = {
             return {
               id: crypto.randomUUID(),
               todo_id: todo.id,
+              parent_todo_id: normalizedKind === "branch" ? (index === 0 ? null : todoIds[0] ?? null) : null,
               title: todo.title,
               is_completed: todo.is_completed,
               high_priority: todo.high_priority,
@@ -2135,10 +2324,10 @@ export const syncedConnectionsApi = {
         return next;
       }
     ),
-  addItem: async (connectionId: string, todoId: string) =>
+  addItem: async (connectionId: string, todoId: string, parentTodoId?: string | null) =>
     withOfflineFallback(
       async () => {
-        await addConnectionItemRemote(connectionId, todoId);
+        await addConnectionItemRemote(connectionId, todoId, parentTodoId);
         const snapshot = await getSnapshot();
         const todo = snapshot.todos.find((item) => item.id === todoId);
         if (!todo) throw new Error("Task not found.");
@@ -2146,24 +2335,56 @@ export const syncedConnectionsApi = {
           draft.connections = draft.connections.map((connection) => {
             if (connection.id !== connectionId) return connection;
             ensureConnectionSizeAllowed(connection.kind, connection.items.length + 1);
-            const items = [
-              ...connection.items,
-              {
-                id: crypto.randomUUID(),
-                todo_id: todoId,
-                title: todo.title,
-                is_completed: todo.is_completed,
-                high_priority: todo.high_priority,
-                completed_at: todo.completed_at,
-                created_at: todo.created_at,
-                position: connection.items.length,
-              },
-            ];
+            const items = [...connection.items];
+            let insertPosition = items.length;
+            let normalizedParentTodoId: string | null = null;
+            if (connection.kind === "branch") {
+              if (!parentTodoId) throw new Error("parentTodoId is required when adding to a branch tree.");
+              normalizedParentTodoId = parentTodoId;
+              const directChildren = items.filter(
+                (item) => getEffectiveBranchParentTodoId(items, item) === parentTodoId
+              );
+              if (directChildren.length >= MAX_BRANCH_CHILDREN) {
+                throw new Error(`Branch nodes can have at most ${MAX_BRANCH_CHILDREN} children.`);
+              }
+              const descendants = new Set<string>();
+              const collectDescendants = (currentTodoId: string) => {
+                for (const child of items
+                  .filter((item) => getEffectiveBranchParentTodoId(items, item) === currentTodoId)
+                  .sort((a, b) => a.position - b.position)) {
+                  descendants.add(child.todo_id);
+                  collectDescendants(child.todo_id);
+                }
+              };
+              collectDescendants(parentTodoId);
+              const parent = items.find((item) => item.todo_id === parentTodoId);
+              if (!parent) throw new Error("Branch parent was not found in this connection.");
+              insertPosition =
+                Math.max(
+                  parent.position,
+                  ...items.filter((item) => item.todo_id === parentTodoId || descendants.has(item.todo_id)).map((item) => item.position)
+                ) + 1;
+            }
+            const shifted = items.map((item) =>
+              item.position >= insertPosition ? { ...item, position: item.position + 1 } : item
+            );
+            const nextItem = {
+              id: crypto.randomUUID(),
+              todo_id: todoId,
+              parent_todo_id: normalizedParentTodoId,
+              title: todo.title,
+              is_completed: todo.is_completed,
+              high_priority: todo.high_priority,
+              completed_at: todo.completed_at,
+              created_at: todo.created_at,
+              position: insertPosition,
+            };
+            const itemsNext = [...shifted, nextItem].sort((a, b) => a.position - b.position);
             return {
               ...connection,
-              items,
-              progress: buildConnectionProgress(connection.kind, items),
-              is_fully_complete: items.length > 0 && items.every((item) => item.is_completed === 1),
+              items: itemsNext,
+              progress: buildConnectionProgress(connection.kind, itemsNext),
+              is_fully_complete: itemsNext.length > 0 && itemsNext.every((item) => item.is_completed === 1),
             };
           });
         });
@@ -2179,29 +2400,63 @@ export const syncedConnectionsApi = {
           draft.connections = draft.connections.map((connection) => {
             if (connection.id !== connectionId) return connection;
             ensureConnectionSizeAllowed(connection.kind, connection.items.length + 1);
-            const items = [
-              ...connection.items,
+            const items = [...connection.items];
+            let insertPosition = items.length;
+            let normalizedParentTodoId: string | null = null;
+            if (connection.kind === "branch") {
+              if (!parentTodoId) throw new Error("parentTodoId is required when adding to a branch tree.");
+              normalizedParentTodoId = parentTodoId;
+              const directChildren = items.filter(
+                (item) => getEffectiveBranchParentTodoId(items, item) === parentTodoId
+              );
+              if (directChildren.length >= MAX_BRANCH_CHILDREN) {
+                throw new Error(`Branch nodes can have at most ${MAX_BRANCH_CHILDREN} children.`);
+              }
+              const descendants = new Set<string>();
+              const collectDescendants = (currentTodoId: string) => {
+                for (const child of items
+                  .filter((item) => getEffectiveBranchParentTodoId(items, item) === currentTodoId)
+                  .sort((a, b) => a.position - b.position)) {
+                  descendants.add(child.todo_id);
+                  collectDescendants(child.todo_id);
+                }
+              };
+              collectDescendants(parentTodoId);
+              const parent = items.find((item) => item.todo_id === parentTodoId);
+              if (!parent) throw new Error("Branch parent was not found in this connection.");
+              insertPosition =
+                Math.max(
+                  parent.position,
+                  ...items.filter((item) => item.todo_id === parentTodoId || descendants.has(item.todo_id)).map((item) => item.position)
+                ) + 1;
+            }
+            const shifted = items.map((item) =>
+              item.position >= insertPosition ? { ...item, position: item.position + 1 } : item
+            );
+            const itemsNext = [
+              ...shifted,
               {
                 id: crypto.randomUUID(),
                 todo_id: todoId,
+                parent_todo_id: normalizedParentTodoId,
                 title: todo.title,
                 is_completed: todo.is_completed,
                 high_priority: todo.high_priority,
                 completed_at: todo.completed_at,
                 created_at: todo.created_at,
-                position: connection.items.length,
+                position: insertPosition,
               },
-            ];
+            ].sort((a, b) => a.position - b.position);
             return {
               ...connection,
-              items,
-              progress: buildConnectionProgress(connection.kind, items),
+              items: itemsNext,
+              progress: buildConnectionProgress(connection.kind, itemsNext),
             };
           });
         });
         await queueOperation({
           kind: "connection.addItem",
-          payload: { connectionId, todoId },
+          payload: { connectionId, todoId, parentTodoId: parentTodoId ?? null },
         });
       }
     ),
@@ -2243,6 +2498,9 @@ export const syncedConnectionsApi = {
           throw new Error("Both tasks must already belong to a connection.");
         }
         if (fromConnection.id === toConnection.id) return fromConnection;
+        if (fromConnection.kind === "branch" || toConnection.kind === "branch") {
+          throw new Error("Merging existing branch trees is not supported. Attach new child tasks directly to a branch node.");
+        }
 
         const mergeInputs = [
           {
@@ -2371,6 +2629,16 @@ export const syncedConnectionsApi = {
           draft.connections = draft.connections
             .map((connection) => {
               if (connection.id !== connectionId) return connection;
+              if (connection.kind === "branch") {
+                const target = connection.items.find((item) => item.todo_id === todoId);
+                if (!target) throw new Error("Task is not part of this connection.");
+                if (getEffectiveBranchParentTodoId(connection.items, target) == null) {
+                  throw new Error("Cannot remove the root of a branch tree.");
+                }
+                if (connection.items.some((item) => getEffectiveBranchParentTodoId(connection.items, item) === todoId)) {
+                  throw new Error("Remove child branches first. Only leaf branch nodes can be removed.");
+                }
+              }
               const items = connection.items
                 .filter((item) => item.todo_id !== todoId)
                 .map((item, index) => ({ ...item, position: index }));
@@ -2389,6 +2657,16 @@ export const syncedConnectionsApi = {
           draft.connections = draft.connections
             .map((connection) => {
               if (connection.id !== connectionId) return connection;
+              if (connection.kind === "branch") {
+                const target = connection.items.find((item) => item.todo_id === todoId);
+                if (!target) throw new Error("Task is not part of this connection.");
+                if (getEffectiveBranchParentTodoId(connection.items, target) == null) {
+                  throw new Error("Cannot remove the root of a branch tree.");
+                }
+                if (connection.items.some((item) => getEffectiveBranchParentTodoId(connection.items, item) === todoId)) {
+                  throw new Error("Remove child branches first. Only leaf branch nodes can be removed.");
+                }
+              }
               const items = connection.items
                 .filter((item) => item.todo_id !== todoId)
                 .map((item, index) => ({ ...item, position: index }));

@@ -38,14 +38,80 @@ export const connectionKindMeta: Record<
   },
 };
 
+function getBranchRoot(connection: Connection) {
+  return (
+    connection.items.find((item) => item.parent_todo_id == null) ??
+    connection.items[0] ??
+    null
+  );
+}
+
+function getEffectiveBranchParentId(connection: Connection, item: ConnectionItem) {
+  if (item.parent_todo_id) return item.parent_todo_id;
+  const root = getBranchRoot(connection);
+  if (!root || root.todo_id === item.todo_id) return null;
+  return root.todo_id;
+}
+
+export function getBranchEdgeChildTodoId(connection: Connection, fromTodoId: string, toTodoId: string) {
+  if (connection.kind !== "branch") return null;
+  const fromItem = connection.items.find((item) => item.todo_id === fromTodoId) ?? null;
+  const toItem = connection.items.find((item) => item.todo_id === toTodoId) ?? null;
+  if (!fromItem || !toItem) return null;
+  if (getEffectiveBranchParentId(connection, toItem) === fromTodoId) return toTodoId;
+  if (getEffectiveBranchParentId(connection, fromItem) === toTodoId) return fromTodoId;
+  return null;
+}
+
+export function getBranchChildren(connection: Connection, parentTodoId: string | null) {
+  return connection.items
+    .filter((item) => getEffectiveBranchParentId(connection, item) === parentTodoId)
+    .sort((a, b) => a.position - b.position);
+}
+
+export function getBranchDepthByTodoId(connection: Connection) {
+  const depths = new Map<string, number>();
+  const root = getBranchRoot(connection);
+  if (!root) return depths;
+
+  const visit = (parentTodoId: string | null, depth: number) => {
+    for (const child of getBranchChildren(connection, parentTodoId)) {
+      depths.set(child.todo_id, depth);
+      visit(child.todo_id, depth + 1);
+    }
+  };
+
+  visit(null, 0);
+  if (!depths.has(root.todo_id)) {
+    depths.set(root.todo_id, 0);
+  }
+  return depths;
+}
+
+export function getBranchItemsPreorder(connection: Connection) {
+  const ordered: ConnectionItem[] = [];
+  const visit = (parentTodoId: string | null) => {
+    for (const child of getBranchChildren(connection, parentTodoId)) {
+      ordered.push(child);
+      visit(child.todo_id);
+    }
+  };
+  visit(null);
+  return ordered.length > 0 ? ordered : [...connection.items].sort((a, b) => a.position - b.position);
+}
+
 export function getConnectionEdgePairs(connection: Connection) {
   if (connection.kind === "branch") {
-    const root = connection.items[0];
-    if (!root) return [];
-    return connection.items.slice(1).map((item) => ({
-      from: root.todo_id,
-      to: item.todo_id,
-    }));
+    return connection.items
+      .map((item) => {
+        const parentTodoId = getEffectiveBranchParentId(connection, item);
+        if (!parentTodoId) return null;
+        return {
+          from: parentTodoId,
+          to: item.todo_id,
+        };
+      })
+      .filter(Boolean) as Array<{ from: string; to: string }>;
   }
 
   return connection.items
@@ -71,7 +137,8 @@ export function getConnectionSequenceLabel(
   item: ConnectionItem
 ) {
   if (connection.kind === "branch") {
-    return index === 0 ? "Root" : `Branch ${index}`;
+    const depth = getBranchDepthByTodoId(connection).get(item.todo_id) ?? 0;
+    return depth === 0 ? "Root" : `Branch L${depth}`;
   }
   if (connection.kind === "dependency") {
     if (connection.progress.next_available_item_id === item.todo_id) {

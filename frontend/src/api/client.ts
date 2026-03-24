@@ -179,10 +179,10 @@ const restConnectionsApi = {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
-  addItem: (connectionId: string, todoId: string) =>
+  addItem: (connectionId: string, todoId: string, parentTodoId?: string | null) =>
     request<void>(`/connections/${connectionId}/items`, {
       method: "POST",
-      body: JSON.stringify({ todoId }),
+      body: JSON.stringify({ todoId, parentTodoId }),
     }),
   merge: (fromTodoId: string, toTodoId: string) =>
     request<Connection>("/connections/merge", {
